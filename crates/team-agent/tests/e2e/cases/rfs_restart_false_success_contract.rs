@@ -13,8 +13,7 @@ use crate::framework::*;
 use crate::support::source_walker::source_tree;
 use crate::support::topology_issue_ids::{
     LEADER_PANE_ID_COLLIDES_WITH_AGENT, LEADER_RECEIVER_SOCKET_MISMATCH,
-    ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET,
-    TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, TMUX_ENDPOINT_SOCKET_CONFLICT,
+    ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET, TMUX_ENDPOINT_SOCKET_CONFLICT,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -112,11 +111,14 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_canonical_readiness() {
         Some(false),
         "RFS RED: diagnose must mark endpoint/socket split-brain dirty; json={body}"
     );
-    reverse_issue_order(&mut body);
+    assert_doctor_repair_is_not_team_destructive(&body, "R3 RED");
+    // 262f6cdb: doctor v1 reports links, not typed topology issues. The topology
+    // ids are asserted on the refused restart body instead, as in R1.
+    // TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET is retired with the v1 inventory.
+    // M3 excision: RECENT_COORDINATOR_SESSION_MISSING needs the retired tick's session_missing events.
+    body = refused_restart_body(&ws, ws_path, "R3 RED");
     assert_issue_id(&body, TMUX_ENDPOINT_SOCKET_CONFLICT, "R3 RED");
     assert_issue_id(&body, LEADER_RECEIVER_SOCKET_MISMATCH, "R3 RED");
-    assert_issue_id(&body, TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, "R3 RED");
-    // M3 excision: RECENT_COORDINATOR_SESSION_MISSING needs the retired tick's session_missing events.
 }
 
 #[test]
@@ -147,8 +149,12 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     assert_team_session_live_on_endpoint(&old_socket, &session_name);
 
     let out = run_ta(&ws, &["doctor", "--workspace", ws_path, "--json"]);
-    let mut body = out.json();
-    reverse_issue_order(&mut body);
+    let doctor = out.json();
+    assert_doctor_repair_is_not_team_destructive(&doctor, "RFS orphan positive control");
+    // 262f6cdb: doctor v1 reports links, not typed topology issues. The topology
+    // ids are asserted on the refused restart body instead, as in R1.
+    // TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET is retired with the v1 inventory.
+    let body = refused_restart_body(&ws, ws_path, "RFS orphan positive control");
     assert_issue_id(
         &body,
         TMUX_ENDPOINT_SOCKET_CONFLICT,
@@ -162,11 +168,6 @@ fn rfs_diagnose_orphan_issue_requires_live_same_team_session_on_old_endpoint() {
     assert_issue_id(
         &body,
         ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET,
-        "RFS orphan positive control",
-    );
-    assert_issue_id(
-        &body,
-        TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET,
         "RFS orphan positive control",
     );
     // M3 excision: RECENT_COORDINATOR_SESSION_MISSING was derived from the retired tick's
@@ -508,6 +509,40 @@ fn assert_issue_id(body: &Value, expected: &str, context: &str) {
         issue_ids(body).contains(expected),
         "{context}: issue id set must contain {expected}; json={body}"
     );
+}
+
+/// Doctor's repair suggestion for a dirty topology must never be team-wide
+/// destructive: no stop/shutdown, and a restart must name one agent.
+fn assert_doctor_repair_is_not_team_destructive(doctor: &Value, context: &str) {
+    let argv: Vec<&str> = doctor["next_action"]["argv"]
+        .as_array()
+        .map(|argv| argv.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let command = argv.get(1).copied().unwrap_or_default();
+    assert!(
+        !matches!(command, "stop" | "shutdown")
+            && (command != "restart" || argv.get(2).is_some_and(|agent| !agent.starts_with('-'))),
+        "{context}: doctor next_action must not be team-wide destructive; json={doctor}"
+    );
+}
+
+/// The refused `restart` body for the split topology, as in R1: refused, issue
+/// order reversed for the order-independent id oracle, and no restart.completed ok.
+fn refused_restart_body(ws: &TestWorkspace, ws_path: &str, context: &str) -> Value {
+    let out = run_ta(ws, &["restart", ws_path, "--json"]);
+    let mut body = out.json();
+    assert_eq!(
+        body.pointer("/ok").and_then(Value::as_bool),
+        Some(false),
+        "{context}: restart must refuse the split topology; stdout={body} stderr={}",
+        out.stderr
+    );
+    reverse_issue_order(&mut body);
+    assert!(
+        !restart_completed_ok_after_split(ws),
+        "{context}: restart.completed rc=ok must not be written for split-brain state"
+    );
+    body
 }
 
 fn reverse_issue_order(body: &mut Value) {
