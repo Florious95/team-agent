@@ -2167,8 +2167,34 @@ fn restart_spawn_loop_keeps_failure_isolation_guard() {
 
 #[test]
 fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
+    use crate::transport::*;
+    use std::collections::BTreeMap;
+    // 7cba7b44: pass the initial spawn-identity snapshot, then lose addressability.
+    // Otherwise the earlier ownership refusal never exercises the N38 timeout oracle.
+    struct MissingAfterSpawn(OfflineTransport);
+    impl Transport for MissingAfterSpawn {
+        fn kind(&self) -> BackendKind { self.0.kind() }
+        fn spawn_first(&self, session: &SessionName, window: &WindowName, argv: &[String], cwd: &Path,
+            env: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+            self.0.spawn_first(session, window, argv, cwd, env)
+        }
+        fn spawn_into(&self, session: &SessionName, window: &WindowName, argv: &[String], cwd: &Path,
+            env: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+            self.0.spawn_into(session, window, argv, cwd, env)
+        }
+        fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> { self.0.send_keys(target, keys) }
+        fn capture(&self, target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> { self.0.capture(target, range) }
+        fn query(&self, target: &Target, field: PaneField) -> Result<Option<String>, TransportError> { self.0.query(target, field) }
+        fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> { self.0.liveness(pane) }
+        fn has_pane(&self, _: &PaneId) -> Result<Option<bool>, TransportError> { Ok(Some(false)) }
+        fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> { self.0.list_targets() }
+        fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> { self.0.has_session(session) }
+        fn list_windows(&self, session: &SessionName) -> Result<Vec<WindowName>, TransportError> { self.0.list_windows(session) }
+        fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> { self.0.kill_session(session) }
+        fn kill_window(&self, target: &Target) -> Result<(), TransportError> { self.0.kill_window(target) }
+    }
     let ws = restart_ws_one_resumable_worker();
-    let transport = OfflineTransport::new().with_spawned_panes_addressable(false);
+    let transport = MissingAfterSpawn(OfflineTransport::new());
 
     let result =
         restart_with_transport_with_readiness_deadline(&ws, false, None, &transport, Some(0));
