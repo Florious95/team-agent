@@ -816,6 +816,8 @@ pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleEr
     if dry_run {
         return converge(request, selected.as_ref(), true);
     }
+    // Refuse invalid declarations before creating a lock file; converge revalidates under lock.
+    resolve(request, selected.as_ref())?;
     match selected.as_ref() {
         Some(selected)
             if super::launch::surface_has_runtime_team(&selected.state, &selected.team_key) =>
