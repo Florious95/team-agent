@@ -121,15 +121,20 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
         !output.status.success(),
         "S4QR-001: status without --team must refuse in a multi-alive workspace"
     );
-    assert!(
-        output.stdout.is_empty(),
-        "S4QR-001: refused status must not emit a JSON diagnostic payload; stdout={:?}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 5f0bc003: a --json status refusal is one ok:false error envelope on stdout
+    // (never a status diagnostic payload for a guessed team).
+    let refusal: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!("S4QR-001: --json refusal must be one JSON envelope: {error}; stdout={:?}", String::from_utf8_lossy(&output.stdout))
+    });
+    assert_eq!(refusal["ok"], false, "{refusal}");
+    for diagnostic in ["nodes", "teams", "agents", "team"] {
+        assert!(refusal.get(diagnostic).is_none(),
+            "S4QR-001: refused status must not emit a JSON diagnostic payload; stdout={refusal}");
+    }
+    let stderr = refusal["error"].as_str().unwrap_or_default().to_string();
     assert!(
         stderr.contains("teamA") && stderr.contains("teamB") && stderr.contains("--team"),
-        "S4QR-001: refusal must name candidates and explicit --team recovery; stderr={stderr:?}"
+        "S4QR-001: refusal must name candidates and explicit --team recovery; refusal={refusal}"
     );
 
     // Sanity: explicit --team teamA still works and returns teamA scope.

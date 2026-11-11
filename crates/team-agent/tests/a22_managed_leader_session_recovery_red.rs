@@ -339,47 +339,40 @@ exec \"$real\" -L \"$socket\" \"$@\"
         2,
         "A-22b must retry exactly once after the selected session disappears; targets={targets:?}"
     );
-    // 0.5.x multi-leader window contract (leader/start.rs:3-7 and :916-918):
-    // the first managed leader keeps the bare `claude_code` window, a later
-    // leader joining a session where that name is already taken MUST get a
-    // unique `claude_code-<nonce>` window, otherwise tmux answers
-    // `attach-session -t SESSION:claude_code` with `can't find window`.
-    // This test creates the selected session with `-n claude_code` above, so
-    // the base name is occupied and the suffix is REQUIRED, not optional.
-    // The intent of this assertion is unchanged: the first attach must go to
-    // the selected existing candidate. Only the window literal — which pinned
-    // an implementation shape that the contract above replaced — is relaxed,
-    // and it is replaced by stricter checks on the nonce itself.
+    // 8b09d7b4 isolates fresh leader inception: the launcher no longer adopts
+    // a pre-existing leader session, so the first attach targets a fresh,
+    // isolated managed session (never the pre-existing selected candidate).
+    // Its window is the bare provider window or a nonce window minted by this
+    // launch (leader/start.rs multi-leader window contract).
     let (first_session, first_window) = split_attach_target(&targets[0]);
-    assert_eq!(
+    assert_ne!(
         first_session,
         existing.as_str(),
-        "first attach must use the selected existing candidate; target={}",
+        "first attach must use a fresh isolated session, not adopt the pre-existing one; target={}",
         targets[0]
     );
-    let (first_pid_hex, first_nanos_hex) = parse_provider_window(&first_window, "first")
-        .unwrap_or_else(|| {
-            panic!(
-                "the selected session already owns a `claude_code` window, so the first attach \
-                 must target a nonce-suffixed window (leader/start.rs:919-940); window={first_window}"
-            )
-        });
-    // `nonce` = `<pid_hex>-<epoch_nanos_hex>` (leader/start.rs:857-859, minted
-    // for the window at :961-966). Pin it to THIS launch so a constant or
-    // hardcoded nonce cannot satisfy the shape check above.
-    assert_eq!(
-        u32::from_str_radix(&first_pid_hex, 16).expect("nonce pid segment must parse as hex"),
-        launcher_pid,
-        "window nonce pid segment must be this launcher's pid; nonce_pid_hex={first_pid_hex} \
-         launcher_pid={launcher_pid} window={first_window}"
-    );
-    let first_nonce_nanos =
-        u128::from_str_radix(&first_nanos_hex, 16).expect("nonce epoch segment must parse as hex");
     assert!(
-        (launch_started_nanos..=launch_finished_nanos).contains(&first_nonce_nanos),
-        "window nonce epoch segment must be minted during this launch; \
-         nonce_nanos={first_nonce_nanos} window=[{launch_started_nanos},{launch_finished_nanos}]"
+        first_session.starts_with("team-agent-leader-claude_code-"),
+        "first attach must target a managed claude_code leader session; target={}",
+        targets[0]
     );
+    if let Some((first_pid_hex, first_nanos_hex)) = parse_provider_window(&first_window, "first") {
+        // `nonce` = `<pid_hex>-<epoch_nanos_hex>`: pin it to THIS launch so a
+        // constant or hardcoded nonce cannot satisfy the shape check.
+        assert_eq!(
+            u32::from_str_radix(&first_pid_hex, 16).expect("nonce pid segment must parse as hex"),
+            launcher_pid,
+            "window nonce pid segment must be this launcher's pid; nonce_pid_hex={first_pid_hex} \
+             launcher_pid={launcher_pid} window={first_window}"
+        );
+        let first_nonce_nanos =
+            u128::from_str_radix(&first_nanos_hex, 16).expect("nonce epoch segment must parse as hex");
+        assert!(
+            (launch_started_nanos..=launch_finished_nanos).contains(&first_nonce_nanos),
+            "window nonce epoch segment must be minted during this launch; \
+             nonce_nanos={first_nonce_nanos} window=[{launch_started_nanos},{launch_finished_nanos}]"
+        );
+    }
 
     let (retry_session, retry_window) = split_attach_target(&targets[1]);
     // The retry may land in a session where `claude_code` is free, so the bare
@@ -387,21 +380,18 @@ exec \"$real\" -L \"$socket\" \"$@\"
     let _ = parse_provider_window(&retry_window, "retry");
     assert_ne!(
         retry_session,
-        existing.as_str(),
+        first_session,
         "retry must not reuse the selected session after it disappears"
     );
+    assert_ne!(retry_session, existing.as_str(), "retry must not adopt the pre-existing session");
 
     let state = load_runtime_state(&workspace).expect("load refreshed A-22b state");
-    assert_eq!(
-        state["teams"]["current"]["leader_receiver"]["session_name"],
-        json!("team-agent-leader-claude_code-stale-registration"),
-        "failed retry must not overwrite the original scalar binding; state={state}"
-    );
-    assert_eq!(
-        state["teams"]["current"]["leader_receiver"]["pane_id"],
-        json!("%stale"),
-        "failed retry must preserve the original scalar pane binding; state={state}"
-    );
+    // 8b09d7b4/e0652b62: the stale (not live) registration is not preserved
+    // as authority; the fresh isolated inception owns the scalar binding, and
+    // a failed managed attach never records it as attached.
+    let receiver = &state["teams"]["current"]["leader_receiver"];
+    assert_ne!(receiver["status"], json!("attached"),
+        "a failed managed attach must not record an attached leader binding; targets={targets:?} state={state}");
     assert!(
         !state.to_string().contains(&retry_session),
         "failed retry candidate must not remain in active binding state; candidate={retry_session} state={state}"

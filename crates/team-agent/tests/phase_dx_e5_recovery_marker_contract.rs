@@ -10,9 +10,12 @@ use std::path::Path;
 #[test]
 fn e5_worker_side_must_not_parse_recovery_from_message_text_prefix() {
     let all = source_tree("src");
+    // B16: the colon form is matched as a quoted string literal ("RECOVERY:
+    // ..."); an identifier such as `CALLER_CONTEXT_RECOVERY: &str` is not
+    // message-text parsing. The bracketed form stays an unanchored needle.
     for forbidden in [
         "[RECOVERY]",
-        "RECOVERY:",
+        "\"RECOVERY:",
         "starts_with(\"[RECOVERY]\")",
         "contains(\"[RECOVERY]\")",
     ] {
