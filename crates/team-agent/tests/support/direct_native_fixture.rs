@@ -4,6 +4,8 @@
 mod physical_support;
 #[path = "temp_workspace.rs"]
 mod temp_workspace;
+#[path = "proc_guard.rs"]
+mod proc_guard;
 
 use std::{path::{Path, PathBuf}, process::Command, time::{Duration, Instant}};
 use serde_json::json;
@@ -59,20 +61,25 @@ impl Drop for NativeAuthority {
 impl NativeAuthority {
     pub fn start(root: &Path, provider: &'static str) -> Self {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        use std::io::Write;
+        use std::io::{BufRead, BufReader, Write};
         let canonical = root.canonicalize().unwrap();
         let root = canonical.as_path();
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let tmux = selected("tmux");
         let python_launcher = selected("python3");
-        // macOS's public python3 may be a dispatcher; observe its actual interpreter,
-        // but launch through the public command/PATH rather than renaming the dispatcher.
-        let observed = Command::new("python3")
-            .args(["-c", "import os, sys; print(os.path.realpath(sys.executable))"])
-            .output().unwrap();
-        assert!(observed.status.success());
-        let python = PathBuf::from(String::from_utf8(observed.stdout).unwrap().trim())
-            .canonicalize().unwrap();
+        // Observe the kernel image of a real, bounded public-command child. On macOS
+        // even sys.executable names another dispatcher, not the live Python.app image.
+        let mut command = Command::new("python3");
+        command.args(["-c", "import os,signal,sys; signal.alarm(10); print(os.getpid(), flush=True); sys.stdin.read()"])
+            .env_clear().env("PATH", std::env::var_os("PATH").unwrap()).env("HOME", root)
+            .current_dir(root).stdout(std::process::Stdio::piped());
+        let mut probe = proc_guard::FixtureGroup::spawn(&mut command, &root.join("python-probe"), Duration::from_secs(15));
+        let mut pid = String::new();
+        BufReader::new(probe.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+        let python = team_agent_contract::host::process::process_executable_path(pid.trim().parse().unwrap()).unwrap();
+        drop(probe.stdin.take());
+        assert!(probe.wait().unwrap().success());
+        drop(probe);
         let launcher_hash = fingerprint_file(&python_launcher, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         let cwd = resolve_cwd(root).unwrap();
         let scope = backend::scope_for(&cwd, "alpha").unwrap();
