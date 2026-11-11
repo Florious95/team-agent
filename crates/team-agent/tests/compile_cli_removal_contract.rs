@@ -268,16 +268,23 @@ fn p1_compiler_and_spec_validation_remain_available() {
 fn p2_doctor_still_executes_compile_checks() {
     let env = HermeticTestEnv::enter("compile-p2");
     let team = fixture(&env, "team");
+    // C1 / 262f6cdb: retain the real compiler oracle separately from doctor v1's link graph.
+    team_agent::compiler::compile_team(&team).expect("valid declarations still compile");
 
     let doctor = run(
         &env,
         env.root(),
         &["doctor", "--workspace", team.to_str().unwrap(), "--json"],
     );
-    assert_eq!(doctor.status.code(), Some(0), "doctor: {}", stderr(&doctor));
+    assert_eq!(doctor.status.code(), Some(1), "doctor: {}", stderr(&doctor));
     let body = json_stdout(&doctor);
-    assert_eq!(body["ok"], true);
-    assert_eq!(body["profile_smoke"]["ok"], true);
+    assert_eq!(body["schema"], "team-agent.doctor.v1");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["links"][0]["id"], "L1");
+    assert_eq!(body["links"][0]["status"], "FAIL");
+    assert!(body["links"][0]["message"].as_str().unwrap().contains("no runtime state"));
+    assert!(body.get("profile_smoke").is_none());
+    assert!(!team.join(".team/runtime/state.json").exists());
 }
 
 #[test]
@@ -295,8 +302,13 @@ fn p3_invalid_role_remains_a_real_compile_diagnostic() {
     assert_eq!(doctor.status.code(), Some(1), "doctor: {}", stderr(&doctor));
     let body = json_stdout(&doctor);
     assert_eq!(body["ok"], false);
-    assert_eq!(body["profile_smoke"]["ok"], false, "{body}");
-    assert!(body["profile_smoke"].to_string().contains("provider"), "{body}");
+    // C1 / 262f6cdb: the compiler above must still reject the provider; doctor does not compile roles.
+    assert_eq!(body["schema"], "team-agent.doctor.v1");
+    assert_eq!(body["links"][0]["id"], "L1");
+    assert_eq!(body["links"][0]["status"], "FAIL");
+    assert!(body["links"][0]["message"].as_str().unwrap().contains("no runtime state"));
+    assert!(body.get("profile_smoke").is_none());
+    assert!(!team.join(".team/runtime/state.json").exists());
 }
 
 #[test]
