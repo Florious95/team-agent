@@ -96,11 +96,20 @@ fn c2_restart_agent_fallback_removed_after_batch_3() {
         "CR C-2: restart/agent.rs no longer needs the FIXME marker \
          after Batch 3."
     );
-    // Positive anchor: platform migration marker present.
+    // Positive anchor: the drain-path liveness probe still reaches the platform
+    // layer. c8639440 moved it to carrier observation; A5 (ec3ef36e) then deleted
+    // the unreachable local `pid_is_alive` wrapper, so the anchor follows the live
+    // path: restart/agent.rs -> carrier::observe -> platform::process.
     assert!(
-        body.contains("crate::platform::process::pid_is_alive"),
-        "Batch 3 migration marker missing: `pid_is_alive` must call \
-         `crate::platform::process::pid_is_alive`."
+        body.contains("crate::lifecycle::carrier::observe"),
+        "Batch 3 migration marker missing: restart/agent.rs drain liveness must \
+         go through `crate::lifecycle::carrier::observe`."
+    );
+    let carrier = src("lifecycle/carrier.rs");
+    assert!(
+        carrier.contains("crate::platform::process::pid_liveness"),
+        "Batch 3 migration marker missing: carrier observation must call \
+         `crate::platform::process::pid_liveness`."
     );
     // Legacy libc calls gone from CODE (not from doc comments).
     let code = strip_comments(&body);
