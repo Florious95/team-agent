@@ -50,6 +50,11 @@ const TEAM_SESSION: &str = "team-0532-current";
 const LEADER_SESSION: &str = "leader-0532";
 const LIVE_LEADER_PID: u32 = 53_200;
 const WORKER_PID: u32 = 53_201;
+/// The respawned cohort's pane. The leader session keeps the fake server alive across the
+/// worker session kill, and tmux never reuses a pane id within one server, so the restart
+/// spawn reports a fresh id (7cba7b44: every restart path excludes pre-spawn pane ids).
+const RESPAWN_PANE: &str = "%533";
+const RESPAWN_PID: u32 = 53_202;
 const OLD_MESSAGE_ID: &str = "msg_old_0532";
 
 static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -103,7 +108,7 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         &case.new_socket(),
         TEAM_SESSION,
         WORKER,
-        WORKER_PANE,
+        RESPAWN_PANE,
         "team-agent",
     );
     let status = case.run_ta(&[
@@ -478,6 +483,14 @@ tasks: []
             &self.workspace,
             WORKER_PID,
         );
+        let respawn_line = pane_line(
+            RESPAWN_PANE,
+            TEAM_SESSION,
+            WORKER,
+            "team-agent",
+            &self.workspace,
+            RESPAWN_PID,
+        );
         let script = format!(
             r#"#!/bin/sh
 endpoint="default"
@@ -547,7 +560,9 @@ case " $* " in
     fi
     if [ "$is_new" = "true" ]; then
       printf '%s' '{caller_line}'
-      if [ "$session_present" = "true" ]; then
+      if [ "$session_present" = "true" ] && [ "$spawned" = "true" ]; then
+        printf '%s' '{respawn_line}'
+      elif [ "$session_present" = "true" ]; then
         printf '%s' '{worker_line}'
       fi
     fi
@@ -557,13 +572,15 @@ case " $* " in
     exit 0
     ;;
   *" new-session "*|*" new-window "*)
-    printf '%s\n' '{worker_pane}'
+    printf '%s\n' '{respawn_pane}'
     exit 0
     ;;
   *" display-message "*)
     case "$target" in
       %*) printf '%s\n' "$target"; exit 0 ;;
-      *"{worker}"*) printf '%s\n' '{worker_pane}'; exit 0 ;;
+      *"{worker}"*)
+        if [ "$spawned" = "true" ]; then printf '%s\n' '{respawn_pane}'; else printf '%s\n' '{worker_pane}'; fi
+        exit 0 ;;
       *) printf '%s\n' '{caller_pane}'; exit 0 ;;
     esac
     ;;
@@ -580,7 +597,9 @@ esac
             worker = WORKER,
             caller_line = shell_single_quoted_payload(&caller_line),
             worker_line = shell_single_quoted_payload(&worker_line),
+            respawn_line = shell_single_quoted_payload(&respawn_line),
             worker_pane = WORKER_PANE,
+            respawn_pane = RESPAWN_PANE,
             caller_pane = CALLER_PANE,
         );
         fs::write(&tmux, script).expect("write fake tmux");
