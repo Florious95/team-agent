@@ -377,7 +377,7 @@ pub enum StartAgentOutcome {
 pub(crate) fn legacy_start_identity(state: &serde_json::Value, agent: &str) -> serde_json::Value {
     let row = &state["agents"][agent];
     let identity: serde_json::Map<String, serde_json::Value> = [
-        "provider", "pane_id", "pane_pid", "window", "generation", "spawn_epoch", "spawned_at",
+        "provider", "pane_id", "pane_pid", "pane_birth_identity", "window", "generation", "spawn_epoch", "spawned_at",
     ].into_iter().map(|key| (key.to_string(), row[key].clone())).collect();
     serde_json::json!({
         "agent": agent, "session_name": state.get("session_name"),

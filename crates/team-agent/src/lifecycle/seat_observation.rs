@@ -114,23 +114,17 @@ pub(crate) fn observe(
         {
             // A failed legacy migration may have written only the declaration.
             // Do not infer death from that provider string or from a missing PID.
-            if let Some(pid) = row
-                .get("pane_pid")
-                .and_then(Value::as_u64)
-                .and_then(|p| u32::try_from(p).ok())
-                .filter(|p| *p > 1)
+            if let Some(pid) = super::carrier::pane_pid(row).filter(|pid| *pid > 1)
             {
-                return Ok(
-                    match checked(crate::platform::process::pid_liveness(pid))? {
-                        crate::platform::process::ProcessLiveness::Dead => {
-                            SeatObservation::StoppedVerified
-                        }
-                        _ => SeatObservation::Unknown,
-                    },
-                );
+                return Ok(if super::carrier::observe(row, pid).state.gone() {
+                    SeatObservation::StoppedVerified
+                } else {
+                    SeatObservation::Unknown
+                });
             }
             return Ok(
-                if row.get("status").and_then(Value::as_str) == Some("stopped")
+                if row.get("pane_pid").is_none_or(Value::is_null)
+                    && row.get("status").and_then(Value::as_str) == Some("stopped")
                     && row.get("explicit_stop").and_then(Value::as_bool) == Some(true)
                 {
                     SeatObservation::StoppedVerified
@@ -193,30 +187,26 @@ pub(crate) fn observe(
     {
         return Ok(SeatObservation::Unknown);
     }
-    let Some(pid) = row
-        .get("pane_pid")
-        .and_then(Value::as_u64)
-        .and_then(|p| u32::try_from(p).ok())
-        .filter(|p| *p > 1)
+    let Some(pid) = super::carrier::pane_pid(row).filter(|pid| *pid > 1)
     else {
-        return Ok(SeatObservation::Unknown);
+        return Ok(if status.eq_ignore_ascii_case("stopped")
+            && row.get("pane_pid").is_none_or(Value::is_null)
+            && row.get("pane_id").is_none_or(Value::is_null)
+            && row.get("window").is_none_or(Value::is_null)
+        { SeatObservation::StoppedVerified } else { SeatObservation::Unknown });
     };
-    match checked(crate::platform::process::pid_liveness(pid))? {
-        crate::platform::process::ProcessLiveness::Dead => {
-            return Ok(SeatObservation::StoppedVerified)
-        }
-        crate::platform::process::ProcessLiveness::Unknown { .. } => {
-            return Ok(SeatObservation::Unknown)
-        }
-        crate::platform::process::ProcessLiveness::Live => (),
+    let carrier = super::carrier::observe(row, pid);
+    if carrier.state.gone() {
+        return Ok(SeatObservation::StoppedVerified);
     }
-    if !status.eq_ignore_ascii_case("running") {
+    if carrier.state != super::carrier::CarrierState::Possible
+        || !status.eq_ignore_ascii_case("running") {
         return Ok(SeatObservation::Unknown);
     }
     #[cfg(unix)]
-    let carrier_birth = checked(team_agent_contract::host::process::process_birth_identity(
-        pid,
-    ))?;
+    let Some(carrier_birth) = carrier.birth else {
+        return Ok(SeatObservation::Unknown);
+    };
     let backend = checked(
         crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
             &selected.run_workspace,

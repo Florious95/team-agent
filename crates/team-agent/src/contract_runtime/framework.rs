@@ -248,7 +248,7 @@ pub(crate) fn project_seat_with_row(
                 "contract_provider":row.get("contract_provider").or_else(|| row.get("provider")),
                 "status":"stopped","explicit_stop":true,"model":row.get("model"),
                 "contract_instance":null,"session_id":null,"session_observation":"unobserved",
-                "native_pane":null,"native_endpoint":null,"pane_id":null,"pane_pid":null,
+                "native_pane":null,"native_endpoint":null,"pane_id":null,"pane_pid":null,"pane_birth_identity":null,
                 "tmux_endpoint":null,"window":null,"session_name":null,
                 "mcp_binding":"unverified","mcp_tools":{}
             }));

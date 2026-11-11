@@ -287,6 +287,7 @@ pub(crate) fn same_capture_incarnation(current: &Value, expected: &Value) -> boo
         && [
             "provider",
             "pane_pid",
+            "pane_birth_identity",
             "pane_id",
             "spawned_at",
             "spawn_epoch",

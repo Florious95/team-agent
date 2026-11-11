@@ -46,8 +46,8 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
     "attribution_confidence",
     "spawn_cwd",
 ];
-const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
-    ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
+const LIVE_TOPOLOGY_FIELDS: [&str; 6] =
+    ["pane_id", "pane_pid", "pane_birth_identity", "window", "spawned_at", "spawn_epoch"];
 const ROSTER_STUB_ALLOWLIST: [&str; 17] = [
     "agent_id",
     "provider",
@@ -1009,21 +1009,14 @@ fn endpoint_convergence_invalidated_agents(
         .flat_map(|agents| agents.iter())
         .filter_map(|(id, row)| {
             let old = latest.get("agents")?.get(id)?;
-            let pid = old
-                .get("pane_pid")?
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .filter(|pid| *pid > 1)?;
+            let pid = crate::lifecycle::carrier::pane_pid(old).filter(|pid| *pid > 1)?;
             (!crate::contract_runtime::framework::is_contract(row)
                 && row.get("pane_id").is_none()
                 && old.get("pane_id").is_some()
-                && ["pane_pid", "spawn_epoch", "spawned_at"]
+                && ["pane_pid", "pane_birth_identity", "spawn_epoch", "spawned_at"]
                     .iter()
                     .all(|key| row.get(key) == old.get(key))
-                && matches!(
-                    crate::platform::process::pid_liveness(pid),
-                    Ok(crate::platform::process::ProcessLiveness::Dead)
-                ))
+                && crate::lifecycle::carrier::observe(old, pid).state.gone())
             .then(|| id.clone())
         })
         .collect()

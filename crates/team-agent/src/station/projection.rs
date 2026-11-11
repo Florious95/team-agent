@@ -201,7 +201,7 @@ pub(crate) fn publish(
             .as_ref()
             .and_then(|seat| seat.extra.get("legacy_row"));
         let changed_cohort = old_row.is_some_and(|old| {
-            ["pane_id", "pane_pid", "spawned_at", "contract_instance"]
+            ["pane_id", "pane_pid", "pane_birth_identity", "spawned_at", "contract_instance"]
                 .iter()
                 .any(|key| old.get(*key) != row.get(*key))
         });
@@ -220,7 +220,7 @@ pub(crate) fn publish(
         row[INSTANCE] = json!(instance);
         let endpoint = if phase == "ready" {
             Some(
-                json!({"pane_id":row.get("pane_id"),"pane_pid":row.get("pane_pid"),
+                json!({"pane_id":row.get("pane_id"),"pane_pid":row.get("pane_pid"),"pane_birth_identity":row.get("pane_birth_identity"),
                 "session_name":context.get("session_name"),"tmux_endpoint":row.get("tmux_endpoint").or_else(|| context.get("tmux_endpoint")),
                 "binding":instance,"binding_provenance":"legacy_projection"}),
             )

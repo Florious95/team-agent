@@ -137,9 +137,7 @@ pub(super) fn running_agent_state(
     if let Some(pane_id) = pane_id.filter(|pane| !pane.is_empty()) {
         state.insert("pane_id".to_string(), serde_json::json!(pane_id));
     }
-    if let Some(pane_pid) = pane_pid {
-        state.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-    }
+    crate::lifecycle::carrier::record(&mut state, pane_pid);
     Ok(serde_json::Value::Object(state))
 }
 

@@ -220,7 +220,7 @@ pub fn stop_agent(
             Some(receipt.id)
         };
         let projected = if absent {
-            json!({"status":"stopped","contract_instance":null,"pane_id":null,"pane_pid":null,
+            json!({"status":"stopped","contract_instance":null,"pane_id":null,"pane_pid":null,"pane_birth_identity":null,
                 "native_pane":null,"native_endpoint":null,"tmux_endpoint":null,"session_id":null})
         } else { framework::project_seat(&selected.run_workspace, &selected.team_key, id.as_str()).map_err(error)? };
         let mut state = selected.state.clone();

@@ -21,15 +21,10 @@ fn error(value: impl std::fmt::Display) -> CliError {
 /// pane PID. Unknown probe failures never count as proof that it is gone.
 pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), CliError> {
     let mut proved = false;
-    if let Some(value) = row.get("pane_pid").filter(|value| !value.is_null()) {
-        let pid = value
-            .as_u64()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .filter(|pid| *pid > 0)
+    if row.get("pane_pid").is_some_and(|value| !value.is_null()) {
+        let pid = crate::lifecycle::carrier::pane_pid(row).filter(|pid| *pid > 1)
             .ok_or_else(|| error(format!("invalid saved carrier PID for {id}")))?;
-        if unsafe { libc::kill(pid, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-        {
+        if !crate::lifecycle::carrier::observe(row, pid).state.gone() {
             return Err(error(format!(
                 "native recovery refused: old carrier for {id} is live or unobservable"
             )));
@@ -362,7 +357,7 @@ pub(crate) fn restart(
     for id in &skipped {
         let row = detached["agents"][*id].as_object_mut().ok_or_else(|| error("saved native row missing"))?;
         for field in ["contract_scope", "contract_instance", "generation", "native_pane", "native_endpoint", "native_pid",
-            "session_id", "pane_id", "pane_pid", "tmux_endpoint", "window", "session_name"] {
+            "session_id", "pane_id", "pane_pid", "pane_birth_identity", "tmux_endpoint", "window", "session_name"] {
             row.insert(field.into(), serde_json::Value::Null);
         }
         row.insert("native_recovery_archive".into(), json!(archive));

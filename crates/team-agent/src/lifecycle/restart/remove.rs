@@ -619,6 +619,7 @@ fn remove_agent_inner(
     let mut cleared_locations = Vec::new();
     if force {
         if let Some(pane) = physical {
+            super::common::require_safe_carrier_targets(&working_state, transport, |target| target.pane_id == pane.pane_id)?;
             transport.kill_pane(&pane.pane_id).map_err(|error| {
                 LifecycleError::Transport(format!(
                     "failed to stop exact seat pane {} for {agent_id}: {error}",

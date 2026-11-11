@@ -45,6 +45,7 @@ pub(crate) fn ensure_agent_not_running(
     transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
     if let Some(target) = live_agent_target(state, agent_id, transport)? {
+        require_safe_carrier_targets(state, transport, |pane| pane.pane_id == target.pane_id)?;
         let session = target.session.as_str();
         let window = target.window_name.as_ref().map(|name| name.as_str()).unwrap_or_default();
         Err(LifecycleError::RequirementUnmet(format!(
@@ -261,6 +262,8 @@ pub(crate) fn start_agent_at_paths_with_session(
     // intended session/window; a foreign pane must never make start-agent
     // return Noop. A coordinator-provided pane_dead reason is also
     // authoritative when a backend cannot answer the exact-pane probe.
+    require_safe_carrier_targets(&state, transport, |pane|
+        pane.session == session_name && pane.window_name.as_ref().is_some_and(|name| name.as_str() == window))?;
     let pane_marked_dead = raw_agent
         .get("stale_reason")
         .and_then(serde_json::Value::as_str)
@@ -682,6 +685,7 @@ pub(super) fn verify_spawned_pane_matches_target(
 struct PaneBindingSnapshot {
     pane_id: String,
     pane_pid: Option<u32>,
+    pane_birth_identity: Option<String>,
 }
 
 fn pane_binding_snapshot(agent: &serde_json::Value) -> Option<PaneBindingSnapshot> {
@@ -691,10 +695,8 @@ fn pane_binding_snapshot(agent: &serde_json::Value) -> Option<PaneBindingSnapsho
         .filter(|pane| !pane.is_empty())?;
     Some(PaneBindingSnapshot {
         pane_id: pane_id.to_string(),
-        pane_pid: agent
-            .get("pane_pid")
-            .and_then(serde_json::Value::as_u64)
-            .map(|pid| pid as u32),
+        pane_pid: crate::lifecycle::carrier::pane_pid(agent),
+        pane_birth_identity: agent.get("pane_birth_identity").and_then(serde_json::Value::as_str).map(str::to_owned),
     })
 }
 
@@ -702,6 +704,7 @@ fn pane_binding_from_live(pane: &crate::transport::PaneInfo) -> PaneBindingSnaps
     PaneBindingSnapshot {
         pane_id: pane.pane_id.as_str().to_string(),
         pane_pid: pane.pane_pid,
+        pane_birth_identity: pane.pane_pid.and_then(crate::lifecycle::carrier::birth_identity),
     }
 }
 
@@ -1031,6 +1034,7 @@ pub(super) fn drain_old_pane_and_pid(
     transport: &dyn crate::transport::Transport,
     old_pane: Option<&crate::transport::PaneId>,
     old_pid: Option<u32>,
+    old_row: &serde_json::Value,
 ) -> serde_json::Value {
     const DRAIN_MAX_MS: u64 = 1500;
     const DRAIN_POLL_MS: u64 = 50;
@@ -1047,7 +1051,7 @@ pub(super) fn drain_old_pane_and_pid(
         }
         if !pid_dead {
             if let Some(pid) = old_pid {
-                if !pid_is_alive(pid) {
+                if crate::lifecycle::carrier::observe(old_row, pid).state.gone() {
                     pid_dead = true;
                 }
             }
@@ -1089,12 +1093,8 @@ pub(super) fn pid_is_alive(pid: u32) -> bool {
 /// ---
 /// Read state.agents[agent_id].pane_pid (u32) from the runtime state.
 pub(super) fn state_pane_pid(state: &serde_json::Value, agent_id: &AgentId) -> Option<u32> {
-    state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()))
-        .and_then(|v| v.get("pane_pid"))
-        .and_then(serde_json::Value::as_u64)
-        .map(|p| p as u32)
+    state.get("agents").and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(crate::lifecycle::carrier::pane_pid)
 }
 
 /// ---
@@ -1200,6 +1200,17 @@ pub(crate) fn stop_agent_at_paths(
     let mut state = seat.state;
     let spec = seat.spec;
     let state_agent = state.get("agents").and_then(|v| v.get(agent_id.as_str()));
+    let carrier = state_agent.and_then(|row| crate::lifecycle::carrier::pane_pid(row)
+        .map(|pid| crate::lifecycle::carrier::observe(row, pid)));
+    if let Some(observation) = &carrier {
+        if observation.state == crate::lifecycle::carrier::CarrierState::Unknown
+            || (observation.state == crate::lifecycle::carrier::CarrierState::Possible
+                && state_agent.is_some_and(|row| row["status"] == "stopped"))
+        {
+            return Err(LifecycleError::RequirementUnmet(observation.detail.clone()));
+        }
+    }
+    let carrier_gone = carrier.is_some_and(|observation| observation.state.gone());
     // Persisted-only seats must remain stoppable. Build the minimal provider
     // projection consumed by mark_agent_stopped instead of requiring a spec
     // row that is precisely what recovery is repairing.
@@ -1253,9 +1264,9 @@ pub(crate) fn stop_agent_at_paths(
         } else {
             Vec::new()
         };
-    let stopped = stored_pane_live
+    let stopped = !carrier_gone && (stored_pane_live
         || !same_role_panes.is_empty()
-        || (pane_id.is_none() && window_exists(transport, &session_name, &window));
+        || (pane_id.is_none() && window_exists(transport, &session_name, &window)));
     if stopped {
         let stop_targets =
             if let Some(pane) = pane_id.as_ref().filter(|_| stored_pane_live) {
@@ -1271,6 +1282,10 @@ pub(crate) fn stop_agent_at_paths(
                     window: WindowName::new(&window),
                 }]
             };
+        require_safe_carrier_targets(&state, transport, |pane| stop_targets.iter().any(|target| match target {
+            Target::Pane(id) => pane.pane_id == *id,
+            Target::SessionWindow { session, window } => pane.session == *session && pane.window_name.as_ref() == Some(window),
+        }))?;
         // Explicit kill-pane/kill-window ignores remain-on-exit on the worker.
         // Preserve the last window BEFORE killing it, or the coordinator sees
         // a missing session and stops while the seat is merely being stopped.
@@ -1335,6 +1350,7 @@ pub(crate) fn stop_agent_at_paths(
             transport,
             pane_id.as_ref(),
             state_pane_pid(&state, agent_id),
+            &state["agents"][agent_id.as_str()],
         );
         let _ = write_stop_drain_event(workspace, agent_id, &target_str, &drain_evidence);
     }
@@ -1482,11 +1498,7 @@ pub(super) fn mark_agent_started(
             .find(|pane| pane.pane_id == spawn.spawn.pane_id)
             .and_then(|pane| pane.pane_pid)
     });
-    if let Some(pane_pid) = pane_pid {
-        agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-    } else {
-        agent.remove("pane_pid");
-    }
+    crate::lifecycle::carrier::record(agent, pane_pid);
     agent.insert(
         "spawned_at".to_string(),
         serde_json::json!(spawn.spawned_at.as_str()),

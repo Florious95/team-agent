@@ -60,6 +60,7 @@ pub mod restart;
 pub mod role_config;
 pub mod seat_start;
 pub(crate) mod seat_observation;
+pub(crate) mod carrier;
 pub mod types;
 pub(crate) mod worker_command_context;
 

@@ -1610,6 +1610,21 @@ pub mod lifecycle_port {
             .filter_map(|receipt| receipt["pane_id"].as_str().map(str::to_owned)).collect()
     }
 
+    fn extend_protection_with_process_root(protected: &mut ShutdownProtection, root: u32, table: &[ProcessInfo]) {
+        protected.pids.extend(process_tree_from_table(root, table));
+        // Protect containing panes/servers without protecting healthy siblings.
+        let mut current = root;
+        let mut ancestors = std::collections::BTreeSet::new();
+        while current > 1 && ancestors.insert(current) {
+            protected.pids.insert(current);
+            let Some(process) = table.iter().find(|process| process.pid == current) else { break };
+            current = process.ppid;
+        }
+        for process in table.iter().filter(|process| protected.pids.contains(&process.pid)) {
+            if let Some(pgid) = process.pgid { protected.pgids.insert(pgid); }
+        }
+    }
+
     fn extend_protection_with_native_failures(
         protected: &mut ShutdownProtection,
         receipts: &[Value],
@@ -1624,19 +1639,7 @@ pub mod lifecycle_port {
                 .filter(|pane| panes.contains(pane.pane_id.as_str())).filter_map(|pane| pane.pane_pid));
         }
         for root in roots {
-            protected.pids.extend(process_tree_from_table(root, table));
-            // Preserve the containing server, not its tree: healthy sibling panes
-            // must remain independently stoppable.
-            let mut current = root;
-            let mut ancestors = std::collections::BTreeSet::new();
-            while current > 1 && ancestors.insert(current) {
-                protected.pids.insert(current);
-                let Some(process) = table.iter().find(|process| process.pid == current) else { break };
-                current = process.ppid;
-            }
-        }
-        for process in table.iter().filter(|process| protected.pids.contains(&process.pid)) {
-            if let Some(pgid) = process.pgid { protected.pgids.insert(pgid); }
+            extend_protection_with_process_root(protected, root, table);
         }
     }
 
@@ -1701,7 +1704,10 @@ pub mod lifecycle_port {
         // PERF-6 C-①-1: ONE process-table snapshot for the whole happy path; the
         // protected / pgid / kill / wait sets all derive from it (N39 same-source).
         // A probe failure is observable, not a silent empty table (swallow batch 1).
-        let mut probe_degraded = false;
+        let unverified_carriers = crate::lifecycle::carrier::protected_roots(&state).into_values()
+            .filter(|observation| observation.state != crate::lifecycle::carrier::CarrierState::Reused)
+            .map(|observation| observation.detail).collect::<Vec<_>>();
+        let mut probe_degraded = !unverified_carriers.is_empty();
         let entry_table = shutdown_table_snapshot(&run_workspace, &mut probe_degraded, "entry");
         let mut protected = shutdown_protection_set(&entry_table);
         extend_protection_with_leader_panes(&mut protected, transport, &state, &entry_table);
@@ -1742,7 +1748,9 @@ pub mod lifecycle_port {
         );
 
         let mut kill_error = (!native_failed_rows.is_empty())
-            .then(|| "native seats not stopped; see native_receipts".to_string());
+            .then(|| "native seats not stopped; see native_receipts".to_string())
+            .or_else(|| (!unverified_carriers.is_empty())
+                .then(|| format!("unverified carrier identity: {}", unverified_carriers.join("; "))));
         let mut killed_sessions = Vec::new();
         let mut spared_sessions = Vec::new();
         deadline.check("kill_session")?;
@@ -1796,13 +1804,19 @@ pub mod lifecycle_port {
                 });
                 let session_has_native_failure = live_targets_now.iter().any(|target|
                     target.session == *session && native_failed_panes.contains(target.pane_id.as_str()));
+                let protected_carrier_panes: std::collections::BTreeSet<String> = live_targets_now.iter()
+                    .filter(|target| target.pane_pid.is_some_and(|pid| protected.contains_pid(pid)))
+                    .map(|target| target.pane_id.as_str().to_owned()).collect();
+                let session_has_protected_carrier = live_targets_now.iter().any(|target|
+                    target.session == *session && protected_carrier_panes.contains(target.pane_id.as_str()));
+                let protected_panes = leader_anchor_ids.union(&native_failed_panes)
+                    .chain(protected_carrier_panes.iter()).cloned().collect();
                 if (crate::state::projection::state_is_managed_leader(&state)
-                    && session_has_leader_anchor) || session_has_native_failure
+                    && session_has_leader_anchor) || session_has_native_failure || session_has_protected_carrier
                 {
                     let _ =
                         event_log_write_session_spared(&run_workspace, session, &leader_anchor_ids);
                     push_unique_session(&mut spared_sessions, session.clone());
-                    let protected_panes = leader_anchor_ids.union(&native_failed_panes).cloned().collect();
                     let worker_panes = collect_session_worker_panes(
                         &state,
                         session.as_str(),
@@ -1837,7 +1851,7 @@ pub mod lifecycle_port {
                             }
                         }
                     }
-                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &native_failed_panes);
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &protected_panes);
                 } else {
                     let targets = vec![session.as_str().to_string()];
                     let event_log = crate::event_log::EventLog::new(&run_workspace);
@@ -1864,7 +1878,7 @@ pub mod lifecycle_port {
                     } else {
                         push_unique_session(&mut killed_sessions, session.clone());
                     }
-                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &native_failed_panes);
+                    cleanup_owned_team_windows(&run_workspace, transport, &state, session, &protected_panes);
                 }
             }
         }
@@ -2674,7 +2688,10 @@ pub mod lifecycle_port {
         for agent in agents.values() {
             for key in ["provider_pid", "process_id", "pid", "child_pid", "pane_pid"] {
                 if let Some(pid) = agent.get(key).and_then(value_u32) {
-                    out.push(pid);
+                    if crate::lifecycle::carrier::observe(agent, pid).state
+                        == crate::lifecycle::carrier::CarrierState::Possible {
+                        out.push(pid);
+                    }
                 }
             }
         }
@@ -2703,6 +2720,8 @@ pub mod lifecycle_port {
         table: &[ProcessInfo],
         event_log: &crate::event_log::EventLog,
     ) {
+        let mut protected = protected.clone();
+        extend_protection_with_unowned_carriers(&mut protected, state, table);
         let mut pids = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         let spawn_cwds = state_spawn_cwds(state, scope);
@@ -2720,6 +2739,10 @@ pub mod lifecycle_port {
                 }
             }
         }
+        let births = pids.iter().filter_map(|pid|
+            crate::lifecycle::carrier::birth_identity(*pid).map(|birth| (*pid, birth)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        pids.retain(|pid| births.contains_key(pid));
         if pids.is_empty() {
             return;
         }
@@ -2745,7 +2768,12 @@ pub mod lifecycle_port {
         {
             return;
         }
+        extend_protection_with_unowned_carriers(&mut protected, state, table);
         for pid in pids.iter().rev() {
+            if protected.contains_pid(*pid)
+                || crate::lifecycle::carrier::birth_identity(*pid).as_ref() != births.get(pid) {
+                continue;
+            }
             let _ = crate::platform::process::terminate_pid(
                 *pid,
                 crate::platform::process::SignalKind::TerminateGraceful,
@@ -2755,6 +2783,7 @@ pub mod lifecycle_port {
         // Re-probe identity before escalation.  If the probe fails, refuse the
         // force signal rather than risking a recycled PID.
         if let Ok(live_table) = probed_process_table() {
+            extend_protection_with_unowned_carriers(&mut protected, state, &live_table);
             let spawn_cwds = state_spawn_cwds(state, scope);
             for pid in pids.iter().rev() {
                 let Some(before) = table.iter().find(|process| process.pid == *pid) else {
@@ -2763,7 +2792,9 @@ pub mod lifecycle_port {
                 let Some(after) = live_table.iter().find(|process| process.pid == *pid) else {
                     continue;
                 };
-                if before.ppid == after.ppid
+                if !protected.contains_pid(*pid)
+                    && crate::lifecycle::carrier::birth_identity(*pid).as_ref() == births.get(pid)
+                    && before.ppid == after.ppid
                     && before.command == after.command
                     && process_matches_workspace(after, workspace, &spawn_cwds)
                 {
@@ -3206,6 +3237,17 @@ pub mod lifecycle_port {
         }
     }
 
+    // Also applied in every residual round, before orphan and PGID sweeps.
+    fn extend_protection_with_unowned_carriers(
+        protected: &mut ShutdownProtection,
+        state: &Value,
+        table: &[ProcessInfo],
+    ) {
+        for root in crate::lifecycle::carrier::protected_roots(state).keys() {
+            extend_protection_with_process_root(protected, *root, table);
+        }
+    }
+
     /// PERF-6 C-①-1/C-②-4 (N39): the protected set derives from the CALLER's snapshot —
     /// the same table the kill/wait sets derive from.
     fn shutdown_protection_set(table: &[ProcessInfo]) -> ShutdownProtection {
@@ -3269,6 +3311,7 @@ pub mod lifecycle_port {
         state: &Value,
         table: &[ProcessInfo],
     ) {
+        extend_protection_with_unowned_carriers(protected, state, table);
         let mut leader_pane_pids: Vec<u32> = Vec::new();
         let pane_targets = transport.list_targets().unwrap_or_default();
         // Source 1: session 前缀过滤(原 B5 实现)— per-workspace socket。
@@ -5352,7 +5395,14 @@ pub mod lifecycle_port {
             return;
         };
         for agent in agents.values_mut() {
+            let gone = crate::lifecycle::carrier::pane_pid(agent)
+                .is_some_and(|pid| crate::lifecycle::carrier::observe(agent, pid).state.gone());
             if let Some(obj) = agent.as_object_mut() {
+                if gone {
+                    crate::lifecycle::carrier::record(obj, None);
+                    obj.remove("pane_id");
+                    obj.remove("window");
+                }
                 obj.insert("status".to_string(), json!("stopped"));
             }
         }

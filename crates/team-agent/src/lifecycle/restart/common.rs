@@ -120,6 +120,27 @@ pub(super) fn same_role_cohort_exactly_one_error(
 ) -> Option<String> {
     same_role_cohort_error(transport, session_name, operation, targets, 1, false)
 }
+/// Refuse teardown or adoption of a protected carrier's containing pane.
+pub(super) fn require_safe_carrier_targets(
+    state: &serde_json::Value,
+    transport: &dyn crate::transport::Transport,
+    selected: impl Fn(&crate::transport::PaneInfo) -> bool,
+) -> Result<(), LifecycleError> {
+    let roots = crate::lifecycle::carrier::protected_roots(state);
+    if roots.is_empty() { return Ok(()); }
+    let panes = transport.list_targets()
+        .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+    for pane in panes.iter().filter(|pane| selected(pane)) {
+        let pid = pane.pane_pid.ok_or_else(|| LifecycleError::RequirementUnmet(
+            format!("cannot retire pane {}: carrier PID is unreadable", pane.pane_id.as_str())))?;
+        if let Some(detail) = crate::lifecycle::carrier::protected_target(pid, &roots) {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "cannot retire pane {}: protected carrier; {detail}", pane.pane_id.as_str())));
+        }
+    }
+    Ok(())
+}
+
 
 /// ---
 /// purpose: 杀掉这些目标记录的旧 pane
@@ -128,6 +149,7 @@ pub(super) fn same_role_cohort_exactly_one_error(
 /// ---
 pub(super) fn retire_expected_same_role_cohorts(
     transport: &dyn crate::transport::Transport,
+    carrier_state: &serde_json::Value,
     operation: &str,
     targets: &[SameRoleCohortTarget],
 ) -> Result<(), String> {
@@ -139,6 +161,8 @@ pub(super) fn retire_expected_same_role_cohorts(
         if transport.has_pane(&pane).ok().flatten() == Some(false) {
             continue;
         }
+        require_safe_carrier_targets(carrier_state, transport, |target| target.pane_id == pane)
+            .map_err(|error| error.to_string())?;
         transport.kill_pane(&pane).map_err(|error| {
             format!(
                 "{operation} failed to retire old same-role cohort {}:window={}:pane={pane_id}: {error}",
@@ -1143,10 +1167,9 @@ pub(super) fn recover_missing_legacy_session(
         if crate::contract_runtime::framework::is_contract(agent) {
             continue;
         }
-        let pid = agent.get("pane_pid").and_then(serde_json::Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 1);
-        match pid.map(crate::platform::process::pid_liveness) {
-            Some(Ok(crate::platform::process::ProcessLiveness::Dead)) => (),
+        let pid = crate::lifecycle::carrier::pane_pid(agent).filter(|pid| *pid > 1);
+        match pid.map(|pid| crate::lifecycle::carrier::observe(agent, pid).state.gone()) {
+            Some(true) => (),
             None if agent.get("pane_id").and_then(serde_json::Value::as_str).is_none()
                 && matches!(agent.get("status").and_then(serde_json::Value::as_str), Some("stopped" | "paused" | "removed")) => (),
             _ => return Ok(()),
@@ -1897,11 +1920,14 @@ pub(super) fn mark_agent_stopped(
     if !entry.is_object() {
         *entry = serde_json::json!({});
     }
+    let gone = crate::lifecycle::carrier::pane_pid(entry)
+        .is_some_and(|pid| crate::lifecycle::carrier::observe(entry, pid).state.gone());
     let Some(obj) = entry.as_object_mut() else {
         return Err(LifecycleError::StatePersist(
             "agent state is not an object".to_string(),
         ));
     };
+    if gone { crate::lifecycle::carrier::record(obj, None); }
     obj.insert("status".to_string(), serde_json::json!("stopped"));
     obj.insert("provider".to_string(), serde_json::json!(provider));
     obj.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
@@ -1967,11 +1993,7 @@ pub(super) fn mark_agent_running_noop(
             "pane_id".to_string(),
             serde_json::json!(pane.pane_id.as_str()),
         );
-        if let Some(pane_pid) = pane.pane_pid {
-            obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-        } else {
-            obj.remove("pane_pid");
-        }
+        crate::lifecycle::carrier::record(obj, pane.pane_pid);
     }
     Ok(())
 }

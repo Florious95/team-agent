@@ -293,8 +293,11 @@ pub fn status_command(request: &StartRequest) -> String {
     scoped_seat_command(request, "status")
 }
 
-pub(crate) fn unverified_start_guidance(request: &StartRequest) -> String {
-    format!("agent ownership/liveness is unverified; run `{}` before applying changes or starting fresh; then retry this start command", scoped_seat_command(request, "stop"))
+pub(crate) fn unverified_start_guidance(request: &StartRequest, row: &Value) -> String {
+    let detail = super::carrier::pane_pid(row)
+        .map(|pid| super::carrier::observe(row, pid).detail)
+        .unwrap_or_else(|| "recorded carrier PID is missing or invalid".into());
+    format!("agent ownership/liveness is unverified: {detail}; no unique live pane/carrier ownership match; inspect with `{}` before retrying", status_command(request))
 }
 
 fn scoped_seat_command(request: &StartRequest, action: &str) -> String {
@@ -501,17 +504,8 @@ fn continuation_admission(
         return Ok(None);
     }
     // Matching live starts are no-ops; they do not require a captured transcript.
-    let dead = old
-        .get("pane_pid")
-        .and_then(Value::as_u64)
-        .and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| *pid > 1)
-        .is_some_and(|pid| {
-            matches!(
-                crate::platform::process::pid_liveness(pid),
-                Ok(crate::platform::process::ProcessLiveness::Dead)
-            )
-        });
+    let dead = super::carrier::pane_pid(old).filter(|pid| *pid > 1)
+        .is_some_and(|pid| super::carrier::observe(old, pid).state.gone());
     if old.get("status").and_then(Value::as_str) == Some("running") && !dead {
         return Ok(None);
     }
@@ -705,6 +699,7 @@ fn incarnation(selected: &SelectedTeam, id: &AgentId) -> Value {
         "tmux_session",
         "session_id",
         "pane_pid",
+        "pane_birth_identity",
         "process_id",
         "pid",
         "spawn_epoch",
@@ -743,34 +738,15 @@ fn incarnation(selected: &SelectedTeam, id: &AgentId) -> Value {
 
 fn carrier_birth(selected: &SelectedTeam, id: &AgentId) -> Result<Value, LifecycleError> {
     #[cfg(unix)]
-    if let Some(pid) = selected.state["agents"][id.as_str()]["pane_pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
+    if let Some(pid) = super::carrier::pane_pid(&selected.state["agents"][id.as_str()])
         .filter(|pid| *pid > 1)
     {
-        use crate::platform::process::{pid_liveness, ProcessLiveness};
-        let unavailable = |reason: String| {
-            refused(format!(
-            "carrier identity is unverified: {reason}; run `team-agent status {} --workspace {} --team {}`",
-            command_arg(id.as_str()), command_arg(&selected.run_workspace.to_string_lossy()),
-            command_arg(&selected.team_key),
-        ))
-        };
-        match pid_liveness(pid).map_err(|error| unavailable(error.to_string()))? {
-            ProcessLiveness::Dead => return Ok(Value::Null),
-            ProcessLiveness::Unknown { reason } => return Err(unavailable(reason)),
-            ProcessLiveness::Live => {}
+        let observation = super::carrier::observe(&selected.state["agents"][id.as_str()], pid);
+        if observation.state.gone() { return Ok(Value::Null); }
+        if observation.state == super::carrier::CarrierState::Unknown {
+            return Err(refused(observation.detail));
         }
-        return match team_agent_contract::host::process::process_birth_identity(pid) {
-            Ok(birth) => Ok(json!(birth)),
-            // The carrier can exit between liveness and identity sampling.
-            Err(error) => {
-                match pid_liveness(pid).map_err(|error| unavailable(error.to_string()))? {
-                    ProcessLiveness::Dead => Ok(Value::Null),
-                    _ => Err(unavailable(error.to_string())),
-                }
-            }
-        };
+        return Ok(json!(observation.birth));
     }
     let _ = (selected, id);
     Ok(Value::Null)
@@ -891,7 +867,7 @@ fn converge(
                 return converge(request, Some(&refreshed), false);
             }
             SeatObservation::NativeReconcile | SeatObservation::Unknown => {
-                return Err(refused(unverified_start_guidance(request)))
+                return Err(refused(unverified_start_guidance(request, row)))
             }
         };
         let description = describe_resolved(request, Some(selected), live, &declaration)?;
@@ -1390,6 +1366,7 @@ fn archive_row(row: &mut serde_json::Map<String, Value>) {
         "native_pane",
         "pane_id",
         "pane_pid",
+        "pane_birth_identity",
         "tmux_endpoint",
         "window",
     ] {

@@ -1902,7 +1902,7 @@ fn refresh_receiver_observation(
     receiver.insert("pane_id".to_string(), json!(observed.pane_id.as_str()));
     receiver.insert("pane".to_string(), json!(observed.pane_id.as_str()));
     receiver.insert("status".to_string(), json!("attached"));
-    receiver.insert("pane_pid".to_string(), json!(observed.pane_pid));
+    crate::lifecycle::carrier::record(receiver, observed.pane_pid);
     if let Some(target) = claim_target {
         receiver.insert("provider".to_string(), json!(target.provider));
     }
@@ -2473,6 +2473,7 @@ fn agent_binding_summary(state: &Value) -> Value {
         for key in [
             "pane_id",
             "pane_pid",
+            "pane_birth_identity",
             "tmux_endpoint",
             "tmux_socket",
             "window",

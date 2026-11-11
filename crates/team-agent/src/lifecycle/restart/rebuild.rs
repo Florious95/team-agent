@@ -369,6 +369,7 @@ fn restart_with_selected_team_and_transport(
     )
     .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?
     .state;
+    let carrier_state = state.clone();
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
     let mut declared_paused = super::super::role_config::paused_agents(
         &selected.run_workspace, &selected.team_dir, &state,
@@ -617,6 +618,7 @@ fn restart_with_selected_team_and_transport(
              moved leader to dedicated session)",
             session_name.as_str()
         );
+        require_safe_carrier_targets(&carrier_state, transport, |pane| pane.session == session_name)?;
         let targets = vec![session_name.as_str().to_string()];
         crate::kill_audit::pre_kill_audit(
             &crate::event_log::EventLog::new(&selected.run_workspace),
@@ -1006,7 +1008,7 @@ fn restart_with_selected_team_and_transport(
             return Err(LifecycleError::RequirementUnmet(error));
         }
         if let Err(error) =
-            retire_expected_same_role_cohorts(transport, "restart", &old_successful_targets)
+            retire_expected_same_role_cohorts(transport, &carrier_state, "restart", &old_successful_targets)
         {
             cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
             return Err(LifecycleError::RequirementUnmet(error));
@@ -2216,7 +2218,7 @@ fn mark_restart_targets_stopped_after_teardown(
         };
         agent.insert("status".to_string(), serde_json::json!("stopped"));
         agent.remove("pane_id");
-        agent.remove("pane_pid");
+        crate::lifecycle::carrier::record(agent, None);
     }
 }
 
@@ -2388,11 +2390,7 @@ fn mark_agent_respawned(
             .find(|pane| pane.pane_id == spawn.spawn.pane_id)
             .and_then(|pane| pane.pane_pid)
     });
-    if let Some(pane_pid) = pane_pid {
-        agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
-    } else {
-        agent.remove("pane_pid");
-    }
+    crate::lifecycle::carrier::record(agent, pane_pid);
     agent.insert(
         "spawned_at".to_string(),
         serde_json::json!(spawn.spawned_at.as_str()),
@@ -2565,7 +2563,7 @@ fn mark_fake_harness_agent_respawned(
         "pane_id".to_string(),
         serde_json::json!(format!("__team_agent_fake_harness_{}", agent_id.as_str())),
     );
-    agent.remove("pane_pid");
+    crate::lifecycle::carrier::record(agent, None);
     agent.insert(
         "session_name".to_string(),
         serde_json::json!(session_name.as_str()),
@@ -2781,7 +2779,7 @@ fn mark_agent_restart_failed(
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
     agent.remove("pane_id");
-    agent.remove("pane_pid");
+    crate::lifecycle::carrier::record(agent, None);
 }
 
 fn write_restart_agent_failed_event(
@@ -3757,6 +3755,10 @@ fn collect_live_agents_from_state(state: &serde_json::Value) -> Vec<String> {
         .iter()
         .filter_map(|(agent_id, agent)| {
             let status = agent.get("status").and_then(serde_json::Value::as_str)?;
+            if crate::lifecycle::carrier::pane_pid(agent)
+                .is_some_and(|pid| crate::lifecycle::carrier::observe(agent, pid).state.gone()) {
+                return None;
+            }
             let pane_id = agent
                 .get("pane_id")
                 .and_then(serde_json::Value::as_str)

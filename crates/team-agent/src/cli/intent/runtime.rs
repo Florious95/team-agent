@@ -164,6 +164,7 @@ fn relevant(row: &Value) -> Value {
         "explicit_stop",
         "pane_id",
         "pane_pid",
+        "pane_birth_identity",
         "window",
         "session_id",
         "contract_instance",
@@ -176,7 +177,7 @@ fn relevant(row: &Value) -> Value {
         // Native incarnation is authoritative even after its carrier dies. Keep
         // intent/config fences; the mutator separately validates native sessions
         // and physical receipts. Legacy seats still need carrier observations.
-        if native_identity && matches!(key, "status" | "pane_id" | "pane_pid" | "window" | "session_id" | "spawned_at") {
+        if native_identity && matches!(key, "status" | "pane_id" | "pane_pid" | "pane_birth_identity" | "window" | "session_id" | "spawned_at") {
             continue;
         }
         object.insert(key.into(), row.get(key).cloned().unwrap_or(Value::Null));
@@ -600,14 +601,14 @@ fn plan_with_observer(
                 match observe(selected, id.as_str(), row)? {
                     Observation::Live => true,
                     Observation::StoppedVerified | Observation::ProviderExited | Observation::Unstarted => false,
-                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal(crate::lifecycle::seat_start::unverified_start_guidance(&request))),
+                    Observation::NativeReconcile | Observation::Unknown => return Err(refusal(crate::lifecycle::seat_start::unverified_start_guidance(&request, row))),
                 }
             } else { false };
             if let Some(row) = selected.as_ref().and_then(|selected| selected.state["agents"].get(id.as_str())) {
                 let mut expected = relevant(row);
                 #[cfg(unix)]
                 if live && !has_native_incarnation(row) {
-                    if let Some(pid) = row["pane_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()) {
+                    if let Some(pid) = crate::lifecycle::carrier::pane_pid(row) {
                         expected["_birth"] = json!(checked(team_agent_contract::host::process::process_birth_identity(pid))?);
                     }
                 }
@@ -895,11 +896,7 @@ fn plan_with_observer(
         let mut expected = relevant(row);
         #[cfg(unix)]
         if obs == Observation::Live && !has_native_incarnation(row) {
-            if let Some(pid) = row
-                .get("pane_pid")
-                .and_then(Value::as_u64)
-                .and_then(|p| u32::try_from(p).ok())
-            {
+            if let Some(pid) = crate::lifecycle::carrier::pane_pid(row) {
                 expected["_birth"] = json!(checked(
                     team_agent_contract::host::process::process_birth_identity(pid)
                 )?);
@@ -1219,10 +1216,7 @@ pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), 
             }
             #[cfg(unix)]
             if let Some(birth) = birth {
-                let pid = row
-                    .get("pane_pid")
-                    .and_then(Value::as_u64)
-                    .and_then(|p| u32::try_from(p).ok())
+                let pid = crate::lifecycle::carrier::pane_pid(row)
                     .ok_or_else(|| refusal("missing original carrier"))?;
                 if json!(checked(
                     team_agent_contract::host::process::process_birth_identity(pid)
