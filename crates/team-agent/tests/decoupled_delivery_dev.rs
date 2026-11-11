@@ -88,6 +88,8 @@ fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
     team["agents"]["worker"]["pane_id"] = Value::Null;
     team["agents"]["worker"]["native_pane"] = json!(fixture.pane);
     team["agents"]["worker"]["native_endpoint"] = json!(fixture.socket);
+    // B9 / cfd9eb90: both projections contain the same deliberately stale metadata.
+    let state = team_agent::state::projection::project_top_level_view(&state, "alpha");
     let before = serde_json::to_vec(&state).unwrap();
     fs::write(&path, &before).unwrap();
     let located = fixture.cli(&["locate", "--team", "alpha"]);
@@ -220,6 +222,8 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         let mut stale = valid.clone();
         let worker = &mut stale["teams"]["alpha"]["agents"]["worker"];
         worker[field] = if field == "pane_pid" { json!(0) } else { json!("foreign") };
+        // B9 / cfd9eb90: do not confuse document mirror normalization with repair.
+        let stale = team_agent::state::projection::project_top_level_view(&stale, "alpha");
         let bytes = serde_json::to_vec(&stale).unwrap();
         fs::write(&path, &bytes).unwrap();
         let content = format!("live despite stale {field}");
@@ -640,26 +644,21 @@ if action == 'paste-buffer' and os.environ.get('TMUX_TEST_FAIL_PASTE'):
 fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
     let fixture = Fixture::new();
     let path = fixture.root.join(".team/runtime/state.json");
-    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    state["teams"]["alpha"]["agents"]["worker"]["provider"] = json!("cursor_agent");
-    state["teams"]["alpha"]["agents"]["worker"]["dialect"] = json!("double-enter");
-    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    // R-DD2E / 5365c445 / 4e8ff838 / cursor/interaction.rs:16-19:
+    // native Cursor has a one-Enter budget; double Enter is the explicit raw opt-in.
+    let before = fs::read(&path).unwrap();
     let started = Instant::now();
-    let result = fixture
-        .leader_tools()
-        .send_message_with_presentation(
-            &MessageTarget::Single("worker".into()),
-            "cursor confirmation",
-            None,
-            None,
-            None,
-
-        None, None)
-        .unwrap()
-        .to_value();
+    let output = fixture.cli(&["send", "--socket", &fixture.socket, "--pane", &fixture.pane,
+        "--dialect", "cursor-double-enter", "cursor confirmation"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(started.elapsed() >= Duration::from_millis(100));
-    assert_eq!(result["dialect"], "cursor-double-enter");
-    let expected = b"\x1b[200~Team Agent message from leader:\n\ncursor confirmation\x1b[201~\r\r";
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["delivery"], "physical");
+    assert_eq!(result["pane_id"], fixture.pane);
+    assert!(result["accepted"].is_null());
+    assert!(result.get("dialect").is_none());
+    let expected = b"\x1b[200~cursor confirmation\x1b[201~\r\r";
     fixture.wait_for(|| {
         fs::read(fixture.root.join("received"))
             .unwrap_or_default()
@@ -667,6 +666,9 @@ fn cursor_opt_in_confirmation_is_two_enters_and_never_a_third() {
             >= expected.len()
     });
     assert_eq!(fs::read(fixture.root.join("received")).unwrap(), expected);
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(fs::read(fixture.root.join("received")).unwrap(), expected);
+    assert_eq!(fs::read(&path).unwrap(), before);
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
 
