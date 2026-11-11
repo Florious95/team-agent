@@ -2,6 +2,8 @@
 //! Same admission/startup-handshake path as m4_native_delivery_dev, not provider acceptance.
 #[path = "../../../team-agent-contract/tests/physical_support/mod.rs"]
 mod physical_support;
+#[path = "temp_workspace.rs"]
+mod temp_workspace;
 
 use std::{path::{Path, PathBuf}, process::Command, time::{Duration, Instant}};
 use serde_json::json;
@@ -38,6 +40,7 @@ pub struct NativeAuthority {
     pub pid: u32,
     tmux: PathBuf,
     target: Option<TargetReceipt>,
+    _storage: temp_workspace::TempWorkspace,
 }
 impl Drop for NativeAuthority {
     fn drop(&mut self) {
@@ -65,7 +68,9 @@ impl NativeAuthority {
         let cwd = resolve_cwd(root).unwrap();
         let scope = backend::scope_for(&cwd, "alpha").unwrap();
         let endpoint = format!("framework:{}", scope.as_str());
-        let transport_root = root.join("native-store");
+        // The existing short-root fixture keeps macOS's 104-byte socket boundary intact.
+        let storage = temp_workspace::TempWorkspace::new("ddn", "native");
+        let transport_root = storage.join("store");
         let mut store = ProjectionStore::create(&transport_root, scope.clone(), &endpoint).unwrap();
         let identity = store.propose_identity(&SeatId::new("worker").unwrap()).unwrap();
         let candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
@@ -117,7 +122,7 @@ impl NativeAuthority {
         assert_eq!(started.outcome, Outcome::Committed, "{started:?}");
         let seat = store.assert_current(&identity).unwrap();
         let owned = Self { socket: seat.endpoint.clone(), pane: seat.pane.clone(),
-            pid: seat.process.as_ref().unwrap().pid, tmux, target: seat.physical.clone() };
+            pid: seat.process.as_ref().unwrap().pid, tmux, target: seat.physical.clone(), _storage: storage };
         assert_eq!(seat.status, SeatStatus::Starting);
         assert!(!store.leased(&identity.seat).unwrap());
         assert!(store.unfinished().unwrap().is_empty());
