@@ -5,6 +5,7 @@ use crate::model::ids::AgentId;
 use crate::model::yaml::{self, Value as Yaml};
 use crate::state::repository::{StateRepository, StateWriteIntent};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
+use crate::transport::Transport;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -895,6 +896,55 @@ fn converge(
             ));
         }
         if !native(row["provider"].as_str().unwrap_or("")) {
+            if let Some(orphan) =
+                super::restart::live_agent_target(&selected.state, &request.agent, &transport)?
+            {
+                // Only StoppedVerified/Unstarted reach here. A plain rerun may
+                // replace an uncommitted pane, never adopt it or a possible carrier.
+                let carrier_gone = row.get("pane_pid").is_none_or(Value::is_null)
+                    || super::carrier::pane_pid(row)
+                        .is_some_and(|pid| super::carrier::observe(row, pid).state.gone());
+                let unchanged = request.patch == RoleConfigPatch::default()
+                    && std::fs::read(&declaration.destination)
+                        .is_ok_and(|bytes| bytes == declaration.text.as_bytes())
+                    && role_config::read_spec(selected).is_ok_and(|spec| {
+                        spec.get("agents").and_then(Yaml::as_list).is_some_and(|agents| {
+                            agents.iter().any(|agent| agent == &declaration.compiled.agent)
+                        })
+                    });
+                if carrier_gone && unchanged {
+                    super::restart::require_safe_carrier_targets(
+                        &selected.state,
+                        &transport,
+                        |pane| pane.pane_id == orphan.pane_id,
+                    )?;
+                    result["orphan_cleanup"] = json!({
+                        "session":orphan.session.as_str(),
+                        "window":orphan.window_name.as_ref().map(|window| window.as_str()),
+                        "pane_id":orphan.pane_id.as_str(),
+                    });
+                    if dry_run {
+                        result["status"] = json!("planned");
+                        return Ok(result);
+                    }
+                    // start() re-resolves this admission under the seat lock.
+                    transport.preserve_session_before_stop(
+                        &orphan.session,
+                        &[crate::transport::Target::Pane(orphan.pane_id.clone())],
+                    ).map_err(|error| LifecycleError::Transport(error.to_string()))?;
+                    transport.kill_pane(&orphan.pane_id)
+                        .map_err(|error| LifecycleError::Transport(error.to_string()))?;
+                    crate::event_log::EventLog::new(&selected.run_workspace).write(
+                        "start_agent.orphan_stop",
+                        json!({"agent_id":request.agent.as_str(), "team_key":selected.team_key,
+                            "session":orphan.session.as_str(),
+                            "window":orphan.window_name.as_ref().map(|window| window.as_str()),
+                            "pane_id":orphan.pane_id.as_str(), "outcome":"kill_acknowledged"}),
+                    ).map_err(failed)?;
+                }
+            }
+            // One fresh, bounded observation must find no live seat target.
+            // This also retains the original refusal for every ineligible orphan.
             super::restart::ensure_agent_not_running(&selected.state, &request.agent, &transport)?;
         }
         result["status"] = json!(if dry_run { "planned" } else { "running" });

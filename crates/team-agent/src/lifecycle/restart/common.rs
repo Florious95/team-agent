@@ -121,7 +121,7 @@ pub(super) fn same_role_cohort_exactly_one_error(
     same_role_cohort_error(transport, session_name, operation, targets, 1, false)
 }
 /// Refuse teardown or adoption of a protected carrier's containing pane.
-pub(super) fn require_safe_carrier_targets(
+pub(in crate::lifecycle) fn require_safe_carrier_targets(
     state: &serde_json::Value,
     transport: &dyn crate::transport::Transport,
     selected: impl Fn(&crate::transport::PaneInfo) -> bool,

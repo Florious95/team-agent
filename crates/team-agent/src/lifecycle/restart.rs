@@ -89,6 +89,7 @@ pub use agent::start_agent;
 pub(crate) use agent::{
     reset_agent_with_transport, start_agent_with_transport, stop_agent_with_transport,
 };
+pub(super) use common::require_safe_carrier_targets;
 pub(crate) use common::refresh_missing_provider_sessions;
 pub(crate) use common::restart_required_missing_session_agent_ids;
 pub(crate) use common::{
