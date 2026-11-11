@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn human_diagnostics_are_bounded_without_truncating_json() {
+    let message = format!("{}\u{1b}marker", "界".repeat(180));
+    for as_json in [false, true] {
+        let result = render(vec![Link::new(1, "FAIL", message.clone())], Path::new("/project"),
+            "test", json!({}), (0, 0), None, "no repair", as_json, Instant::now());
+        match result.output {
+            CmdOutput::Human(text) => {
+                assert!(text.lines().all(|line| line.len() <= 160));
+                assert!(!text.chars().any(|ch| ch.is_control() && ch != '\n'));
+                assert!(text.lines().next().unwrap().ends_with("..."));
+            }
+            CmdOutput::Json(value) => assert_eq!(value["links"][0]["message"], message),
+        }
+    }
+}
+
+#[test]
 fn failed_seat_remediation_never_restarts_healthy_siblings() {
     let action = restart_action(Path::new("/project path"), "X 运维", Some("worker-one"));
     assert_eq!(action.argv, ["team-agent", "restart", "worker-one", "--workspace", "/project path", "--team", "X 运维", "--json"]);

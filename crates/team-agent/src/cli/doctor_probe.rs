@@ -552,7 +552,20 @@ fn render(
         lines.push(format!("avoid: {avoid}"));
         result.output = CmdOutput::Human(lines.join("\n"));
     }
+    if let CmdOutput::Human(text) = &mut result.output {
+        *text = text.lines().map(human_line).collect::<Vec<_>>().join("\n");
+    }
     result
+}
+
+fn human_line(text: &str) -> String {
+    let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    if clean.len() <= 160 {
+        return clean;
+    }
+    let end = clean.char_indices().map(|(index, _)| index)
+        .take_while(|index| *index <= 157).last().unwrap_or(0);
+    format!("{}...", &clean[..end])
 }
 
 pub(super) fn run(args: &DoctorArgs) -> CmdResult {
