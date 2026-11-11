@@ -387,7 +387,11 @@ fn grok_alias_and_native_subscription_preserve_safe_defaults_and_bypass() {
     let (_sandbox, args) = fixture();
     for name in ["grok", "grok_build"] {
         assert_eq!(registry::descriptor(name).unwrap().identity.id, "grok_build");
-        assert!(framework::is_contract(&serde_json::json!({"provider":name})));
+        // 5885d54d: seat admission reads persisted runtime metadata, not the
+        // provider name; the name still selects the registered contract leaf.
+        assert!(registry::descriptor(name).is_some());
+        assert!(framework::is_contract(&serde_json::json!({"provider":name,"runtime_family":"contract"})));
+        assert!(!framework::is_contract(&serde_json::json!({"provider":name})));
         for bypass in [false, true] {
             std::fs::write(args.agents_dir.join("agents/worker.md"), format!(
                 "---\nprovider: {name}\nmodel: grok-4.7\nauth_mode: subscription\ndangerously_skip_permissions: {bypass}\n---\nRole body\n"
@@ -438,11 +442,17 @@ fn every_codex_and_grok_name_selects_the_contract_leaf_without_opt_in() {
     providers.sort();
     assert_eq!(providers, expected);
     // A persisted pre-upgrade row keeps its key and is never reclassified.
+    // 5885d54d: `is_contract` admits a seat by persisted runtime metadata; the
+    // leaf a provider name selects is `registry::descriptor`.
+    use team_agent::contract_runtime::{framework::is_contract, registry};
     for provider in ["codex", "codex_cli", "codex-cli"] {
-        assert!(!team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
+        assert!(!is_contract(&serde_json::json!({"provider":provider})), "{provider}");
+        assert!(registry::descriptor(provider).is_none(), "{provider}");
     }
     for provider in ["codex_tui", "grok_build", "grok"] {
-        assert!(team_agent::contract_runtime::framework::is_contract(&serde_json::json!({"provider":provider})), "{provider}");
+        assert!(registry::descriptor(provider).is_some(), "{provider}");
+        assert!(is_contract(&serde_json::json!({"provider":provider,"runtime_family":"contract"})), "{provider}");
+        assert!(!is_contract(&serde_json::json!({"provider":provider})), "{provider}");
     }
     assert!(!args.workspace.join(".team").exists());
 }
