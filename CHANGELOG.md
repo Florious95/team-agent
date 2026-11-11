@@ -4,6 +4,7 @@
 
 ## [0.6.0]
 
+- **Breaking — retired CLI:** `quick-start` has been removed. Create teams with `team-agent start --from TEAMDIR [--workspace WS] [--team TEAM]`; the team name comes from TEAM.md `name:`. `--yes`, `--name` and `--backend` have no replacement. `team-agent quick-start` now exits 2 with that guidance and has no effects.
 - **Architecture cleanup:** retire the legacy SQLite/transport seams, coordinator tick engine, pre-unified lifecycles, and unused kernel prototypes across the three excision stages.
 - **Messaging and terminal safety:** add guarded `send --bare`, preserve cross-socket ownership boundaries, and retain accurate sender roles and origins without unnecessary pane probes.
 - **Startup and recovery:** reuse Cursor startup discovery, retain timeout evidence, and recover durable team authority and native sessions after host reboots or workspace relocation.

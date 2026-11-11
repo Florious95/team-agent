@@ -33,11 +33,11 @@
 
 ## S2 — 健康真实 Team
 
-**前置**：准备者提供 disposable Team 配置和 workspace；使用公开 `quick-start` 启动，并等待预定 ready / 真实自然回程；启动 accepted 不能作为 ready 证据。
+**前置**：准备者提供 disposable Team 配置和 workspace；使用公开 `start --from` 启动，并等待预定 ready / 真实自然回程；启动 accepted 不能作为 ready 证据。
 
 **步骤**
 
-1. 按准备者给出的公开 `quick-start` 命令启动 Team，等待 ready 窗口。
+1. 按准备者给出的公开 `start --from` 命令启动 Team，等待 ready 窗口。
 2. 运行 `team-agent doctor --workspace <workspace> --team <team> --json`，再运行 human 形式。
 3. 在稳定现场分别运行 `diagnose` 的同参数 JSON/human 形式并保存对照。
 

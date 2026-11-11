@@ -229,7 +229,7 @@ Wait for instructions.
 EOF
 
 say "WS=$WS TEAM=$TEAM_ID"
-"$TA" quick-start "$TEAMDIR" --workspace "$WS" --yes --no-display --json >"$RUN/qs.json" 2>"$RUN/qs.err" || true
+"$TA" start --from "$TEAMDIR" --workspace "$WS" --no-display --json >"$RUN/qs.json" 2>"$RUN/qs.err" || true
 copy_evid() { [ -e "$1" ] && cp "$1" "$EVID/" 2>/dev/null || true; }
 copy_evid "$RUN/qs.json"
 copy_evid "$RUN/qs.err"

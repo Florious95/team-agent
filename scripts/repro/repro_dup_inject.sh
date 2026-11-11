@@ -490,7 +490,7 @@ record_pid "$("$TMUX_BIN" -S "$CALLER" display-message -p -t t130caller:hold '#{
 
 QS_JSON="$EVID/qs.json"
 QS_ERR="$EVID/qs.err"
-"$TA" quick-start "$TEAMDIR" --workspace "$WS" --team-id "$TEAM_ID" --yes --no-display --json >"$QS_JSON" 2>"$QS_ERR" || true
+"$TA" start --from "$TEAMDIR" --workspace "$WS" --team "$TEAM_ID" --no-display --json >"$QS_JSON" 2>"$QS_ERR" || true
 echo $? >"$EVID/qs.rc"
 write_kv "$QS_JSON" qs "$EVID/qs.parsed" 2>"$EVID/qs.parse.err" || unjudgeable "quick-start json parse failed $(cat "$EVID/qs.parse.err" 2>/dev/null)"
 # shellcheck disable=SC1091

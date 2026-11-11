@@ -158,7 +158,7 @@ dangerously_skip_permissions: false
 Wait.
 EOF
 
-"$TA" quick-start "$TEAMDIR" --workspace "$WS" --yes --no-display --json >"$RUN/qs.json" 2>"$RUN/qs.err" || true
+"$TA" start --from "$TEAMDIR" --workspace "$WS" --no-display --json >"$RUN/qs.json" 2>"$RUN/qs.err" || true
 python3 - "$RUN/qs.json" <<'PY' || unjudgeable "quick-start did not spawn workers"
 import json, sys
 d = json.load(open(sys.argv[1]))

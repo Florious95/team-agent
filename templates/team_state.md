@@ -29,4 +29,4 @@ Pending.
 
 ## Next Step
 
-- Review role files and permissions, then run `team-agent quick-start`; use `team-agent doctor` to diagnose the team.
+- Review role files and permissions, then run `team-agent start --from <team-dir>`; use `team-agent doctor` to diagnose the team.

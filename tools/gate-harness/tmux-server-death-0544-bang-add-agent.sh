@@ -197,7 +197,7 @@ write_role "$tmp/worker_fail.md" worker_fail
 tmux -S "$socket" new-session -d -s "$leader_session" -n bang sh
 
 quick_code=0
-run_team_agent quick-start "$team_dir" --workspace "$workspace" --team-id private --yes --no-display --json >"$tmp/quick.out" 2>"$tmp/quick.err" \
+run_team_agent start --from "$team_dir" --workspace "$workspace" --team private --no-display --json >"$tmp/quick.out" 2>"$tmp/quick.err" \
   || quick_code=$?
 if [ "$quick_code" -ne 0 ]; then
   assert_contains "$tmp/quick.out" '"all_workers_spawned": true' "degraded quick-start"

@@ -90,7 +90,7 @@ A running seat with identical effective configuration is a no-op; changed config
 
 ### Compatibility bridges
 
-`add-agent`, `agent add`, and `start-agent` are hidden spelling aliases of `start AGENT`: they share resolution, defaults, session policy, safety checks and receipts. There is no separate strict-add workflow, and `--force` is not a start option. Other legacy commands remain compatibility interfaces; old bare/explicit-path `restart` retains preserve, while `team restart` defaults to auto. See the [operation skill](skills/team-agent/SKILL.md) and [operator reference](skills/team-agent/references/team-agent-operator.md).
+`add-agent`, `agent add`, and `start-agent` are hidden spelling aliases of `start AGENT`: they share resolution, defaults, session policy, safety checks and receipts. There is no separate strict-add workflow, and `--force` is not a start option. Other legacy commands remain compatibility interfaces; old bare/explicit-path `restart` retains preserve, while `team restart` defaults to auto. See the [operation skill](skills/team-agent/SKILL.md) and [operator reference](skills/team-agent/references/team-agent-operator.md). `quick-start` was removed in 0.6.0; create teams with `team-agent start --from DIR`.
 
 ## What you can say
 

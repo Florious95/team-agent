@@ -730,7 +730,7 @@ dangerously_skip_permissions: true
 
 `true` 仅用于已明确授权 bypass 的隔离环境；普通部署按用户权限选择，不默认扩权。通过公开 [操作指南](team-agent-operator.md) 建立完整隔离 TEAM/role 配置，固定 binary 绝对路径、source/hash、native CLI 版本、model、backend/endpoint 和 team scope。下列是有限用例设计，不授权在正在运行的用户 Team 上直接执行：
 
-1. `models --provider nova_cli --json`：原生目录原样可选；坏源失败；`quick-start` 或 `add-agent --role-file`：L1/L2 与 L3 各自留证。
+1. `models --provider nova_cli --json`：原生目录原样可选；坏源失败；`start --from DIR` 或 `add-agent --role-file`：L1/L2 与 L3 各自留证。
 2. `send` 发唯一验收任务：等待自然 `send_message` 和一次 `report_result` 的原始 durable 结果，核 identity/归属/通知；不能只看 queued。观察窗口预先固定。
 3. scoped `shutdown --keep-logs`，再 `restart` 恢复同会话；再次自然回程；调用公开 fork 应安全拒绝。**不加 `--allow-fresh` 掩盖 resume 失败。**
 4. 再次 scoped shutdown，复验该 scope 的 owned 残留及 leader/sibling 保护；记录保留 backing/socket 的原因。

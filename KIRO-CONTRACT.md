@@ -20,7 +20,7 @@ dangerously_skip_permissions: false
 Perform the assigned task. Report completion through the bound Team Agent tools.
 ```
 
-Use the normal public `quick-start`, `status`, `send`, and scoped `shutdown` commands. Run `team-agent models --provider kiro --json` to inspect exact native IDs. Catalog visibility does not prove subscription access; explicit native effort flags do not assert per-model reasoning quality.
+Use the normal public `start --from`, `status`, `send`, and scoped `shutdown` commands. Run `team-agent models --provider kiro --json` to inspect exact native IDs. Catalog visibility does not prove subscription access; explicit native effort flags do not assert per-model reasoning quality.
 
 `doctor` includes Kiro in its provider inventory on the contract-runtime platform. `installed` only means an executable `kiro-cli` was found on PATH; auth/version/readiness remain unprobed. `team-agent kiro --help` documents the separate leader entry. `team-agent kiro [--json]` currently returns exit 1 with `reason: kiro_leader_not_admitted` (`leader_launch.v1`), without starting a process or binding a leader. This is an explicit capability refusal, not a working leader launcher.
 
@@ -72,6 +72,6 @@ Kiro-to-legacy/leader messages and results use durable forwarding intents with f
 
 ## Explicit limits
 
-The implemented public path is initial worker `quick-start`, read-only `status`, durable `send`, and scoped `shutdown`. Native leader wrapping, restart/resume, mutable/add/remove worker lifecycle, clone/Fork, and automatic startup-risk consent are not admitted by this candidate. Public lifecycle guards prevent these requests from falling into the historical unknown-provider fallback. An explicit blanket bypass request is refused until its native consent sequence is admitted.
+The implemented public path is initial worker `start --from`, read-only `status`, durable `send`, and scoped `shutdown`. Native leader wrapping, restart/resume, mutable/add/remove worker lifecycle, clone/Fork, and automatic startup-risk consent are not admitted by this candidate. Public lifecycle guards prevent these requests from falling into the historical unknown-provider fallback. An explicit blanket bypass request is refused until its native consent sequence is admitted.
 
 No native acceptance or macOS build is implied by grammar fixtures. Release requires the exact-source Grok checks, an official macOS candidate, and independent native scenario receipts. No existing provider is migrated by this change.

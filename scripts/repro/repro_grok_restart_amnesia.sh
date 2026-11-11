@@ -549,7 +549,7 @@ PATH='/opt/homebrew/bin:/usr/bin:/bin'
 export PATH
 export GROK_FOLDER_TRUST=0
 unset TMUX_PANE
-'$TA' quick-start '$TEAMDIR' --workspace '$WS' --team-id '$TEAM_ID' --name '$TEAM_ID' --yes --no-display --json >'$RUN/qs.json' 2>'$RUN/qs.err'
+'$TA' start --from '$TEAMDIR' --workspace '$WS' --team '$TEAM_ID' --no-display --json >'$RUN/qs.json' 2>'$RUN/qs.err'
 echo \$? >'$QS_RC_FILE'
 "
 if ! wait_file "$QS_RC_FILE" 90; then

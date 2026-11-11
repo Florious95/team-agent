@@ -79,7 +79,7 @@ no-op 不表示角色正文/参数修改已生效，也不表示业务就绪；�
 
 ### 旧命令仅作兼容桥接
 
-既有自动化仍可保留 `quick-start`、`shutdown` 与 `*-agent`，但新日常指引采用上面的直觉命令。旧裸/显式路径 `restart` 保持 preserve 默认和原回执；新 `team restart` 默认 auto。旧单席 start 拒绝运行节点，新 start 可以确证 no-op：不要机械改名脚本或假设 JSON 逐字节等价。详见[操作 Skill](skills/team-agent/SKILL.md)与[操作参考](skills/team-agent/references/team-agent-operator.md)。
+既有自动化仍可保留 `shutdown` 与 `*-agent`，但新日常指引采用上面的直觉命令。`quick-start` 已在 0.6.0 移除；创建团队请使用 `team-agent start --from DIR`。旧裸/显式路径 `restart` 保持 preserve 默认和原回执；新 `team restart` 默认 auto。旧单席 start 拒绝运行节点，新 start 可以确证 no-op：不要机械改名脚本或假设 JSON 逐字节等价。详见[操作 Skill](skills/team-agent/SKILL.md)与[操作参考](skills/team-agent/references/team-agent-operator.md)。
 
 ## 你可以说什么
 
