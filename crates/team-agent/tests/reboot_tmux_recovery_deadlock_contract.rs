@@ -381,7 +381,7 @@ impl RecoveryCase {
         if !live {
             self.old_worker.kill().unwrap();
             self.old_worker.wait().unwrap();
-            assert_ne!(team_agent_contract::host::process::process_birth_identity(self.old_worker.id()),
+            assert_ne!(team_agent_contract::host::process::process_birth_identity(self.old_worker.id()).ok(),
                 Some(self.old_worker_birth.clone()));
             eprintln!("expired fixture carrier pid={} birth={}", self.old_worker.id(), self.old_worker_birth);
         }

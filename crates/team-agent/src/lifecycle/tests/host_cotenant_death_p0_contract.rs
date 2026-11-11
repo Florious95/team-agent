@@ -679,10 +679,10 @@ impl CohortTransport {
 
     fn spawn(&self, session: &SessionName, window: &WindowName) -> SpawnResult {
         let mut state = self.state.lock().unwrap();
+        // The adversarial receipt deliberately replays historical identity after teardown too.
         let old_identity = state.panes.iter().find(|pane| {
             pane.window_name.as_ref().is_some_and(|name| name == window)
                 && pane.pane_id.as_str().starts_with("%old-")
-                && !state.killed.contains(pane.pane_id.as_str())
         }).map(|pane| (pane.pane_id.clone(), pane.pane_pid));
         let pane_id = PaneId::new(format!("%new-{}-{}", window.as_str(), state.next));
         let pane_pid = 20_000 + u32::try_from(state.next).unwrap();
