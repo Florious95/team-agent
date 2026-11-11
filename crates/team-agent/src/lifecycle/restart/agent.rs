@@ -1071,23 +1071,6 @@ pub(super) fn drain_old_pane_and_pid(
 }
 
 /// ---
-/// purpose: 尽力探测某进程号是否还活着
-/// returns: 由平台层给出的判定
-/// ---
-/// Best-effort liveness probe for a pid.
-///
-/// 0.5.x Windows portability Batch 3: routes through
-/// `crate::platform::process::pid_is_alive`. Unix uses `kill(pid, 0)`
-/// with the `EPERM = Live` branch preserved byte-for-byte; Windows
-/// uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
-/// `GetExitCodeProcess` (STILL_ACTIVE = Live). The legacy non-Unix
-/// `true` fallback (which broke drain by reporting every pid alive)
-/// is gone.
-pub(super) fn pid_is_alive(pid: u32) -> bool {
-    crate::platform::process::pid_is_alive(pid)
-}
-
-/// ---
 /// purpose: 从 state 里读该席位的 pane 进程号
 /// returns: 存在且是无符号整数时返回它，否则 None
 /// ---

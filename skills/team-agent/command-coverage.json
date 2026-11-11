@@ -22,6 +22,48 @@
   },
   "commands": [
     {
+      "command": "team-agent claim-leader --confirm",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:leader-channel",
+      "plan": "Exercise explicit recovery/preemption and assert one refreshed binding and registry entry; keep ordinary claim non-preemptive."
+    },
+    {
+      "command": "team-agent pi",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-launcher",
+      "plan": "Launch through a hermetic PATH wrapper and verify native argv and leader binding without a real model call."
+    },
+    {
+      "command": "team-agent start",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Exercise unified creation/adoption and assert the selected team, declaration, and defaulted receipt."
+    },
+    {
+      "command": "team-agent start AGENT --provider PROVIDER --model MODEL --session fresh",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:provider-lifecycle",
+      "plan": "Exercise a stopped-seat provider/model migration and verify retained identity/history plus a fresh native session."
+    },
+    {
+      "command": "team-agent start reviewer",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Exercise ad-hoc worker creation without source files and verify the safe defaulted declaration."
+    },
+    {
+      "command": "team-agent stop <agent>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:lifecycle",
+      "plan": "Exercise scoped seat shutdown and assert owned carrier cleanup while preserving peer processes."
+    },
+    {
       "command": "team-agent send worker '/compact' --bare --workspace . --team project-team",
       "bucket": "declared_gap",
       "covered": false,

@@ -284,12 +284,16 @@ fn storage_probe_cleans_its_artifacts() {
     assert!(filesystem_probe(&scratch.0, "probe", &agents)
         .unwrap()
         .contains("write/read/rename/delete"));
-    assert_eq!(
-        fs::read_dir(scratch.0.join(".team/runtime/.doctor"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert!(!scratch.0.join(".team/runtime/.doctor").exists());
+}
+
+#[test]
+fn storage_probe_preserves_another_invocations_directory() {
+    let scratch = Scratch::new();
+    let foreign = scratch.0.join(".team/runtime/.doctor/another-owner");
+    assert!(fs::create_dir_all(&foreign).is_ok());
+    assert!(filesystem_probe(&scratch.0, "probe", &serde_json::Map::new()).is_ok());
+    assert!(foreign.is_dir());
 }
 
 #[test]
@@ -303,12 +307,7 @@ fn contended_runtime_lock_is_inconclusive_not_deadlock() {
     let error = filesystem_probe(&scratch.0, "probe", &serde_json::Map::new()).unwrap_err();
     assert!(error.starts_with("INCONCLUSIVE:"));
     assert!(path.exists());
-    assert_eq!(
-        fs::read_dir(scratch.0.join(".team/runtime/.doctor"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert!(!scratch.0.join(".team/runtime/.doctor").exists());
 }
 
 #[test]

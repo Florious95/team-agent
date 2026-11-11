@@ -293,11 +293,20 @@ pub fn status_command(request: &StartRequest) -> String {
     scoped_seat_command(request, "status")
 }
 
-pub(crate) fn unverified_start_guidance(request: &StartRequest, row: &Value) -> String {
+pub(crate) fn unverified_start_guidance(
+    request: &StartRequest,
+    row: &Value,
+    observation: super::seat_observation::SeatObservation,
+) -> String {
     let detail = super::carrier::pane_pid(row)
         .map(|pid| super::carrier::observe(row, pid).detail)
         .unwrap_or_else(|| "recorded carrier PID is missing or invalid".into());
-    format!("agent ownership/liveness is unverified: {detail}; no unique live pane/carrier ownership match; inspect with `{}` before retrying", status_command(request))
+    let (action, command) = if observation == super::seat_observation::SeatObservation::NativeReconcile {
+        ("stop the scoped seat with", scoped_seat_command(request, "stop"))
+    } else {
+        ("inspect with", status_command(request))
+    };
+    format!("agent ownership/liveness is unverified: {detail}; no unique live pane/carrier ownership match; {action} `{command}` before retrying")
 }
 
 fn scoped_seat_command(request: &StartRequest, action: &str) -> String {
@@ -866,8 +875,8 @@ fn converge(
                 ).map_err(failed)?;
                 return converge(request, Some(&refreshed), false);
             }
-            SeatObservation::NativeReconcile | SeatObservation::Unknown => {
-                return Err(refused(unverified_start_guidance(request, row)))
+            observation @ (SeatObservation::NativeReconcile | SeatObservation::Unknown) => {
+                return Err(refused(unverified_start_guidance(request, row, observation)))
             }
         };
         let description = describe_resolved(request, Some(selected), live, &declaration)?;

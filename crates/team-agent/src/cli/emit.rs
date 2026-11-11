@@ -192,7 +192,35 @@ fn polling_command(command: &str) -> bool {
 }
 
 fn polling_footer() -> String {
-    format!("\n[Advisory: do not poll]\n{POLLING_ADVISORY}")
+    let mut footer = String::from("\n[Advisory: do not poll]\n");
+    let mut width = 0;
+    for word in POLLING_ADVISORY.split_whitespace() {
+        if width > 0 {
+            if width + 1 + word.len() > 160 {
+                footer.push('\n');
+                width = 0;
+            } else {
+                footer.push(' ');
+                width += 1;
+            }
+        }
+        footer.push_str(word);
+        width += word.len();
+    }
+    footer
+}
+
+#[cfg(test)]
+#[test]
+fn polling_footer_is_bounded_without_truncating_the_json_advisory() {
+    let footer = polling_footer();
+    assert!(footer.lines().all(|line| line.len() <= 160));
+    assert_eq!(footer.lines().skip(2).collect::<Vec<_>>().join(" "), POLLING_ADVISORY);
+    for command in ["inbox", "status", "doctor"] {
+        let mut output = serde_json::json!({"command": command});
+        advise_json(command, &mut output);
+        assert_eq!(output["polling_advisory"], POLLING_ADVISORY);
+    }
 }
 
 fn advise_json(command: &str, value: &mut Value) {

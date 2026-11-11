@@ -17,7 +17,7 @@ impl CarrierState {
     }
 }
 
-pub(crate) struct Observation {
+pub(crate) struct CarrierObservation {
     pub(crate) state: CarrierState,
     pub(crate) birth: Option<String>,
     pub(crate) detail: String,
@@ -56,7 +56,7 @@ pub(crate) fn record(row: &mut Map<String, Value>, pid: Option<u32>) {
     }
 }
 
-pub(crate) fn observe(row: &Value, pid: u32) -> Observation {
+pub(crate) fn observe(row: &Value, pid: u32) -> CarrierObservation {
     let birth = (pid > 1).then(|| birth_identity(pid)).flatten();
     let boot = boot_time();
     let started = birth.as_deref().and_then(|birth| birth_time(birth, boot));
@@ -115,7 +115,7 @@ pub(crate) fn observe(row: &Value, pid: u32) -> Observation {
     } else {
         (CarrierState::Unknown, "live process birth is unreadable")
     };
-    Observation {
+    CarrierObservation {
         state,
         detail: format!("pid={pid}; recorded_birth={}; current_birth={}; process_started_at={}; spawned_at={}; boot_time={}; {reason}",
             row.get("pane_birth_identity").map(Value::to_string).unwrap_or_else(|| "missing".into()),

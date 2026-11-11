@@ -450,11 +450,7 @@ impl Directory {
     }
 
     pub fn send(&self, agent: &str, text: &str) -> Result<Value, String> {
-        self.send_with_receipt(agent, text, || Ok(()))
-    }
-
-    pub(crate) fn send_with_receipt(&self, agent: &str, text: &str, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {
-        self.send_with_framing(agent, text, Framing::Framed, submitted)
+        self.send_with_framing(agent, text, Framing::Framed, || Ok(()))
     }
 
     pub(crate) fn send_with_framing(&self, agent: &str, text: &str, framing: Framing, submitted: impl FnOnce() -> Result<(), String>) -> Result<Value, String> {

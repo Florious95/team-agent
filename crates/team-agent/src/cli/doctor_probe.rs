@@ -453,8 +453,14 @@ fn filesystem_probe(
         let _ = fs::remove_file(path);
     }
     let cleanup = fs::remove_dir(&owned);
+    let parent_cleanup = fs::remove_dir(&parent);
     result.map_err(|e| e.to_string())?;
     cleanup.map_err(|e| e.to_string())?;
+    match parent_cleanup {
+        Ok(()) => {}
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound) => {}
+        Err(error) => return Err(error.to_string()),
+    }
     let mut checked = 0;
     for recipient in std::iter::once("leader").chain(agents.keys().map(String::as_str)) {
         match crate::inbox_store::probe_tail(workspace, recipient, Some(team)) {
@@ -631,9 +637,17 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             let caller_scope = (args.team.is_none() && !ambiguous).then(|| caller_team(&raw, &caller)).flatten();
             let team = args.team.clone().or_else(|| caller_scope.clone())
                 .unwrap_or_else(|| if ambiguous { "<unselected>" } else { "current" }.into());
-            let missing_team = args.team.as_deref().is_some_and(|team| {
+            let missing_runtime = [".team/runtime/state.json", ".team/state.json"].iter().all(|path| {
+                fs::metadata(args.workspace.join(path)).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            });
+            let missing_team = missing_runtime || args.team.as_deref().is_some_and(|team| {
                 error.starts_with(&format!("team '{team}' not found."))
             });
+            let error = if missing_runtime {
+                format!("team '{team}' has no runtime state in this workspace")
+            } else {
+                error
+            };
             let create = format!("team-agent start AGENT --team {} --workspace {} ...", super::shell_quote(&team), super::shell_quote(&args.workspace.to_string_lossy()));
             let links = (1..=6)
                 .map(|n| {

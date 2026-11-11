@@ -186,7 +186,7 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
         let leader_attach_command = if outcome.reason.as_deref() == Some("PaneWorkspaceMismatch") {
-            Some("team-agent claim-leader --confirm".to_string())
+            Some("team-agent claim-leader".to_string())
         } else {
             leader_attach_command_for_plan(cwd, &plan)
         };
@@ -379,7 +379,7 @@ pub mod lifecycle_port {
         }
 
         let hint_action = match refusal.recovery.hint_action {
-            PaneAuthorityRecoveryHint::AttachLeader => "team-agent claim-leader --confirm".to_string(),
+            PaneAuthorityRecoveryHint::AttachLeader => "team-agent claim-leader".to_string(),
         };
         let action = match refusal.recovery.action {
             PaneAuthorityRecoveryAction::OpenTerminalOutsideCurrentTmuxPaneOrAttachFromMatchingPane => {
