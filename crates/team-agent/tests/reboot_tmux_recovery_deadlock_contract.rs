@@ -40,7 +40,6 @@ const DEAD_ENV_SOCKET: &str = "/private/tmp/tmux-501/ta-0529-env-dead";
 const TEAM_SESSION: &str = "team-0529-current";
 const RETAINED_SESSION: &str = "team-0529-research";
 const LEADER_SESSION: &str = "leader-0529-recovery";
-const LIVE_LEADER_PID: u32 = 52_900;
 
 #[test]
 #[serial(env)]
@@ -338,6 +337,7 @@ fn status_summary_counts_ignore_stale_running() {
 }
 
 struct RecoveryCase {
+    leader: hermetic_guard::proc_guard::FixtureGroup,
     old_worker: hermetic_guard::proc_guard::FixtureGroup,
     old_worker_birth: String,
     env: hermetic_guard::HermeticTestEnv,
@@ -362,7 +362,10 @@ impl RecoveryCase {
         let old_worker = hermetic_guard::spawn_owned_coordinator(&workspace);
         let old_worker_birth = team_agent_contract::host::process::process_birth_identity(old_worker.id())
             .expect("live fixture carrier birth identity");
+        let leader = hermetic_guard::spawn_owned_coordinator(&workspace);
+        let tmux_env_socket = workspace.join("live-caller.sock").to_string_lossy().into_owned();
         Self {
+            leader,
             old_worker,
             old_worker_birth,
             env,
@@ -372,7 +375,8 @@ impl RecoveryCase {
             old_team_session: false,
             old_team_tuple: false,
             status_has_session: true,
-            tmux_env_socket: OLD_SOCKET.to_string(),
+            // 0afe88c5: scoped claims originate from an observed absolute caller endpoint.
+            tmux_env_socket,
         }
     }
 
@@ -436,7 +440,7 @@ impl RecoveryCase {
             "leader",
             "codex",
             &self.workspace,
-            LIVE_LEADER_PID,
+            self.leader.id(),
         );
         let script = format!(
             r#"#!/bin/sh
@@ -449,6 +453,11 @@ for arg in "$@"; do
   previous="$arg"
 done
 printf '%s	%s\n' "$endpoint" "$*" >> '{log_path}'
+# A dead caller endpoint must not manufacture a live observation.
+if [ "$endpoint" = "{dead_env_socket}" ]; then
+  echo "no server running on dead caller endpoint" >&2
+  exit 1
+fi
 is_old=false
 case "$endpoint" in
   "{old_socket}") is_old=true ;;
@@ -505,6 +514,7 @@ esac
 "#,
             log_path = shell_single_quoted_payload(&self.tmux_log_path().to_string_lossy()),
             old_socket = OLD_SOCKET,
+            dead_env_socket = DEAD_ENV_SOCKET,
             new_socket = self.new_socket(),
             old_server_live = bool_word(self.old_server_live),
             old_team_session = bool_word(self.old_team_session),
@@ -512,7 +522,7 @@ esac
             old_tuple_line = shell_single_quoted_payload(&old_tuple_line),
             caller_line = shell_single_quoted_payload(&caller_line),
             leader_session = LEADER_SESSION,
-            leader_pid = LIVE_LEADER_PID,
+            leader_pid = self.leader.id(),
         );
         fs::write(&tmux, script).expect("write fake tmux");
         #[cfg(unix)]
