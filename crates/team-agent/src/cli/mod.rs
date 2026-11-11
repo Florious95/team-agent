@@ -5394,15 +5394,11 @@ pub mod lifecycle_port {
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
             return;
         };
+        // ShutdownTeam is status-only: retain the incarnation tuple in both
+        // projections. Observation proves it gone; the next authorized start
+        // replaces PID and birth together without widening shutdown authority.
         for agent in agents.values_mut() {
-            let gone = crate::lifecycle::carrier::pane_pid(agent)
-                .is_some_and(|pid| crate::lifecycle::carrier::observe(agent, pid).state.gone());
             if let Some(obj) = agent.as_object_mut() {
-                if gone {
-                    crate::lifecycle::carrier::record(obj, None);
-                    obj.remove("pane_id");
-                    obj.remove("window");
-                }
                 obj.insert("status".to_string(), json!("stopped"));
             }
         }
