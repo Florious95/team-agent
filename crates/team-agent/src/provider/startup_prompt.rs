@@ -365,6 +365,16 @@ pub fn claude_handle_startup_prompts(
     checks: usize,
     sleep_s: f64,
 ) -> StartupPromptOutcome {
+    claude_handle_startup_prompts_with(transport, target, checks, sleep_s, true)
+}
+
+pub fn claude_handle_startup_prompts_with(
+    transport: &dyn Transport,
+    target: &Target,
+    checks: usize,
+    sleep_s: f64,
+    select_negative_default: bool,
+) -> StartupPromptOutcome {
     let mut handled = Vec::new();
     let mut capture_error: Option<String> = None;
     for _ in 0..checks {
@@ -381,6 +391,10 @@ pub fn claude_handle_startup_prompts(
                 // its leader has already authorized this workspace. Folder trust
                 // is separate from the worker's unchanged permission mode.
                 let select_yes = claude_trust_reject_selected(&screen);
+                if select_yes && !select_negative_default {
+                    sleep_between_polls(sleep_s);
+                    continue;
+                }
                 // Current Claude lists the unnumbered No option first; older
                 // versions list numbered Yes first. Follow the observed order.
                 let direction = if screen.rfind("No, exit") < screen.rfind("Yes, I trust this folder") { Key::Down } else { Key::Up };

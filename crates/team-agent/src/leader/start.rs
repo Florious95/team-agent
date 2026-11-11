@@ -2096,8 +2096,12 @@ fn handle_exec_provider_startup_prompts(
     sleep_s: f64,
 ) -> crate::provider::StartupPromptOutcome {
     let target = Target::Pane(PaneId::new(pane_id.to_string()));
-    let outcome =
-        get_adapter(provider).handle_startup_prompts_outcome(transport, &target, checks, sleep_s);
+    let outcome = match provider {
+        Provider::Claude | Provider::ClaudeCode => crate::provider::claude_handle_startup_prompts_with(
+            transport, &target, checks, sleep_s, false,
+        ),
+        _ => get_adapter(provider).handle_startup_prompts_outcome(transport, &target, checks, sleep_s),
+    };
     for handled in &outcome.handled {
         write_leader_startup_prompt_event(
             workspace,
@@ -2210,6 +2214,10 @@ fn merged_exec_env(leader_env: &BTreeMap<String, String>) -> BTreeMap<String, St
     env
 }
 
+
+#[cfg(test)]
+#[path = "../../tests/support/temp_workspace.rs"]
+mod startup_trust_workspace;
 
 #[cfg(test)]
 mod tests {
@@ -2821,6 +2829,52 @@ mod tests {
             serde_json::json!("exec-provider")
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn claude_leader_numbered_negative_default_gets_no_keys_or_handled_prompt() {
+        let workspace = super::startup_trust_workspace::TempWorkspace::new("ta-d2", "leader-numbered");
+        let transport = ScriptedTransport::new(vec![
+            "Is this a project you created or one you trust?\n  1. Yes, I trust this folder\n❯ 2. No, exit".into(),
+            "Claude Code v2\n❯".into(),
+        ]);
+        let outcome = handle_exec_provider_startup_prompts(
+            Provider::Claude, workspace.path(), "%0", &transport, 2, 0.0,
+        );
+        assert!(transport.sent().is_empty());
+        assert!(outcome.handled.is_empty());
+    }
+
+    #[test]
+    fn claude_leader_unnumbered_negative_default_gets_no_keys() {
+        let workspace = super::startup_trust_workspace::TempWorkspace::new("ta-d2", "leader-unnumbered");
+        let transport = ScriptedTransport::new(vec![
+            "Is this a project you created or one you trust?\n❯ No, exit\n  Yes, I trust this folder".into(),
+            "Claude Code v2\n❯".into(),
+        ]);
+        let outcome = handle_exec_provider_startup_prompts(
+            Provider::ClaudeCode, workspace.path(), "%0", &transport, 2, 0.0,
+        );
+        assert!(transport.sent().is_empty());
+        assert!(outcome.handled.is_empty());
+    }
+
+    #[test]
+    fn claude_leader_selected_yes_gets_exactly_one_enter() {
+        for provider in [Provider::Claude, Provider::ClaudeCode] {
+            let workspace = super::startup_trust_workspace::TempWorkspace::new("ta-d2", "leader-yes");
+            let transport = ScriptedTransport::new(vec![
+                "Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit".into(),
+                "Claude Code v2\n❯".into(),
+            ]);
+            let outcome = handle_exec_provider_startup_prompts(
+                provider, workspace.path(), "%0", &transport, 2, 0.0,
+            );
+            assert_eq!(transport.sent(), vec![(Target::Pane(PaneId::new("%0")), vec![Key::Enter])]);
+            assert_eq!(outcome.handled.len(), 1);
+            assert_eq!(outcome.handled[0].prompt, "claude_workspace_trust");
+            assert_eq!(outcome.handled[0].action, "sent_enter");
+        }
     }
 
     #[test]

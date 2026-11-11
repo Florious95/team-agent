@@ -12,6 +12,7 @@
 - **Release packaging:** align the installer and all three platform packages at 0.6.0. Stop legacy callers before switching a live workspace to the new runtime.
 - **Explicit-stop persistence:** team start preserves explicitly stopped seats instead of resurrecting them. Use `team-agent start <agent>` to wake an individual stopped seat.
 - **Diagnostics:** doctor no longer runs HTTP profile smoke checks; its foreground L1–L6 probes stay scoped to the selected team.
+- **Authorized workspace trust (`1db4e8fa`, default policy):** Claude workers: when Team Agent launches or restarts a Claude worker it confirms Claude's folder-trust dialog for the leader-authorized worker directory, selecting 'Yes, I trust this folder' even when the dialog defaults to 'No, exit'; the worker's permission mode is unchanged. Codex workers get trust for their exact working directory for that invocation only, without changing your saved trust list. Your own leader pane is confirmed only when Yes is already selected; a 'No, exit' default is left for you to answer. Message delivery never answers trust prompts.
 
 ## [0.5.129]
 
