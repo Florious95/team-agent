@@ -2253,7 +2253,7 @@ fn publish_binding(
     commit_binding(workspace, state, intent)?;
     Ok(super::registry::register_binding_from_state_best_effort(
         workspace, Some(team_key), "claim-leader",
-    ).receipt)
+    ).and_then(|outcome| outcome.receipt))
 }
 
 fn commit_binding(

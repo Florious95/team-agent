@@ -84,7 +84,7 @@ fn incept(ws: &Path) -> Result<(), LeaderError> {
         &json!({}),
         false,
         LeaderStartMode::ManagedTmuxClient,
-    )
+    ).map(|_| ())
 }
 
 fn assert_inception_committed(ws: &Path) {

@@ -3158,40 +3158,42 @@ mod tests {
     #[test]
     #[serial_test::serial(env)]
     fn managed_registry_rollback_restores_exact_previous_bytes() {
-        let temp = crate::lifecycle::tests::TestWorkspace::new();
-        let home = temp.path().join("home");
+        let temp = exec_binding_workspace();
+        let home = temp.as_path().join("home");
         std::fs::create_dir(&home).unwrap();
         let _env = EnvGuard::set(&[("HOME", home.to_str())]);
-        let plan = persist_test_plan(temp.path());
+        let plan = persist_test_plan(temp.as_path());
         let registry = crate::leader::registry::registry_dir().unwrap();
         std::fs::create_dir_all(&registry).unwrap();
-        let path = registry.join(format!("{}__current.json", crate::leader::registry::workspace_hash(temp.path())));
+        let path = registry.join(format!("{}__current.json", crate::leader::registry::workspace_hash(temp.as_path())));
         let previous = b"{\n  \"prior_discovery_record\": true\n}\n";
         std::fs::write(&path, previous).unwrap();
-        let publication = persist_managed_leader_binding(&plan, temp.path(), &managed_spawn_result())
+        let publication = persist_managed_leader_binding(&plan, temp.as_path(), &managed_spawn_result())
             .unwrap().expect("inception must return its registry write receipt");
         assert_ne!(std::fs::read(&path).unwrap(), previous);
         assert_eq!(publication.restore().unwrap(), crate::leader::registry::RegistryRollback::Restored);
         assert_eq!(std::fs::read(path).unwrap(), previous);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn managed_registry_rollback_preserves_a_concurrent_winner() {
-        let temp = crate::lifecycle::tests::TestWorkspace::new();
-        let home = temp.path().join("home");
+        let temp = exec_binding_workspace();
+        let home = temp.as_path().join("home");
         std::fs::create_dir(&home).unwrap();
         let _env = EnvGuard::set(&[("HOME", home.to_str())]);
-        let plan = persist_test_plan(temp.path());
-        let publication = persist_managed_leader_binding(&plan, temp.path(), &managed_spawn_result())
+        let plan = persist_test_plan(temp.as_path());
+        let publication = persist_managed_leader_binding(&plan, temp.as_path(), &managed_spawn_result())
             .unwrap().expect("inception must return its registry write receipt");
-        let winner = crate::leader::registry::build_entry(temp.path(), "current", "tmux",
+        let winner = crate::leader::registry::build_entry(temp.as_path(), "current", "tmux",
             serde_json::json!({"status":"attached", "pane_id":"%winner"}), 20,
             "concurrent-writer", chrono::Utc::now().to_rfc3339());
-        let receipt = crate::leader::registry::write_entry_best_effort_with_receipt(&winner).unwrap();
-        let before = std::fs::read(&receipt.path).unwrap();
+        let path = crate::leader::registry::write_entry_best_effort(&winner).unwrap();
+        let before = std::fs::read(&path).unwrap();
         assert_eq!(publication.restore().unwrap(), crate::leader::registry::RegistryRollback::Superseded);
-        assert_eq!(std::fs::read(&receipt.path).unwrap(), before);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
