@@ -1899,6 +1899,19 @@ exit 0
     }
 }
 
+#[cfg(unix)]
+impl Drop for Issue269Carrier {
+    fn drop(&mut self) {
+        if crate::lifecycle::carrier::observe(&self.row, self.pid).state
+            == crate::lifecycle::carrier::CarrierState::Possible {
+            let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.pid as i32),
+                nix::sys::signal::Signal::SIGKILL);
+        }
+        // Reap the carrier through its supervisor before the group guard kills ancillary helpers.
+        let _ = self.guard.wait();
+    }
+}
+
 fn reset_issue_269_probe_state(pid: u32) {
     ISSUE_269_ROOT_PID.with(|root| root.set(pid));
     ISSUE_269_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
