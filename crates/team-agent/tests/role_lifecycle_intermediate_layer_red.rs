@@ -189,14 +189,22 @@ fn add_required_values_cli_generation_and_file_completion() {
     fs::write(&no_provider, "---\nname: no-provider\nrole: Missing provider\ndangerously_skip_permissions: false\n---\nPrompt.\n").unwrap();
     let no_bypass = ws.path().join("no-bypass.md");
     fs::write(&no_bypass, "---\nname: no-bypass\nrole: Missing bypass\nprovider: copilot\n---\nPrompt.\n").unwrap();
+    // 34d41fc7 / 1d2d4d5a (SKILL:40): an omitted provider is completed with the safe
+    // default and reported in `defaulted`, instead of being refused.
     for (id, source, flags) in [
         ("no-provider", no_provider, vec!["--role-file", "", "--bypass", "false", "--prompt", "prompt"]),
     ] {
         let mut flags = flags;
         flags[1] = source.to_str().unwrap();
-        let before = snapshot(&ws, &shims, id);
-        let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags)); reject(&r, "missing required add-agent field");
-        assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists());
+        let source_bytes = fs::read(&source).unwrap();
+        let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
+        assert!(r.is_success(), "omitted provider is defaulted: {} {}", r.stdout, r.stderr);
+        let receipt = r.json();
+        let step = &receipt["steps"][0];
+        assert!(step["defaulted"].as_array().is_some_and(|fields| fields.iter().any(|field| field == "provider")), "{step}");
+        assert_eq!(step["declaration"]["provider"].as_str(), compiled(&ws, id).get("provider").and_then(Yaml::as_str), "{step}");
+        assert_eq!(step["declaration"]["bypass"], false, "{step}");
+        assert_eq!(fs::read(&source).unwrap(), source_bytes, "external source must stay unchanged");
     }
     let native_default = run(&ws, &shims, &cli(&ws, "add-agent", "no-bypass", &["--role-file", no_bypass.to_str().unwrap(), "--model", "gpt-5.6-luna"]));
     assert!(native_default.is_success(), "omitted bypass: {} {}", native_default.stdout, native_default.stderr);
@@ -266,28 +274,47 @@ fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_lo
 #[test]
 fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomically() {
     let (ws, shims) = ws_seed("rolelife-arbitration", "copilot", "gpt-6-luna", None);
-    for (id, fields, should_pass) in [
-        ("same", vec!["--provider", "copilot", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."], true),
-        ("same-prompt-trim", vec!["--prompt", " \tBody.\n "], true),
-        ("conf-provider", vec!["--provider", "fake"], false),
-        ("override-bypass", vec!["--bypass", "true"], true),
-        ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"], false),
-        ("conf-effort", vec!["--effort", "xhigh"], false),
-        ("conf-prompt", vec!["--prompt", "Different body."], false),
+    // 34d41fc7 / 1d2d4d5a (SKILL:122): an explicit CLI field overrides the role
+    // file's value instead of being refused as a conflict. The compiled spec and
+    // the canonical agents/<id>.md carry the CLI value; the external source file
+    // is never edited.
+    for (id, fields) in [
+        ("same", vec!["--provider", "copilot", "--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "false", "--prompt", "Body."]),
+        ("same-prompt-trim", vec!["--prompt", " \tBody.\n "]),
+        ("conf-provider", vec!["--provider", "fake"]),
+        ("override-bypass", vec!["--bypass", "true"]),
+        ("conf-model", vec!["--model", "openai-codex/gpt-6-luna"]),
+        ("conf-effort", vec!["--effort", "xhigh"]),
+        ("conf-prompt", vec!["--prompt", "Different body."]),
     ] {
         let source = ws.path().join(format!("{id}-source.md"));
         let source_bytes = role(id, "copilot", "gpt-5.6-luna", Some("high"), false, "Body.");
         fs::write(&source, &source_bytes).unwrap();
         let mut flags = vec!["--role-file", source.to_str().unwrap()]; flags.extend(fields);
-        let before = snapshot(&ws, &shims, id); let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
-        if should_pass {
-            assert!(r.is_success(), "accepted values: {} {}", r.stdout, r.stderr);
-            assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes());
-            if id == "override-bypass" {
-                assert_config(&ws, id, "copilot", "gpt-5.6-luna", Some("high"), true);
+        let r = run(&ws, &shims, &cli(&ws, "add-agent", id, &flags));
+        assert!(r.is_success(), "accepted values: {} {}", r.stdout, r.stderr);
+        assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes());
+        let declaration = r.json()["steps"][0]["declaration"].clone();
+        match id {
+            "override-bypass" => assert_config(&ws, id, "copilot", "gpt-5.6-luna", Some("high"), true),
+            "conf-provider" => {
+                assert_config(&ws, id, "fake", "gpt-5.6-luna", Some("high"), false);
+                assert_eq!(declaration["provider"], "fake", "{declaration}");
             }
+            "conf-model" => {
+                assert_config(&ws, id, "copilot", "openai-codex/gpt-6-luna", Some("high"), false);
+                assert_eq!(declaration["model"], "openai-codex/gpt-6-luna", "{declaration}");
+            }
+            "conf-effort" => {
+                assert_config(&ws, id, "copilot", "gpt-5.6-luna", Some("xhigh"), false);
+                assert_eq!(declaration["effort"], "xhigh", "{declaration}");
+            }
+            "conf-prompt" => {
+                assert_config(&ws, id, "copilot", "gpt-5.6-luna", Some("high"), false);
+                assert!(fs::read_to_string(role_path(&ws, id)).unwrap().contains("Different body."));
+            }
+            _ => {}
         }
-        else { reject(&r, "file/CLI conflict"); assert_eq!(snapshot(&ws, &shims, id), before); assert!(!role_path(&ws, id).exists()); assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes()); }
     }
     let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "copilot", "gpt-5.6-luna", None, false, "File only.")).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "file-only", &["--role-file", source.to_str().unwrap()]));
@@ -299,29 +326,58 @@ fn duplicate_add_running_or_stopped_is_fail_closed_with_zero_session_side_effect
     let (ws, shims) = ws_seed("rolelife-duplicate", "copilot", "gpt-6-luna", None);
     // Attribute all snapshot changes to the rejected command, not a daemon
     // tick racing the stop that removes the worker's pane binding.
-    let source = ws.path().join("other.md"); fs::write(&source, role("seed", "copilot", "gpt-5.6-luna", None, false, "Other." )).unwrap();
+    let source = ws.path().join("other.md");
+    let source_bytes = role("seed", "copilot", "gpt-5.6-luna", None, false, "Other." );
+    fs::write(&source, &source_bytes).unwrap();
     for stopped in [false, true] {
         if stopped { stop(&ws, &shims, "seed"); }
         let before = snapshot(&ws, &shims, "seed");
         let r = run(&ws, &shims, &cli(&ws, "add-agent", "seed", &["--role-file", source.to_str().unwrap()]));
-        reject(&r, "duplicate seat"); assert_eq!(snapshot(&ws, &shims, "seed"), before);
+        if !stopped {
+            reject(&r, "duplicate seat"); assert_eq!(snapshot(&ws, &shims, "seed"), before);
+        } else {
+            // 34d41fc7 / 1d2d4d5a (SKILL:116, :122): on a stopped seat the same call is a
+            // unified start with the new declaration, not a duplicate.
+            assert!(r.is_success(), "stopped seat restarts with the new declaration: {} {}", r.stdout, r.stderr);
+            framework::wait_for_or_panic(
+                "seed running after the unified start",
+                || ws.read_state()["agents"]["seed"]["status"] == "running",
+                Duration::from_secs(5),
+            );
+            assert_eq!(compiled(&ws, "seed").get("model").and_then(Yaml::as_str), Some("gpt-5.6-luna"));
+            assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes(), "external source must stay unchanged");
+        }
     }
 }
 
 #[test]
 fn running_start_refuses_plain_and_parameterized_calls_without_mutation() {
     let (ws, shims) = ws_seed("rolelife-running", "copilot", "gpt-6-luna", None);
-    // R-M2: `start` of a verified-live seat is idempotent — no error and the live instance (pane,
+    // R-M2: `start` of a live seat never replaces it. As in stage3
+    // running_seats_are_never_replaced_or_edited_by_start, an unchanged start is the
+    // already_running no-op or, while physical identity is still unverified, the typed
+    // planning refusal (c8639440, b7489401). Either way the live instance (pane,
     // session, role, spec) is unchanged.
     let before = snapshot(&ws, &shims, "seed");
     let r = run(&ws, &shims, &start(&ws, "seed", &[]));
-    assert!(r.is_success(), "plain start of a live seat is idempotent: {} {}", r.stdout, r.stderr);
+    let value: Json = serde_json::from_str(&r.stdout).unwrap_or(Json::Null);
+    let noop = r.exit_code == 0
+        && value["ok"] == true
+        && value["status"] == "already_running"
+        && value["steps"].as_array().is_some_and(Vec::is_empty)
+        && value["skipped"][0]["reason"] == "already_running";
+    let unverified = r.exit_code == 1
+        && value["ok"] == false
+        && value["phase"] == "planning_or_selection"
+        && value["error"].as_str().is_some_and(|error| error.contains("unverified"));
+    assert!(noop || unverified, "plain start of a live seat is idempotent: {} {}", r.stdout, r.stderr);
     assert_eq!(snapshot(&ws, &shims, "seed"), before, "plain start must not replace the live instance: {}", r.stdout);
     // A configuration change cannot be applied to a running process: refused, nothing mutated.
     let before = snapshot(&ws, &shims, "seed");
     let r = run(&ws, &shims, &start(&ws, "seed", &["--model", "gpt-5.6-luna", "--effort", "high", "--bypass", "true"]));
     reject(&r, "parameterized start of an already-running seat");
-    let text = format!("{} {}", r.stdout, r.stderr).to_lowercase(); assert!(text.contains("running") || text.contains("already"));
+    let text = format!("{} {}", r.stdout, r.stderr).to_lowercase();
+    assert!(text.contains("running") || text.contains("already") || text.contains("unverified"));
     assert_eq!(snapshot(&ws, &shims, "seed"), before);
 }
 
@@ -470,8 +526,13 @@ fn runtime_spec_and_launch_capture_are_not_substitutes_for_required_live_ui_chec
 #[test]
 fn external_role_conflict_and_duplicate_refusals_leave_canonical_files_and_spec_unchanged() {
     let (ws, shims) = ws_seed("rolelife-zero-side-effects", "copilot", "gpt-6-luna", None);
-    let source = ws.path().join("conflict.md"); fs::write(&source, role("conflict", "copilot", "gpt-5.6-luna", None, false, "File body.")).unwrap();
-    let before = snapshot(&ws, &shims, "conflict");
+    let source = ws.path().join("conflict.md");
+    let source_bytes = role("conflict", "copilot", "gpt-5.6-luna", None, false, "File body.");
+    fs::write(&source, &source_bytes).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "conflict", &["--role-file", source.to_str().unwrap(), "--provider", "fake"]));
-    reject(&r, "provider conflict"); assert_eq!(snapshot(&ws, &shims, "conflict"), before); assert!(!role_path(&ws, "conflict").exists());
+    // 34d41fc7 / 1d2d4d5a (SKILL:122): the CLI provider overrides the file's provider
+    // instead of being refused; the external source file is never edited.
+    assert!(r.is_success(), "CLI provider overrides the role file: {} {}", r.stdout, r.stderr);
+    assert_eq!(compiled(&ws, "conflict").get("provider").and_then(Yaml::as_str), Some("fake"));
+    assert_eq!(fs::read(&source).unwrap(), source_bytes.as_bytes(), "external source must stay unchanged");
 }
