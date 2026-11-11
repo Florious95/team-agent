@@ -1077,10 +1077,13 @@ fn assert_recovery_action(object: &serde_json::Map<String, Value>, label: &str) 
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // e0652b62 retired attach-leader; A4 (ec3ef36e) maps its non-preempting
+    // hint to plain `claim-leader`. Never --confirm or takeover here:
+    // force_confirm_required stays the separate second step.
+    let argv = hint.split_whitespace().collect::<Vec<_>>();
     assert!(
-        hint.split_whitespace()
-            .collect::<Vec<_>>()
-            .starts_with(&["team-agent", "attach-leader"]),
+        argv.starts_with(&["team-agent", "claim-leader"])
+            && !argv.iter().any(|arg| *arg == "--confirm" || *arg == "takeover"),
         "{label}: recovery hint must be a directly executable catalog action; output={}",
         Value::Object(object.clone())
     );

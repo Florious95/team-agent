@@ -719,22 +719,34 @@ fn assert_tmux_binding_registers(env: &HermeticTestEnv, verb: &str) -> Result<()
     let case = RuntimeCase::new(env, &format!("bind-{verb}"), "alpha");
     let pane = case.start_leader_pane("leader");
     let second_pane = case.start_extra_pane("new-leader");
+    // e0652b62 retired attach-leader and takeover: each is refused before any
+    // effect (no registry entry), and its binding hook is re-expressed on the
+    // replacement: plain claim-leader for attach, claim-leader --confirm for
+    // takeover's preemption.
+    if verb != "claim-leader" {
+        let refused = case.run_cli(vec![verb.into(), "--workspace".into(), case.workspace_arg(),
+            "--team".into(), "alpha".into(), "--json".into()]);
+        let text = String::from_utf8_lossy(&refused.stdout);
+        if refused.status.success() || !(text.contains("retired") && text.contains("claim-leader"))
+            || !registry_entries(&case.home).is_empty() {
+            return Err(format!("{verb}: retired verb must refuse without effects; stdout={text}"));
+        }
+    }
     match verb {
         "attach-leader" => {
             case.seed_state_without_receiver("alpha");
-            let output = case.run_cli(vec![
-                "attach-leader".into(),
-                "--workspace".into(),
-                case.workspace_arg(),
-                "--team".into(),
-                "alpha".into(),
-                "--pane".into(),
-                pane.clone(),
-                "--provider".into(),
-                "codex".into(),
-                "--json".into(),
-            ]);
-            assert_command_succeeded(&output, "attach-leader")?;
+            let output = case.run_cli_with_env(
+                vec![
+                    "claim-leader".into(),
+                    "--workspace".into(),
+                    case.workspace_arg(),
+                    "--team".into(),
+                    "alpha".into(),
+                    "--json".into(),
+                ],
+                &[("TMUX_PANE", pane.clone())],
+            );
+            assert_command_succeeded(&output, "attach-leader -> claim-leader")?;
         }
         "claim-leader" => {
             case.seed_state_without_receiver("alpha");
@@ -756,7 +768,7 @@ fn assert_tmux_binding_registers(env: &HermeticTestEnv, verb: &str) -> Result<()
             case.seed_state_with_receiver("alpha", &pane, 4);
             let output = case.run_cli_with_env(
                 vec![
-                    "takeover".into(),
+                    "claim-leader".into(),
                     "--workspace".into(),
                     case.workspace_arg(),
                     "--team".into(),
@@ -766,7 +778,7 @@ fn assert_tmux_binding_registers(env: &HermeticTestEnv, verb: &str) -> Result<()
                 ],
                 &[("TMUX_PANE", second_pane.clone())],
             );
-            assert_command_succeeded(&output, "takeover")?;
+            assert_command_succeeded(&output, "takeover -> claim-leader --confirm")?;
         }
         other => panic!("unknown verb {other}"),
     }
@@ -778,7 +790,8 @@ fn assert_tmux_binding_registers(env: &HermeticTestEnv, verb: &str) -> Result<()
         ));
     }
     let entry = &entries[0].1;
-    assert_registry_schema(entry, &case.workspace, "alpha", "direct_tmux", verb);
+    // Every arm now binds through claim-leader (e0652b62), the registry source.
+    assert_registry_schema(entry, &case.workspace, "alpha", "direct_tmux", "claim-leader");
     if entry
         .pointer("/channel/pane_id")
         .and_then(Value::as_str)

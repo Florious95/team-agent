@@ -201,7 +201,13 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
         let value: Value = serde_json::from_slice(&out.stdout).expect("leader launcher emits json");
         assert_eq!(value["is_external_leader"], json!(true), "{command}");
         assert_eq!(value["leader_topology"], json!("external"), "{command}");
-        assert_eq!(value["leader_window"], Value::Null, "{command}");
+        // e0652b62: an external leader may report its own provider window name;
+        // it never names the managed `leader` window (tmux log check below).
+        assert!(
+            value["leader_window"].is_null()
+                || (value["leader_window"] == value["provider"] && value["leader_window"] != json!("leader")),
+            "{command}: {value}"
+        );
         assert_eq!(value["leader_attach_command"], Value::Null, "{command}");
         let tmux_log = read_to_string(&fake.tmux_log);
         assert!(
@@ -294,37 +300,37 @@ fn attach_leader_uses_state_recorded_tmux_socket_endpoint() {
             )),
         ),
         ("TMUX", None),
-        ("TMUX_PANE", None),
+        ("TMUX_PANE", Some("%77".to_string())),
     ]);
 
+    // e0652b62 retired attach-leader; its replacement is claim-leader from the
+    // intended leader pane, which keeps resolving that pane through the
+    // state-recorded tmux_socket with -S.
     let attach = Command::new(bin())
         .args([
-            "attach-leader",
+            "claim-leader",
             "--workspace",
             workspace.to_str().unwrap(),
-            "--pane",
-            "%77",
-            "--provider",
-            "claude",
             "--json",
         ])
         .output()
-        .expect("attach leader using state socket");
+        .expect("claim leader using state socket");
     let stdout = String::from_utf8_lossy(&attach.stdout);
     let stderr = String::from_utf8_lossy(&attach.stderr);
     let tmux_log = read_to_string(&fake.tmux_log);
     assert!(
         attach.status.success(),
-        "attach-leader must resolve pane through state tmux_socket using -S; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+        "claim-leader must resolve pane through state tmux_socket using -S; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
     );
-    let value: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
-    assert_eq!(value["ok"], json!(true));
-    assert_eq!(value["leader_receiver"]["pane_id"], json!("%77"));
+    let value: Value = serde_json::from_slice(&attach.stdout).expect("claim json");
+    assert_eq!(value["ok"], json!(true), "{value}");
+    let state = load_runtime_state(&workspace).expect("load state after claim");
+    assert_eq!(state["teams"]["current"]["leader_receiver"]["pane_id"], json!("%77"), "{state}");
     assert!(
         tmux_log
             .lines()
             .any(|line| line.contains("-S") && line.contains(socket_path.to_str().unwrap())),
-        "attach-leader must probe the recorded socket endpoint with -S; tmux_log={tmux_log:?}"
+        "claim-leader must probe the recorded socket endpoint with -S; tmux_log={tmux_log:?}"
     );
 }
 
@@ -360,25 +366,23 @@ fn attach_leader_prefers_verified_caller_socket_over_worker_socket() {
         ("TMUX_PANE", Some("%77".to_string())),
     ]);
 
+    // e0652b62 retired attach-leader; claim-leader keeps the verified
+    // $TMUX caller socket ahead of the persisted worker socket.
     let attach = Command::new(bin())
         .args([
-            "attach-leader",
+            "claim-leader",
             "--workspace",
             workspace.to_str().unwrap(),
-            "--pane",
-            "%77",
-            "--provider",
-            "claude",
             "--json",
         ])
         .output()
-        .expect("attach leader using caller socket");
+        .expect("claim leader using caller socket");
     let stdout = String::from_utf8_lossy(&attach.stdout);
     let stderr = String::from_utf8_lossy(&attach.stderr);
     let tmux_log = read_to_string(&fake.tmux_log);
     assert!(
         attach.status.success(),
-        "attach-leader must find the caller pane on $TMUX before the persisted worker socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+        "claim-leader must find the caller pane on $TMUX before the persisted worker socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
     );
     let first_list = tmux_log
         .lines()
@@ -433,40 +437,34 @@ fn attach_leader_uses_team_scoped_state_socket_endpoint() {
             )),
         ),
         ("TMUX", None),
-        ("TMUX_PANE", None),
+        ("TMUX_PANE", Some("%88".to_string())),
     ]);
 
+    // e0652b62 retired attach-leader; claim-leader --team child keeps
+    // resolving the caller pane through the child team's recorded socket.
     let attach = Command::new(bin())
         .args([
-            "attach-leader",
+            "claim-leader",
             "--workspace",
             workspace.to_str().unwrap(),
             "--team",
             "child",
-            "--pane",
-            "%88",
-            "--provider",
-            "claude",
             "--json",
         ])
         .output()
-        .expect("attach leader using child team socket");
+        .expect("claim leader using child team socket");
     let stdout = String::from_utf8_lossy(&attach.stdout);
     let stderr = String::from_utf8_lossy(&attach.stderr);
     let tmux_log = read_to_string(&fake.tmux_log);
     assert!(
         attach.status.success(),
-        "attach-leader --team child must resolve pane through child state's tmux_socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+        "claim-leader --team child must resolve pane through child state's tmux_socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
     );
-    let value: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
-    assert_eq!(value["ok"], json!(true));
-    assert_eq!(value["team"], json!("child"));
-    assert_eq!(value["leader_receiver"]["pane_id"], json!("%88"));
-    assert_eq!(
-        value["leader_receiver"]["tmux_socket"],
-        json!(child_socket.to_string_lossy().to_string())
-    );
-    let state = load_runtime_state(&workspace).expect("load state after attach");
+    let value: Value = serde_json::from_slice(&attach.stdout).expect("claim json");
+    assert_eq!(value["ok"], json!(true), "{value}");
+    assert_eq!(value["resolved_team"], json!("child"), "{value}");
+    let state = load_runtime_state(&workspace).expect("load state after claim");
+    assert_eq!(state["teams"]["child"]["leader_receiver"]["pane_id"], json!("%88"), "{state}");
     assert_eq!(
         state["teams"]["child"]["leader_receiver"]["tmux_socket"],
         json!(child_socket.to_string_lossy().to_string())

@@ -572,16 +572,12 @@ fn issue326_stale_managed_reentry_is_not_ambient_authority() {
     })).expect("seed stale managed receiver");
     let output = case.run(&["codex", "--json", "--", "--contract-canary"], Some(AMBIENT_PANE));
     let receiver = assert_owned_managed_route(&case, &output, "stale managed reentry");
-    // Existing parallel-Leader registration deliberately preserves its first
-    // scalar binding. Isolation adds the new exact binding, not authority to
-    // delete or rewrite the previous receiver's history.
-    assert_eq!(receiver["pane_id"], json!(AMBIENT_PANE));
-    let bindings = receiver["bound_panes"].as_array().expect("parallel bindings");
-    assert_eq!(bindings.len(), 2);
-    assert!(bindings.iter().any(|binding| {
-        binding["pane_id"] == json!(AMBIENT_PANE)
-            && binding["tmux_socket"] == json!(case.endpoint.to_str().unwrap())
-    }));
+    // e0652b62 retired parallel bound_panes; d2d7ebc6 preserves a prior
+    // binding only while its bound pane instance is live. This recorded pane
+    // is not found, so it is not ambient authority: the fresh isolated launch
+    // binds exactly the new owned pane and the stale tuple is not retained.
+    assert_eq!(receiver["pane_id"], json!("%managed"), "{receiver}");
+    assert_ne!(receiver["tmux_socket"], json!(case.endpoint.to_str().unwrap()), "{receiver}");
 }
 
 fn assert_owned_managed_isolation(case: &Case, output: &Output, label: &str) {
@@ -604,11 +600,11 @@ fn assert_owned_managed_route(case: &Case, output: &Output, label: &str) -> Valu
     let team_key = state["active_team_key"].as_str().expect("launched canonical team");
     let receiver = &state["teams"][team_key]["leader_receiver"];
     assert_ne!(receiver["tmux_socket"], json!(case.endpoint.to_str().unwrap()), "{label}: {receiver}");
-    let bindings = receiver["bound_panes"].as_array().expect("owned receiver bindings");
-    assert_eq!(bindings.iter().filter(|binding| {
-        binding["pane_id"] == json!("%managed")
-            && binding["tmux_socket"] == receiver["tmux_socket"]
-    }).count(), 1, "{label}: must bind the one new owned pane exactly");
+    // e0652b62: the leader receiver is one scalar binding (no bound_panes
+    // list) on the owned socket; callers assert which pane it names.
+    assert!(receiver["pane_id"].as_str().is_some_and(|pane| !pane.is_empty())
+        && receiver["tmux_socket"].as_str().is_some_and(|socket| !socket.is_empty()),
+        "{label}: owned receiver binding: {receiver}");
     receiver.clone()
 }
 
@@ -833,30 +829,70 @@ fn b1_send_reports_the_physical_endpoint_failure_without_rebinding() {
 #[test]
 #[serial(env)]
 fn b2_doctor_independently_checks_live_workspace_even_when_state_says_attached() {
+    // R-DOC1 (test-opus, BLUEPRINT §12) on doctor v1 (262f6cdb): doctor no
+    // longer projects pane-authority catalog reasons; it independently probes
+    // the return link and stays read-only.
     let case = Case::new("b2-doctor");
     case.seed_foreign_attached_state();
     case.set_mode("foreign");
+    let value = run_doctor_v1(&case, None, "B2 doctor phase 1 (foreign)");
+    assert_eq!(value["ok"], false, "{value}");
+    let ret = doctor_link(&value, "L6");
+    assert_ne!(ret["status"], "PASS", "B2 phase 1: {value}");
+    assert!(ret["message"].as_str().is_some_and(|message| message.contains(AMBIENT_PANE)), "B2 phase 1: {value}");
+    assert_doctor_claim_next_action(&value, &case, "B2 phase 1");
+    assert_eq!(value["next_action"]["context"], "from the current leader terminal", "B2 phase 1: {value}");
 
+    // Phase 2: the same attached state, but the recorded pane is gone.
+    case.set_mode("recovery");
+    let value = run_doctor_v1(&case, None, "B2 doctor phase 2 (recorded pane missing)");
+    let ret = doctor_link(&value, "L6");
+    assert_eq!(ret["status"], "FAIL", "B2 phase 2: {value}");
+    assert!(ret["message"].as_str().is_some_and(|message| message.contains("unreachable")), "B2 phase 2: {value}");
+    assert_doctor_claim_next_action(&value, &case, "B2 phase 2");
+    assert_eq!(value["ok"], false, "{value}");
+}
+
+/// R-DOC1 shared readonly check: state.json and the host leader registry are
+/// byte-identical before and after doctor.
+fn doctor_readonly_snapshot(case: &Case) -> (Vec<u8>, std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+    let state = fs::read(case.state_path()).unwrap_or_default();
+    let mut registry = std::collections::BTreeMap::new();
+    if let Ok(entries) = fs::read_dir(case.env.home().join(".team-agent/leaders")) {
+        for entry in entries.flatten() {
+            registry.insert(entry.path(), fs::read(entry.path()).unwrap_or_default());
+        }
+    }
+    (state, registry)
+}
+
+fn run_doctor_v1(case: &Case, pane: Option<&str>, label: &str) -> Value {
+    let before = doctor_readonly_snapshot(case);
     let output = case.run(
-        &[
-            "doctor",
-            "--workspace",
-            case.workspace_str(),
-            "--team",
-            TEAM,
-            "--json",
-        ],
-        None,
+        &["doctor", "--workspace", case.workspace_str(), "--team", TEAM, "--json"],
+        pane,
     );
-    let value = json_stdout_even_on_error("B2 doctor", &output);
+    let value = json_stdout_even_on_error(label, &output);
+    assert_eq!(value["schema"], "team-agent.doctor.v1", "{label}: {value}");
+    let ids = value["links"].as_array().into_iter().flatten()
+        .map(|link| link["id"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    assert_eq!(ids, ["L1", "L2", "L3", "L4", "L5", "L6"], "{label}: {value}");
+    assert_eq!(doctor_readonly_snapshot(case), before,
+        "{label}: doctor must leave state.json and the host leader registry byte-identical");
+    value
+}
 
-    assert_catalog_refusal_payload(
-        &value,
-        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
-        None,
-        "B2 doctor public surface",
-    );
-    assert_workspace_mismatch_facts(&value, "B2 doctor public surface");
+fn doctor_link<'a>(value: &'a Value, id: &str) -> &'a Value {
+    value["links"].as_array().and_then(|links| links.iter().find(|link| link["id"] == id))
+        .unwrap_or_else(|| panic!("doctor link {id} missing: {value}"))
+}
+
+fn assert_doctor_claim_next_action(value: &Value, case: &Case, label: &str) {
+    let argv = value["next_action"]["argv"].as_array().cloned().unwrap_or_default();
+    let argv = argv.iter().map(|arg| arg.as_str().unwrap_or("")).collect::<Vec<_>>();
+    assert_eq!(argv.get(1).copied(), Some("claim-leader"), "{label}: {value}");
+    assert!(argv.windows(2).any(|pair| pair == ["--workspace", case.workspace_str()])
+        && argv.windows(2).any(|pair| pair == ["--team", TEAM]), "{label}: {value}");
 }
 
 #[test]
@@ -874,75 +910,45 @@ fn b2_doctor_single_snapshot_survives_later_read_failure() {
     );
 }
 
+// R-DOC1 (test-opus, BLUEPRINT §12): doctor v1 (262f6cdb) probes each link
+// separately, so the single-read count no longer applies; these pin the v1
+// verdict under the reread race and the later read failure instead.
 fn assert_single_snapshot_rejects_reread_race(surface: RecoverySurface, tag: &str) {
+    assert!(matches!(surface, RecoverySurface::Doctor), "doctor-only surface");
     let case = Case::new(tag);
     case.seed_foreign_attached_state();
     case.set_mode("snapshot-reread-changes");
-
-    let output = surface.invoke(&case, AMBIENT_PANE);
-    let value = json_stdout_even_on_error(
-        &format!("{} single-snapshot reread race", surface.name()),
-        &output,
+    let value = run_doctor_v1(&case, Some(AMBIENT_PANE), "doctor single-snapshot reread race");
+    let address = format!("{AMBIENT_PANE}@{}", case.endpoint.display());
+    let ret = doctor_link(&value, "L6");
+    let message = ret["message"].as_str().unwrap_or_default();
+    // Doctor v1 renders the registered receiver as `leader <addr> reachable`
+    // or `registered <addr>` (unreachable); both name the registered address.
+    assert!(
+        (message.contains(&format!("leader {address} ")) || message.contains(&format!("registered {address};")))
+            && message.contains(&format!("caller {address}")),
+        "reread race: L6 must name registered and caller {address}; output={value}"
     );
-    let reads = case.workspace_observation_trace();
-    assert_eq!(
-        reads.len(),
-        1,
-        "{} SNAPSHOT_MODE1_REREAD_RACE RED signature: the public presenter must consume the \
-         mismatch snapshot instead of observing pane workspace again; \
-         workspace_observation_read_count={} expected=1 trace={reads:?} output={value}",
-        surface.name(),
-        reads.len()
-    );
-    assert_catalog_refusal_payload(
-        &value,
-        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
-        None,
-        &format!("{} single-snapshot reread-race payload", surface.name()),
-    );
-    assert_workspace_mismatch_facts_match_case(
-        &value,
-        &case,
-        &format!("{} single-snapshot reread-race payload", surface.name()),
-    );
+    assert_ne!(ret["status"], "PASS", "reread race must never pass L6: {value}");
+    assert_eq!(value["ok"], false, "reread race must never be ok: {value}");
+    assert_doctor_claim_next_action(&value, &case, "reread race");
 }
 
 fn assert_single_snapshot_survives_later_read_failure(surface: RecoverySurface, tag: &str) {
+    assert!(matches!(surface, RecoverySurface::Doctor), "doctor-only surface");
     let case = Case::new(tag);
     case.seed_foreign_attached_state();
     case.set_mode("snapshot-reread-fails");
-
-    let output = surface.invoke(&case, AMBIENT_PANE);
-    let value = json_stdout_even_on_error(
-        &format!("{} single-snapshot later-read failure", surface.name()),
-        &output,
-    );
-    let reads = case.workspace_observation_trace();
-    let payload_present = find_reason_object(
-        &value,
-        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
-    )
-    .is_some();
+    let value = run_doctor_v1(&case, Some(AMBIENT_PANE), "doctor single-snapshot later-read failure");
     assert!(
-        reads.len() == 1 && payload_present,
-        "{} SNAPSHOT_MODE2_RESOLVED_MISMATCH_SURVIVES_REREAD_FAILURE RED signature: a failed \
-         presenter reread must not erase the already-observed mismatch payload; \
-         workspace_observation_read_count={} expected=1 payload_present={payload_present} \
-         trace={reads:?} output={value}",
-        surface.name(),
-        reads.len()
+        value["links"].as_array().into_iter().flatten().any(|link| link["status"] == "FAIL"
+            && link["message"].as_str().is_some_and(|message| message.contains("later list_targets read failed"))),
+        "a later read failure must stay visible in a FAIL link; output={value}"
     );
-    assert_catalog_refusal_payload(
-        &value,
-        refusal_catalog::PaneAuthorityRefusalReason::PaneWorkspaceMismatch,
-        None,
-        &format!("{} single-snapshot later-failure payload", surface.name()),
-    );
-    assert_workspace_mismatch_facts_match_case(
-        &value,
-        &case,
-        &format!("{} single-snapshot later-failure payload", surface.name()),
-    );
+    assert_ne!(doctor_link(&value, "L3")["status"], "PASS", "{value}");
+    assert_ne!(doctor_link(&value, "L5")["status"], "PASS", "{value}");
+    assert_eq!(doctor_link(&value, "L4")["status"], "PASS", "{value}");
+    assert_eq!(value["ok"], false, "{value}");
 }
 
 #[test]
@@ -1061,7 +1067,7 @@ fn b3_launcher_recovery_action_removes_the_same_typed_error() {
     let recovery_argv = copyable_recovery_command(&before).unwrap_or_else(|| {
         panic!(
             "B3 RED signature: recovery guidance must contain a directly executable \
-             team-agent attach-leader/takeover command; output={before}"
+             team-agent claim-leader command; output={before}"
         )
     });
     let recovery_args = recovery_argv
@@ -1165,7 +1171,35 @@ fn close_surface_refusal(surface: RecoverySurface, case: &Case, before_value: &V
     }
 }
 
+/// R-DOC1 item 4: doctor v1 recovery closes through doctor's own next_action.
+fn assert_doctor_v1_recovery_action_closes(case: &Case) {
+    case.seed_foreign_attached_state();
+    case.set_mode("foreign-workspace");
+    let before = run_doctor_v1(case, Some(AMBIENT_PANE), "doctor before recovery");
+    assert_eq!(before["ok"], false, "{before}");
+    assert_ne!(doctor_link(&before, "L6")["status"], "PASS", "{before}");
+    assert_eq!(before["next_action"]["argv"][1], "claim-leader", "{before}");
+
+    case.set_mode("recovery");
+    let argv = before["next_action"]["argv"].as_array().unwrap().iter()
+        .skip(1).map(|arg| arg.as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let args = argv.iter().map(String::as_str).collect::<Vec<_>>();
+    let close = case.run(&args, Some(GOOD_PANE));
+    assert!(close.status.success(), "doctor's own next_action must close from the corrected pane; argv={argv:?} stdout={} stderr={}",
+        String::from_utf8_lossy(&close.stdout), String::from_utf8_lossy(&close.stderr));
+
+    let after = run_doctor_v1(case, Some(GOOD_PANE), "doctor after recovery");
+    let ret = doctor_link(&after, "L6");
+    assert_eq!(ret["status"], "PASS", "{after}");
+    assert!(!ret["message"].as_str().unwrap_or("").contains(AMBIENT_PANE), "{after}");
+    let state: Value = serde_json::from_slice(&fs::read(case.state_path()).unwrap()).unwrap();
+    assert_eq!(state["teams"][TEAM]["leader_receiver"]["pane_id"], json!(GOOD_PANE), "{state}");
+}
+
 fn assert_independent_surface_recovery_action_closes(surface: RecoverySurface) {
+    if matches!(surface, RecoverySurface::Doctor) {
+        return assert_doctor_v1_recovery_action_closes(&Case::new(surface.independent_tag()));
+    }
     let case = Case::new(surface.independent_tag());
     case.seed_foreign_attached_state();
     case.set_mode("foreign-workspace");
@@ -1206,6 +1240,10 @@ fn b3_each_public_surface_recovery_action_closes_its_original_refusal() {
         RecoverySurface::Launcher,
         RecoverySurface::Doctor,
     ] {
+        if matches!(surface, RecoverySurface::Doctor) {
+            assert_doctor_v1_recovery_action_closes(&Case::new(surface.tag()));
+            continue;
+        }
         let case = Case::new(surface.tag());
         case.seed_foreign_attached_state();
         case.set_mode("foreign-workspace");
@@ -2459,42 +2497,6 @@ fn assert_workspace_mismatch_facts(value: &Value, label: &str) {
     );
 }
 
-fn assert_workspace_mismatch_facts_match_case(value: &Value, case: &Case, label: &str) {
-    use refusal_catalog::{
-        PaneAuthorityRefusalField as Field, PaneAuthorityRefusalReason as Reason,
-    };
-
-    assert_workspace_mismatch_facts(value, label);
-    let object = find_reason_object(value, Reason::PaneWorkspaceMismatch)
-        .unwrap_or_else(|| panic!("{label}: workspace mismatch object missing; output={value}"));
-    let expected_requested = case
-        .workspace
-        .canonicalize()
-        .unwrap_or_else(|_| case.workspace.clone());
-    assert_eq!(
-        object[Field::RequestedWorkspace.as_str()].as_str(),
-        Some(expected_requested.to_string_lossy().as_ref()),
-        "{label}: requested workspace must come from the original mismatch snapshot; \
-         output={value}"
-    );
-    assert_eq!(
-        object[Field::ObservedPaneId.as_str()].as_str(),
-        Some(AMBIENT_PANE),
-        "{label}: observed pane must come from the original mismatch snapshot; output={value}"
-    );
-    assert_eq!(
-        object[Field::ObservedPaneWorkspace.as_str()].as_str(),
-        Some(case.foreign_workspace.to_string_lossy().as_ref()),
-        "{label}: observed pane workspace must come from the original mismatch snapshot; \
-         output={value}"
-    );
-    assert_eq!(
-        object[Field::Endpoint.as_str()].as_str(),
-        Some(case.endpoint.to_string_lossy().as_ref()),
-        "{label}: endpoint must come from the original mismatch snapshot; output={value}"
-    );
-}
-
 fn assert_tty_mismatch_facts(value: &Value, label: &str) {
     use refusal_catalog::{
         PaneAuthorityRefusalField as Field, PaneAuthorityRefusalReason as Reason,
@@ -2565,16 +2567,17 @@ fn assert_recovery_action(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_ascii_lowercase();
-    assert!(
-        !action.contains("claim-leader") && !hint.contains("claim-leader"),
-        "{label}: pane-authority recovery must not emit extra claim-leader; action={action} hint={hint} output={value}"
-    );
-    let attach_guidance = hint.contains("attach-leader") || action.contains("attach-leader");
-    let takeover_guidance = hint.contains("takeover") || action.contains("takeover");
-    assert!(
-        !(attach_guidance && takeover_guidance),
-        "{label}: pane-authority recovery must not shotgun attach-leader with takeover; action={action} hint={hint} output={value}"
-    );
+    // e0652b62 retired attach-leader/takeover; A4 (ec3ef36e) maps the
+    // non-preempting attach hint to plain `claim-leader`. Pane-authority
+    // recovery must never escalate to preemption: no --confirm, no takeover,
+    // and no retired attach-leader verb. force_confirm_required stays the
+    // separate second step.
+    for escalation in ["--confirm", "takeover", "attach-leader"] {
+        assert!(
+            !action.contains(escalation) && !hint.contains(escalation),
+            "{label}: pane-authority recovery must not escalate with {escalation}; action={action} hint={hint} output={value}"
+        );
+    }
     let has_catalog_command = parse_supported_recovery_command(&hint).is_some()
         || copyable_recovery_command(&Value::Object(object.clone())).is_some();
     match reason {
@@ -2718,8 +2721,9 @@ fn contains_tmux_operation(log: &str, operation: &str) -> bool {
 
 fn has_copyable_recovery_action(value: &Value) -> bool {
     let text = value.to_string().to_ascii_lowercase();
-    text.contains("team-agent attach-leader")
-        || text.contains("team-agent takeover")
+    // e0652b62/A4 (ec3ef36e): retired attach-leader/takeover guidance is
+    // replaced by plain claim-leader.
+    text.contains("team-agent claim-leader")
         || text.contains("clean terminal")
         || text.contains("unset tmux")
 }
@@ -2742,10 +2746,11 @@ fn parse_supported_recovery_command(command: &str) -> Option<Vec<String>> {
         .split_whitespace()
         .map(str::to_string)
         .collect::<Vec<_>>();
+    // e0652b62/A4 (ec3ef36e): the supported non-preempting recovery verb is
+    // `team-agent claim-leader` without --confirm.
     let supported = argv.first().is_some_and(|arg| arg == "team-agent")
-        && argv
-            .get(1)
-            .is_some_and(|arg| arg == "attach-leader" || arg == "takeover");
+        && argv.get(1).is_some_and(|arg| arg == "claim-leader")
+        && !argv.iter().any(|arg| arg == "--confirm");
     supported.then_some(argv)
 }
 
