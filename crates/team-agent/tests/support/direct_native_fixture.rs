@@ -62,6 +62,8 @@ impl NativeAuthority {
     pub fn start(root: &Path, provider: &'static str) -> Self {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::io::{BufRead, BufReader, Write};
+        // A real launch persists the declared canonical provider, not a legacy wire alias.
+        let provider = team_agent::contract_runtime::registry::declared(provider).unwrap().identity.id;
         let canonical = root.canonicalize().unwrap();
         let root = canonical.as_path();
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
