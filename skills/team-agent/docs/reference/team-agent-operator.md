@@ -10,6 +10,12 @@ The current daily forms below are coverage authorities, not permission to execut
 ### Current documented forms
 ```text
 team-agent --version
+team-agent claim-leader --confirm
+team-agent pi
+team-agent start
+team-agent start AGENT --provider PROVIDER --model MODEL --session fresh
+team-agent start reviewer
+team-agent stop <agent>
 team-agent agent clone reviewer --as second-reviewer --workspace . --team project-team
 team-agent agent fork reviewer --as continued-reviewer --workspace . --team project-team
 team-agent agent remove reviewer --confirm --workspace . --team project-team

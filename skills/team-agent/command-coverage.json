@@ -85,20 +85,6 @@
       "plan": "Verify the -- boundary, literal flag-looking payload, UTF-8/control limits, empty-composer guards and no replay after post-paste uncertainty."
     },
     {
-      "command": "team-agent add-agent <agent> --role-file <file>",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute the documented argv in an isolated add-agent fixture and bind assertions to the CLI result and created roster/window."
-    },
-    {
-      "command": "team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute the exact reviewer argv in an isolated fixture and assert the reviewer state, role provenance, and worker window."
-    },
-    {
       "command": "team-agent approvals",
       "bucket": "declared_gap",
       "covered": false,
@@ -134,13 +120,6 @@
       "plan": "Use a per-call hermetic PATH shim for claude, then assert the shim's exact provider argv log and the bound CLI exit/output."
     },
     {
-      "command": "team-agent clone-agent <source> --as <new>",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:provider-lifecycle",
-      "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to clone success or its exact rollback refusal."
-    },
-    {
       "command": "team-agent codex",
       "bucket": "declared_gap",
       "covered": false,
@@ -160,13 +139,6 @@
       "covered": false,
       "owner": "runtime-owner:diagnostics",
       "plan": "Execute the exact human doctor argv and bind assertions to its exit and key diagnostic checks. The final human Advisory must say Do not poll; JSON variants add only the root string polling_advisory, including handled errors, without changing nested advisory booleans or exit codes."
-    },
-    {
-      "command": "team-agent fork-agent <source> --as <new>",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:provider-lifecycle",
-      "plan": "Use an isolated provider/session fixture or authorized subscription gate and bind assertions to fork success or its exact rollback refusal."
     },
     {
       "command": "team-agent inbox <agent_id> -n 3",
@@ -230,132 +202,6 @@
       "covered": false,
       "owner": "runtime-owner:profiles",
       "plan": "Show the isolated deepseek profile and bind exact identity/auth-mode assertions to the CLI result."
-    },
-    {
-      "command": "team-agent quick-start",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute the exact argv from a hermetic project root and bind assertions to canonical runtime, team, and session identity."
-    },
-    {
-      "command": "team-agent quick-start ./roles --team-id alpha",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute against an isolated legacy roles fixture and bind assertions to the alpha team identity and unique runtime."
-    },
-    {
-      "command": "team-agent quick-start .team/alpha",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute against an isolated team directory and bind assertions proving the directory literal cannot split canonical team identity."
-    },
-    {
-      "command": "team-agent quick-start .team/current",
-      "bucket": "covered",
-      "cases": [
-        "lnch_001_quick_start_basic"
-      ],
-      "evidence": {
-        "case": "lnch_001_quick_start_basic",
-        "source_file": "crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs",
-        "invocation": {
-          "runner": "run_ta",
-          "line": 30,
-          "documented_argv": [
-            "team-agent",
-            "quick-start",
-            ".team/current"
-          ],
-          "literal_argv": [
-            "quick-start",
-            ".team/current"
-          ]
-        },
-        "binding": {
-          "name": "out",
-          "line": 30
-        },
-        "assertion": {
-          "macro_name": "assert",
-          "line": 41,
-          "operand": "condition",
-          "behavior_fact": "stdout",
-          "failure_marker": "quick-start did not launch the team"
-        },
-        "negative_twin": {
-          "env_key": "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN",
-          "env_value": "quick-start-status",
-          "operation": "remove_text_literal",
-          "remove_literal": "status: leader_receiver_unbound",
-          "replacement": "negative_twin_removed"
-        }
-      }
-    },
-    {
-      "command": "team-agent quick-start <dir>",
-      "bucket": "covered",
-      "cases": [
-        "lnch_001_quick_start_basic"
-      ],
-      "evidence": {
-        "case": "lnch_001_quick_start_basic",
-        "source_file": "crates/team-agent/tests/e2e/cases/lnch_001_quick_start_basic.rs",
-        "invocation": {
-          "runner": "run_ta",
-          "line": 30,
-          "documented_argv": [
-            "team-agent",
-            "quick-start",
-            "<dir>"
-          ],
-          "literal_argv": [
-            "quick-start",
-            ".team/current"
-          ]
-        },
-        "binding": {
-          "name": "out",
-          "line": 30
-        },
-        "assertion": {
-          "macro_name": "assert",
-          "line": 69,
-          "operand": "condition",
-          "behavior_fact": "stdout",
-          "failure_marker": "public output must expose the canonical session name"
-        },
-        "negative_twin": {
-          "env_key": "TEAM_AGENT_COVERAGE_NEGATIVE_TWIN",
-          "env_value": "quick-start-session-name",
-          "operation": "remove_text_literal",
-          "remove_literal": "session_name: ",
-          "replacement": "negative_twin_removed"
-        }
-      }
-    },
-    {
-      "command": "team-agent quick-start <plain-text-team-dir>",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Run exact argv team-agent quick-start <plain-text-team-dir> in an isolated workspace with plain-text TEAM.md and agents/<stem>.md; bind successful compilation, objective, filename-derived id, and default provider/model/effort/bypass in the generated spec."
-    },
-    {
-      "command": "team-agent remove-agent <agent> --workspace . --confirm",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute the exact argv in a dedicated hermetic lifecycle fixture and bind assertions to roster/window removal and sibling preservation."
-    },
-    {
-      "command": "team-agent reset-agent <agent> --discard-session",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute the exact argv in a dedicated hermetic fixture and bind assertions to session discard and worker state."
     },
     {
       "command": "team-agent restart",
@@ -426,34 +272,6 @@
       "covered": false,
       "owner": "runtime-owner:messaging",
       "plan": "Execute the exact argv against a fake reviewer and bind recipient, delivered, original result, and collect assertions."
-    },
-    {
-      "command": "team-agent shutdown --workspace . --keep-logs",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:shutdown",
-      "plan": "Execute the exact argv only in a dedicated hermetic fixture and bind assertions to scoped session removal, kept logs, and sibling preservation."
-    },
-    {
-      "command": "team-agent start-agent <agent>",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute a representative exact argv for a stopped fake agent and bind assertions to status, pane, and window creation."
-    },
-    {
-      "command": "team-agent start-agent <agent_id> --workspace .",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute a representative exact workspace-dot argv and bind assertions to the same agent's lifecycle result."
-    },
-    {
-      "command": "team-agent start-agent coder --workspace .",
-      "bucket": "declared_gap",
-      "covered": false,
-      "owner": "runtime-owner:lifecycle",
-      "plan": "Execute in an isolated coder fixture and bind assertions that the selected coder, not a sibling namesake, starts."
     },
     {
       "command": "team-agent status",
