@@ -108,18 +108,57 @@ fn claude_active_yes_trust_handler_sends_exactly_enter_not_digit_one() {
     );
 }
 
+/// D2 (ratified): 1db4e8fa makes the worker-owned startup handler move a `No, exit` selector
+/// to Yes before confirming, and a351bb99 extends this to the current unnumbered No-first
+/// dialog. The `No, exit` choice itself is still never auto-answered: a bare Enter would
+/// confirm it and exit Claude. This seam has no pane-owner context; the leader-pane negative
+/// (never auto-answered) lives in `src/leader/start.rs` (D2 ruling X-narrow).
 #[test]
 fn claude_no_active_trust_prompt_is_not_auto_answered() {
-    let transport = ScriptedTransport::new([CLAUDE_TRUST_NO_ACTIVE]);
     let target = Target::Pane(PaneId::new("%2"));
 
-    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&transport, &target, 1, 0.0);
-
+    // C1a: the active No selector is moved to Yes with exactly one [Up, Enter].
+    let transport = ScriptedTransport::new([CLAUDE_TRUST_NO_ACTIVE, CLAUDE_READY_IDLE]);
+    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&transport, &target, 3, 0.0);
+    let sent = transport.sent_keys();
     assert!(
-        handled.is_empty() && transport.sent_keys().is_empty(),
-        "when the active selector is on `No, exit`, Claude trust must not blindly send Enter or default to digit 1; handled={handled:?} sent={:?}",
-        transport.sent_keys()
+        !sent.iter().any(|keys| keys.as_slice() == [Key::Enter]),
+        "with the selector on `No, exit`, a bare Enter would confirm `No, exit`; sent={sent:?}"
     );
+    // `Key` has no character variant, so a digit `1` could only reach the pane as text.
+    assert!(
+        transport.injects().is_empty(),
+        "Claude trust must not type digit `1` or any text into the pane; injects={:?}",
+        transport.injects()
+    );
+    assert_eq!(
+        sent,
+        vec![vec![Key::Up, Key::Enter]],
+        "worker startup must move the selector from `No, exit` to Yes, then confirm, in one send"
+    );
+    assert_eq!(
+        handled
+            .iter()
+            .map(|item| (item.prompt.as_str(), item.action.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("claude_workspace_trust", "selected_trust")],
+        "handled={handled:?}"
+    );
+
+    // C1b: a No-selected trust dialog above the ready composer is stale (dcdb5886).
+    let stale = format!("{CLAUDE_TRUST_NO_ACTIVE}\n{CLAUDE_READY_IDLE}");
+    let transport = ScriptedTransport::new([stale.as_str()]);
+    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&transport, &target, 3, 0.0);
+    assert_eq!(transport.sent_keys(), Vec::<Vec<Key>>::new(), "stale trust dialog must get no keys");
+    assert!(handled.is_empty(), "stale trust dialog must not be handled; handled={handled:?}");
+
+    // C1c: a `No, exit` selector without the trust question is not a trust dialog.
+    let transport = ScriptedTransport::new([
+        "Allow this command?\n  1. Yes, I trust this folder\n❯ 2. No, exit",
+    ]);
+    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&transport, &target, 3, 0.0);
+    assert_eq!(transport.sent_keys(), Vec::<Vec<Key>>::new(), "non-trust menu must get no keys");
+    assert!(handled.is_empty(), "non-trust menu must not be handled; handled={handled:?}");
 }
 
 #[test]
@@ -189,6 +228,10 @@ impl ScriptedTransport {
 
     fn sent_keys(&self) -> Vec<Vec<Key>> {
         self.sent.lock().unwrap().clone()
+    }
+
+    fn injects(&self) -> Vec<(Target, String)> {
+        self.injects.lock().unwrap().clone()
     }
 
 }
