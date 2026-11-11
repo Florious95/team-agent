@@ -64,6 +64,12 @@ fn report(output: &Output) -> Value {
 }
 
 fn bounded_triage_with_full_details<'a>(text: &'a str, expected: &Value) -> Vec<&'a str> {
+    // 5f0bc003 appends the polling advisory footer; A1 (ec3ef36e) wraps it to
+    // <=160-byte lines. It is not a triage line, so it is checked separately.
+    let (text, footer) = text.split_once("\n\n[Advisory: do not poll]\n").expect("polling advisory footer");
+    for line in footer.lines() {
+        assert!(line.len() <= 160 && !line.chars().any(char::is_control), "unbounded advisory: {line}");
+    }
     let mut triage = Vec::new();
     let mut details = None;
     for line in text.lines() {
@@ -85,18 +91,26 @@ fn bounded_triage_with_full_details<'a>(text: &'a str, expected: &Value) -> Vec<
     triage
 }
 
-fn issue_id(issue: &Value) -> Option<&str> {
-    issue.as_str().or_else(|| issue.get("id").and_then(Value::as_str))
+// 262f6cdb (doctor v1): six ordered links, `team`, `workspace`, `ok`,
+// `next_action`/`avoid`; the runtime/issues inventory is retired.
+fn link_status<'a>(value: &'a Value, id: &str) -> &'a str {
+    let links = value["links"].as_array().unwrap_or_else(|| panic!("doctor v1 links: {value}"));
+    assert_eq!(links.len(), 6, "{value}");
+    links.iter().find(|link| link["id"] == id).and_then(|link| link["status"].as_str()).unwrap_or("")
 }
 
 #[test]
 fn r1_explicit_missing_team_fails_and_nested_team_resolves_runtime() {
     for command in ["doctor"] {
         let f = Fixture::new(command);
-        assert!(f.run(command, &f.workspace, &["--json"]).status.success());
+        // A3 (ec3ef36e): an empty workspace is a typed L1 failure (exit 1).
+        let empty = f.run(command, &f.workspace, &["--json"]);
+        assert_eq!(empty.status.code(), Some(1));
+        assert_eq!(link_status(&report(&empty), "L1"), "FAIL");
         let missing = f.run(command, &f.workspace, &["--team", "absent", "--json"]);
         assert_eq!(missing.status.code(), Some(1));
-        assert_eq!(report(&missing)["runtime"]["status"], "unresolved");
+        assert_eq!(link_status(&report(&missing), "L1"), "FAIL");
+        assert_eq!(report(&missing)["team"], "absent");
         assert_eq!(report(&missing)["ok"], false);
 
         let runtime = f.seed_runtime();
@@ -107,9 +121,9 @@ fn r1_explicit_missing_team_fails_and_nested_team_resolves_runtime() {
             let out = f.run(command, input, &["--team", "alpha", "--json"]);
             let value = report(&out);
             assert_eq!(out.status.code(), Some(1), "unhealthy runtime: {value}");
-            assert_eq!(value["runtime"]["status"], "present");
-            assert_eq!(value["runtime"]["team_key"], "alpha");
-            assert_eq!(value["runtime"]["run_workspace"], f.workspace.canonicalize().unwrap().to_string_lossy().as_ref());
+            assert_eq!(link_status(&value, "L1"), "PASS", "{value}");
+            assert_eq!(value["team"], "alpha");
+            assert_eq!(value["workspace"], f.workspace.canonicalize().unwrap().to_string_lossy().as_ref());
         }
         assert_eq!(fs::read(runtime.join("state.json")).unwrap(), before);
     }
@@ -120,6 +134,9 @@ fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
     let f = Fixture::new("selected-team-status");
     let runtime = f.workspace.join(".team/runtime");
     fs::create_dir_all(&runtime).unwrap();
+    // The selected team's verdict depends only on that team, never on the
+    // top-level sibling (262f6cdb v1: compare verdicts across sibling states).
+    let mut verdicts: std::collections::BTreeMap<&str, (Option<i32>, Value, Vec<String>)> = Default::default();
     for top_status in ["stopped", "alive"] {
         for selected_status in ["alive", "stopped"] {
             let state = json!({
@@ -140,11 +157,17 @@ fn r1_selected_team_status_is_independent_of_the_top_level_sibling() {
             for command in ["doctor"] {
                 let out = f.run(command, &f.workspace, &["--team", "beta", "--json"]);
                 let value = report(&out);
-                let alive = selected_status == "alive";
-                assert_eq!(out.status.code(), Some(if alive { 1 } else { 0 }), "{value}");
-                assert_eq!(value["ok"], !alive, "{value}");
-                assert_eq!(value["runtime"]["status"], if alive { "present" } else { "not_present" }, "{value}");
-                assert_eq!(value["runtime"]["team_key"], "beta", "{value}");
+                assert_eq!(value["team"], "beta", "{value}");
+                if selected_status == "alive" {
+                    assert_eq!(out.status.code(), Some(1), "{value}");
+                    assert_eq!(link_status(&value, "L1"), "PASS", "{value}");
+                }
+                let statuses = ["L1", "L2", "L3", "L4", "L5", "L6"].iter()
+                    .map(|id| link_status(&value, id).to_string()).collect::<Vec<_>>();
+                let verdict = (out.status.code(), value["ok"].clone(), statuses);
+                if let Some(previous) = verdicts.insert(selected_status, verdict.clone()) {
+                    assert_eq!(previous, verdict, "selected beta verdict changed with top-level {top_status}: {value}");
+                }
                 assert_eq!(fs::read_to_string(runtime.join("state.json")).unwrap(), state);
             }
         }
@@ -164,9 +187,8 @@ fn r2_existing_bad_retired_database_is_ignored_without_state_and_never_rewritten
         fs::write(&db, original).unwrap();
         let out = f.run(command, &f.workspace, &["--json"]);
         let value = report(&out);
-        assert!(!value["issues"].as_array().unwrap().iter()
-            .any(|issue| issue_id(issue) == Some("coordinator_schema_incompatible")), "{value}");
         let text = value.to_string().to_lowercase();
+        assert!(!text.contains("coordinator_schema_incompatible"), "{value}");
         assert!(!text.contains("sqlite") && !text.contains("not a database"), "{value}");
         assert_eq!(fs::read(db).unwrap(), original);
         assert!(!runtime.join("state.json").exists());
@@ -181,26 +203,19 @@ fn r3_each_finding_keeps_its_target_in_json_repairs_and_human_lines() {
     fs::write(f.workspace.join("first.md"),
         "OPENAI_API_KEY=synthetic-test-only\nANTHROPIC_API_KEY=synthetic-test-only\n").unwrap();
     fs::write(f.workspace.join("second.md"), "OPENAI_API_KEY=synthetic-test-only\n").unwrap();
+    // 262f6cdb retired the secret-scan findings: neither renderer reports a
+    // secret finding or ever echoes a secret value; human lines stay bounded.
     for command in ["doctor"] {
         let value = report(&f.run(command, &f.workspace, &["--json"]));
-        let findings = value["issues"].as_array().unwrap().iter()
-            .filter(|issue| issue_id(issue) == Some("secret_scan_finding")).collect::<Vec<_>>();
-        let repairs = value["suggested_repairs"].as_array().unwrap().iter()
-            .filter(|repair| repair["issue"] == "secret_scan_finding").collect::<Vec<_>>();
-        assert_eq!(findings.len(), 3, "{value}");
-        assert_eq!(repairs.len(), 3, "{value}");
-        for finding in findings {
-            assert!(repairs.iter().any(|repair| repair["path"] == finding["path"]
-                && repair["line"] == finding["line"] && repair["rule"] == finding["rule"]));
-        }
+        assert_eq!(value["schema"], "team-agent.doctor.v1", "{value}");
+        let rendered = value.to_string();
+        assert!(!rendered.contains("secret_scan_finding") && !rendered.contains("synthetic-test-only"), "{value}");
         let human = f.run(command, &f.workspace, &[]);
         let text = String::from_utf8(human.stdout).unwrap();
-        for target in ["first.md:1", "first.md:2", "second.md:1"] {
-            assert!(text.lines().any(|line| line.starts_with("issue:") && line.contains(target)), "{text}");
-            assert!(text.lines().any(|line| line.starts_with("repair:") && line.contains(target)), "{text}");
+        assert!(!text.contains("synthetic-test-only") && !text.contains("secret_scan_finding"), "{text}");
+        for line in text.lines() {
+            assert!(line.len() <= 160 && !line.chars().any(char::is_control), "unbounded triage: {line}");
         }
-        assert!(!text.contains("synthetic-test-only"));
-        bounded_triage_with_full_details(&text, &value);
     }
 }
 

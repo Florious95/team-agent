@@ -81,36 +81,18 @@ fn doctor_does_not_fail_solely_because_legacy_home_dot_team_current_is_invalid()
          compile failure is the legacy <home>/.team/current; body={body}"
     );
 
-    // C-2: profile_smoke for the implicit doctor invocation cannot land as
-    // `profile_invalid` purely from the legacy team — it must either be skipped
-    // (`not_required`) or surfaced as a degraded `legacy_team_invalid` shape that
-    // names the legacy team dir + actionable next step.
-    let smoke = body
-        .get("profile_smoke")
-        .cloned()
-        .expect("doctor JSON must include profile_smoke");
-    let smoke_status = smoke.get("status").and_then(Value::as_str).unwrap_or("");
-    let is_skipped = smoke_status == "not_required";
-    let is_legacy = smoke_status == "legacy_team_invalid";
-    assert!(
-        is_skipped || is_legacy,
-        "profile_smoke.status for implicit legacy <home>/.team/current must be \
-         `not_required` (skipped) or `legacy_team_invalid` (actionable degraded); \
-         got status={smoke_status:?} smoke={smoke} body={body}"
-    );
-
-    // C-3: if the degraded `legacy_team_invalid` shape is used, it must name the
-    // legacy team_dir so the user can act (open it, remove it, or run a scoped
-    // `team-agent doctor <team-dir>` against it).
-    if is_legacy {
-        let team_dir = smoke.get("team_dir").and_then(Value::as_str).unwrap_or("");
-        let expected = legacy.to_string_lossy().to_string();
-        assert!(
-            team_dir.contains(".team/current") || team_dir == expected,
-            "legacy_team_invalid profile_smoke must name the legacy team_dir \
-             (<home>/.team/current); got team_dir={team_dir:?} expected~={expected:?} smoke={smoke}"
-        );
-    }
+    // C-2 (262f6cdb doctor v1 retired the implicit profile smoke): the
+    // legacy team's compile failure is never doctor's verdict. No link reports
+    // the duplicate-id compile error; L1 reports the workspace's own scope
+    // (no runtime state, A3 ec3ef36e), and the legacy files stay untouched.
+    let rendered = body.to_string();
+    assert!(body.get("profile_smoke").is_none() && !rendered.contains("profile_smoke"), "{body}");
+    assert!(!rendered.contains("duplicate agent id"),
+        "doctor must not surface the implicit legacy <home>/.team/current compile failure; body={body}");
+    let links = body["links"].as_array().expect("doctor v1 links");
+    assert_eq!(links.len(), 6, "{body}");
+    assert!(links[0]["message"].as_str().is_some_and(|message| message.contains("has no runtime state")), "{body}");
+    assert_eq!(std::fs::read_to_string(legacy.join("agents").join("b.md")).unwrap(), ROLE_B);
 }
 
 #[test]

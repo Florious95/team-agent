@@ -163,19 +163,20 @@ fn red3_normal_send_and_report_paths_replace_fallback_commands() {
     let diagnose = case.run_ta(&["doctor", "--workspace", case.workspace_str(), "--json"]);
     let diagnose_text = output_text(&diagnose);
     let diagnose_lower = diagnose_text.to_lowercase();
-    if !diagnose_lower.contains("action_required") && !diagnose_lower.contains("broken_class") {
+    // 262f6cdb (doctor v1): the structured broken class is the failing link
+    // (status FAIL with its message) and the applicable next step is one
+    // executable `next_action` argv.
+    let diagnose_value: serde_json::Value = serde_json::from_slice(&diagnose.stdout).unwrap_or_default();
+    let failing = diagnose_value["links"].as_array().into_iter().flatten()
+        .filter(|link| link["status"] == "FAIL").count();
+    if failing == 0 || diagnose_value["ok"] != false {
         failures.push(format!(
             "diagnose missing-leader output must expose a structured broken class; text={diagnose_text}"
         ));
     }
-    let has_applicable = [
-        "claim-leader",
-        "quick-start",
-        "inspect the selected-team registry",
-        "do not claim-leader",
-    ]
-    .iter()
-    .any(|needle| diagnose_lower.contains(needle));
+    let argv = diagnose_value["next_action"]["argv"].as_array().cloned().unwrap_or_default();
+    let has_applicable = argv.first().is_some_and(|arg| arg == "team-agent")
+        && argv.get(1).and_then(|arg| arg.as_str()).is_some_and(|verb| matches!(verb, "restart" | "claim-leader" | "start"));
     if !has_applicable {
         failures.push(format!(
             "diagnose missing-leader output must name one applicable next step; text={diagnose_text}"

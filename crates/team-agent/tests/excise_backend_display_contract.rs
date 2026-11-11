@@ -41,11 +41,18 @@ fn R1_no_display_flag_is_silently_ignored() {
         ],
     );
     let text = output_text(&output);
+    // 262f6cdb + A3 (ec3ef36e): doctor on an empty workspace is a typed L1
+    // failure (exit 1); "silently ignored" means the result is identical to
+    // the same doctor run without the removed flag.
+    let baseline = env.run_cli(&workspace, &["doctor", "--workspace", &workspace_arg, "--json"]);
     assert_eq!(
         output.status.code(),
-        Some(0),
+        baseline.status.code(),
         "--no-display must be silently ignored: {text}"
     );
+    let (value, expected) = (json_stdout(&output, "R1 doctor"), json_stdout(&baseline, "R1 baseline doctor"));
+    assert_eq!(value["links"], expected["links"], "--no-display must be silently ignored: {text}");
+    assert!(!text.contains("no-display"), "--no-display must be silently ignored: {text}");
     assert_eq!(
         relative_entries(&workspace),
         before,
@@ -283,9 +290,12 @@ fn P_doctor_empty_workspace_stays_read_only() {
         &["doctor", "--workspace", &workspace_arg, "--json"],
     );
     let body = json_stdout(&output, "P doctor");
-    assert_eq!(output.status.code(), Some(0), "doctor must pass: {body}");
-    assert_eq!(body["ok"], json!(true));
-    assert_eq!(body["runtime"]["status"], json!("not_present"));
+    // 262f6cdb + A3 (ec3ef36e): no runtime is a typed L1 failure (exit 1)
+    // with a creation hint; doctor stays read-only.
+    assert_eq!(output.status.code(), Some(1), "{body}");
+    assert_eq!(body["ok"], json!(false));
+    assert_eq!(body["links"][0]["status"], json!("FAIL"), "{body}");
+    assert!(body["links"][0]["message"].as_str().is_some_and(|message| message.contains("has no runtime state")), "{body}");
     assert!(relative_entries(&workspace).is_empty());
 }
 

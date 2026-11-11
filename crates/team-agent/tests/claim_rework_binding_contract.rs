@@ -76,6 +76,14 @@ fn diagnose_json_team(workspace: &Path, team: Option<&str>) -> Value {
     }
 }
 
+// 262f6cdb (doctor v1): six ordered links plus `next_action`; the issue-id
+// inventory is retired.
+fn link<'a>(diagnose: &'a Value, id: &str) -> &'a Value {
+    let links = diagnose["links"].as_array().unwrap_or_else(|| panic!("doctor v1 links: {diagnose}"));
+    assert_eq!(links.len(), 6, "{diagnose}");
+    links.iter().find(|link| link["id"] == id).unwrap()
+}
+
 fn issue_ids(diagnose: &Value) -> Vec<String> {
     diagnose
         .get("issues")
@@ -113,24 +121,18 @@ fn empty_workspace_diagnose_does_not_claim() {
     let _home = IsolatedHome::enter();
     let workspace = unique_workspace();
     let diagnose = diagnose_json_team(&workspace, None);
-    let ids = issue_ids(&diagnose);
-    let repairs = diagnose
-        .get("suggested_repairs")
-        .cloned()
-        .unwrap_or(json!([]));
-    let repairs_text = repairs.to_string();
-    assert!(ids.is_empty(), "empty workspace has no runtime issues: {ids:?}");
-    assert_eq!(diagnose["runtime"]["status"], "not_present");
+    // 262f6cdb + A3 (ec3ef36e): no runtime is a typed L1 failure whose only
+    // next action is the creation hint; a synthetic `current` is never an
+    // unbound team, so no claim is induced.
+    assert_eq!(link(&diagnose, "L1")["status"], "FAIL", "{diagnose}");
+    assert!(link(&diagnose, "L1")["message"].as_str().is_some_and(|message| message.contains("has no runtime state")), "{diagnose}");
+    let next = diagnose["next_action"].to_string();
     assert!(
-        !ids.iter().any(|id| id == "leader_receiver_unbound"),
-        "synthetic current is not an unbound team; issues={ids:?}"
+        !next.contains("claim-leader") && !link(&diagnose, "L6")["message"].as_str().unwrap_or("").contains("unbound"),
+        "must not induce claim on a workspace with no team; next_action={next}"
     );
-    assert_eq!(repairs, json!([]), "repairs={repairs_text}");
-    assert!(
-        !repairs_text.contains("claim-leader"),
-        "must not induce claim on a workspace with no team; repairs={repairs_text}"
-    );
-    assert_eq!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
+    assert!(next.contains("team-agent start AGENT --team"), "{diagnose}");
+    assert_eq!(diagnose.get("ok").and_then(Value::as_bool), Some(false));
     assert!(!workspace.join(".team/runtime/state.json").exists());
 }
 
@@ -139,29 +141,23 @@ fn empty_workspace_diagnose_does_not_claim() {
 fn existing_empty_team_diagnose_still_claims() {
     let _home = IsolatedHome::enter();
     let workspace = unique_workspace();
+    // 262f6cdb: doctor v1 reports the first failing link's repair; give the
+    // empty team a live host so the unbound leader (L6) owns the repair.
+    let (_tmux, _pane) = start_owned_tmux(&workspace);
     team_agent::state::persist::save_runtime_state(
         &workspace,
-        &json!({"teams": {"alpha": {}}}),
+        &json!({"teams": {"alpha": {"tmux_socket": _tmux.socket.display().to_string()}}}),
     )
     .expect("save empty team");
     let diagnose = diagnose_json(&workspace, "alpha");
-    let ids = issue_ids(&diagnose);
-    let repairs_text = diagnose
-        .get("suggested_repairs")
-        .cloned()
-        .unwrap_or(json!([]))
-        .to_string();
-    assert!(
-        ids.iter().any(|id| id == "leader_receiver_unbound"),
-        "existing empty team stays unbound; issues={ids:?}"
+    assert_eq!(
+        link(&diagnose, "L1")["status"], "PASS",
+        "existing team must not be classified missing; diagnose={diagnose}"
     );
+    assert_eq!(link(&diagnose, "L6")["status"], "FAIL", "existing empty team stays unbound; diagnose={diagnose}");
     assert!(
-        repairs_text.contains("claim-leader"),
-        "existing unbound team keeps claim repair; repairs={repairs_text}"
-    );
-    assert!(
-        !ids.iter().any(|id| id == "team_spec_or_runtime_missing"),
-        "existing team must not be classified missing; issues={ids:?}"
+        diagnose["next_action"]["argv"].as_array().is_some_and(|argv| argv.iter().any(|arg| arg == "claim-leader")),
+        "existing unbound team keeps claim repair; diagnose={diagnose}"
     );
 }
 
@@ -170,18 +166,24 @@ fn existing_empty_team_diagnose_still_claims() {
 fn isolated_missing_registry_is_index_missing() {
     let _home = IsolatedHome::enter();
     let workspace = unique_workspace();
+    // 95cb2f3d: a missing index is IndexMissing only when the underlying
+    // binding is live; a dead socket requires an explicit claim (Unbound).
+    // Bind the receiver to a real, test-owned live pane.
+    let (tmux, pane) = start_owned_tmux(&workspace);
+    let socket = tmux.socket.display().to_string();
     team_agent::state::persist::save_runtime_state(
         &workspace,
         &json!({
             "team_key": "alpha",
             "teams": {
                 "alpha": {
-                    "team_owner": {"pane_id": "%1", "owner_epoch": 1},
+                    "tmux_socket": socket,
+                    "team_owner": {"pane_id": pane, "owner_epoch": 1, "tmux_socket": socket},
                     "leader_receiver": {
                         "status": "attached",
-                        "pane_id": "%1",
+                        "pane_id": pane,
                         "owner_epoch": 1,
-                        "tmux_socket": "/tmp/ta5-missing.sock"
+                        "tmux_socket": socket
                     }
                 }
             }
@@ -193,17 +195,18 @@ fn isolated_missing_registry_is_index_missing() {
         LeaderBindingClass::IndexMissing
     );
     let diagnose = diagnose_json(&workspace, "alpha");
-    let ids = issue_ids(&diagnose);
+    // 262f6cdb: the reachable leader with no discovery index is an L6 WARN
+    // (index missing/stale), never remapped to an unreachable/unbound FAIL.
+    let ret = link(&diagnose, "L6");
+    assert_eq!(ret["status"], "WARN", "diagnose={diagnose}");
     assert_eq!(
-        ids.iter()
-            .filter(|id| *id == "leader_registry_index_missing")
-            .count(),
+        ret["message"].as_str().unwrap_or("").matches("discovery index missing").count(),
         1,
-        "diagnose issues={ids:?}"
+        "diagnose={diagnose}"
     );
     assert!(
-        !ids.iter().any(|id| id == "leader_receiver_unbound"),
-        "canonical diagnose must not remap index-missing to unbound; issues={ids:?}"
+        !ret["message"].as_str().unwrap_or("").contains("unbound"),
+        "canonical diagnose must not remap index-missing to unbound; diagnose={diagnose}"
     );
     assert_ne!(diagnose.get("ok").and_then(Value::as_bool), Some(true));
 }
@@ -237,17 +240,16 @@ fn isolated_bad_registry_is_unknown() {
         LeaderBindingClass::Unknown
     );
     let diagnose = diagnose_json(&workspace, "alpha");
-    let ids = issue_ids(&diagnose);
+    // 262f6cdb: doctor v1 never certifies an unknown binding: the return link
+    // does not pass, and the undecidable registry file is left byte-identical
+    // (classification above stays Unknown, not Unbound).
+    assert_ne!(link(&diagnose, "L6")["status"], "PASS", "diagnose={diagnose}");
+    assert_ne!(diagnose.get("ok").and_then(Value::as_bool), Some(true), "{diagnose}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json", "doctor rewrote the registry");
     assert_eq!(
-        ids.iter()
-            .filter(|id| *id == "leader_binding_unknown")
-            .count(),
-        1,
-        "diagnose issues={ids:?}"
-    );
-    assert!(
-        !ids.iter().any(|id| id == "leader_receiver_unbound"),
-        "canonical diagnose must not remap unknown to unbound; issues={ids:?}"
+        classify_leader_binding(&workspace, "alpha"),
+        LeaderBindingClass::Unknown,
+        "canonical diagnose must not remap unknown to unbound"
     );
 }
 

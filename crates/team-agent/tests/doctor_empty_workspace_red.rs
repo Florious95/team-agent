@@ -1,7 +1,8 @@
-//! Doctor performs read-only static checks for an existing but empty workspace.
+//! Doctor performs read-only checks for an existing but empty workspace.
 //!
-//! Without a spec or runtime, an otherwise healthy workspace succeeds with
-//! `ok:true` and `runtime.status:not_present`, without creating runtime state.
+//! 262f6cdb (doctor v1) + A3 (ec3ef36e): without runtime state the L1 scope
+//! link fails with a typed "no runtime state" message and a creation hint
+//! (ok:false, exit 1, L2-L6 BLOCKED), without creating runtime state.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -43,19 +44,23 @@ fn doctor_empty_workspace_without_spec_or_runtime_passes_static_checks() {
         )
     });
 
-    assert!(
-        output.status.success(),
-        "doctor on an existing empty workspace must pass static checks without requiring a spec/runtime; stdout={} stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "doctor on an existing empty workspace reports its missing runtime as a typed L1 failure; stdout={} stderr={}",
         stdout(&output),
         stderr(&output)
     );
-    assert_eq!(
-        body.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "doctor JSON must report successful static checks for an empty workspace; body={body}"
-    );
-    assert_eq!(body["runtime"]["status"], "not_present", "{body}");
-    assert_eq!(body["issues"], serde_json::json!([]), "{body}");
+    assert_eq!(body.get("ok").and_then(Value::as_bool), Some(false), "{body}");
+    let links = body["links"].as_array().expect("doctor v1 links");
+    assert_eq!(links.len(), 6, "{body}");
+    assert_eq!(links[0]["status"], "FAIL", "{body}");
+    let message = links[0]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("has no runtime state") && !message.contains("No such file or directory"),
+        "empty workspace must get a typed L1 message, not a raw ENOENT: {body}");
+    assert!(links[1..].iter().all(|link| link["status"] == "BLOCKED"), "{body}");
+    assert!(body["next_action"]["context"].as_str().is_some_and(|hint| hint.contains("team-agent start AGENT --team")),
+        "empty workspace must get a creation hint: {body}");
     assert!(!workspace.join(".team").exists());
 }
 
@@ -75,9 +80,14 @@ fn doctor_missing_workspace_and_invalid_configuration_still_fail_readonly() {
             &home,
         );
         let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let expected_exit = if workspace == &missing { 2 } else { 1 };
-        assert_eq!(output.status.code(), Some(expected_exit), "{body}");
+        // 262f6cdb: an unusable workspace is an L1 scope failure (exit 1)
+        // naming that workspace; nothing downstream runs or writes.
+        assert_eq!(output.status.code(), Some(1), "{body}");
         assert_eq!(body["ok"], false, "{body}");
+        let links = body["links"].as_array().expect("doctor v1 links");
+        assert_eq!(links[0]["status"], "FAIL", "{body}");
+        assert!(links[0]["message"].as_str().is_some_and(|message| message.contains(workspace.to_str().unwrap())), "{body}");
+        assert!(links[1..].iter().all(|link| link["status"] == "BLOCKED"), "{body}");
         assert!(!workspace.join(".team").exists());
     }
     assert!(!missing.exists());

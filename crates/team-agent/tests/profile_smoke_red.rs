@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use team_agent::cli::{cmd_doctor, CmdOutput, DoctorArgs, ExitCode};
 
+// 262f6cdb (doctor v1) removed the implicit HTTP profile smoke from doctor
+// (release note: "doctor no longer runs the HTTP profile smoke"). Both names
+// now pin that contract: doctor never contacts a configured compatible_api
+// endpoint, never reports a profile verdict it did not measure, and never
+// prints a profile secret; its ok/exit come from the six links only.
 #[test]
 fn doctor_compatible_api_profile_smoke_passes_only_after_real_http_probe() {
     let server = MockLlmServer::new(
@@ -19,36 +24,12 @@ fn doctor_compatible_api_profile_smoke_passes_only_after_real_http_probe() {
     );
     let fixture = ProfileFixture::new("smoke-pass", server.base_url(), "local-secret");
 
-    let (_, report) = doctor_report(&fixture.team);
-    let check = profile_smoke_check(&report);
-
-    assert_eq!(
-        check.get("ok").and_then(Value::as_bool),
-        Some(true),
-        "reachable mock profile should pass; report={report}"
-    );
-    assert_eq!(
-        check.get("status").and_then(Value::as_str),
-        Some("smoke_passed"),
-        "compatible_api smoke status must reflect a real bounded HTTP call, not a hardcoded pass; check={check} report={report}"
-    );
-    assert_eq!(
-        check.get("http_status").and_then(Value::as_u64),
-        Some(200),
-        "profile smoke must expose the HTTP status from the compatible_api endpoint; check={check}"
-    );
-    assert_eq!(
-        check.get("secret_values_printed").and_then(Value::as_bool),
-        Some(false),
-        "profile smoke diagnostics must explicitly audit that secrets were redacted; check={check}"
-    );
-    assert!(
-        server.was_called(),
-        "doctor must actually POST to the compatible_api profile endpoint; report={report}"
-    );
+    let (exit, report) = doctor_report(&fixture.team);
+    assert_no_profile_smoke(&report, exit);
+    drop_and_assert_not_called(server, &report);
     assert!(
         !report.to_string().contains("local-secret"),
-        "doctor/profile smoke output must not leak auth tokens; report={report}"
+        "doctor output must not leak auth tokens; report={report}"
     );
 }
 
@@ -61,50 +42,31 @@ fn doctor_compatible_api_profile_smoke_401_fails_honestly_with_diagnostics() {
     let fixture = ProfileFixture::new("smoke-401", server.base_url(), "wrong-secret");
 
     let (exit, report) = doctor_report(&fixture.team);
-    let check = profile_smoke_check(&report);
+    assert_no_profile_smoke(&report, exit);
+    drop_and_assert_not_called(server, &report);
+    assert!(
+        !report.to_string().contains("wrong-secret") && !report.to_string().contains("bad token"),
+        "doctor diagnostics must not leak auth token values; report={report}"
+    );
+}
 
-    assert_eq!(
-        exit,
-        ExitCode::Error,
-        "compatible_api HTTP 401 must make doctor fail honestly; report={report}"
-    );
-    assert_eq!(
-        check.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "check={check}"
-    );
-    assert_eq!(
-        check.get("status").and_then(Value::as_str),
-        Some("smoke_failed"),
-        "check={check}"
-    );
-    assert_eq!(
-        check.get("reason").and_then(Value::as_str),
-        Some("http_error"),
-        "check={check}"
-    );
-    assert_eq!(
-        check.get("http_status").and_then(Value::as_u64),
-        Some(401),
-        "check={check}"
-    );
-    assert_eq!(report["ok"], false, "profile smoke failure must fail doctor");
+fn assert_no_profile_smoke(report: &Value, exit: ExitCode) {
+    assert_eq!(report["schema"], "team-agent.doctor.v1", "{report}");
+    let rendered = report.to_string();
+    assert!(report.get("profile_smoke").is_none() && !rendered.contains("smoke_passed") && !rendered.contains("smoke_failed"),
+        "doctor must not report an unmeasured profile smoke verdict: {report}");
+    let links = report["links"].as_array().expect("doctor v1 links");
+    let all_pass = links.len() == 6 && links.iter().all(|link| link["status"] == "PASS");
+    assert_eq!(report["ok"], serde_json::json!(all_pass), "{report}");
+    assert_eq!(exit, if all_pass { ExitCode::Ok } else { ExitCode::Error }, "{report}");
+}
+
+fn drop_and_assert_not_called(server: MockLlmServer, report: &Value) {
+    let called = server.called.clone();
+    drop(server); // joins the bounded (700ms) accept loop
     assert!(
-        report
-            .get("issues")
-            .and_then(Value::as_array)
-            .is_some_and(|issues| issues
-                .iter()
-                .any(|issue| issue.to_string().contains("profile_smoke"))),
-        "profile smoke failure must remain a doctor issue: {report}"
-    );
-    assert!(
-        server.was_called(),
-        "doctor must hit the mock endpoint before reporting 401; report={report}"
-    );
-    assert!(
-        !report.to_string().contains("wrong-secret"),
-        "failure diagnostics must redact auth token values; report={report}"
+        !called.load(Ordering::SeqCst),
+        "doctor must not POST to the compatible_api profile endpoint; report={report}"
     );
 }
 
@@ -126,13 +88,6 @@ fn doctor_report(team: &Path) -> (ExitCode, Value) {
         CmdOutput::Json(value) => (result.exit, value),
         other => panic!("expected JSON doctor report, got {other:?}"),
     }
-}
-
-fn profile_smoke_check(report: &Value) -> &Value {
-    report.get("profile_smoke")
-        .unwrap_or_else(|| {
-            panic!("doctor report must include profile_smoke check; report={report}")
-        })
 }
 
 struct MockLlmServer {
@@ -181,9 +136,6 @@ impl MockLlmServer {
         &self.url
     }
 
-    fn was_called(&self) -> bool {
-        self.called.load(Ordering::SeqCst)
-    }
 }
 
 impl Drop for MockLlmServer {

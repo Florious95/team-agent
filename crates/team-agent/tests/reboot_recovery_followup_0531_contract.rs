@@ -177,11 +177,20 @@ fn human_status_detail_renders_session_missing_restart_hint() {
         "--json",
     ]);
     let diagnose_json = json_output(&diagnose, "R3 diagnose");
-    let diagnose_text = diagnose_json.to_string();
+    // 262f6cdb (doctor v1) retired the tmux_session_missing issue id. The
+    // terminal (stopped) worker is not a live seat, so L3 never reports it as
+    // a seat fault (consistent with status=stopped), and doctor still names one
+    // executable, team-scoped repair for the unhealthy team.
+    let links = diagnose_json["links"].as_array().expect("doctor v1 links");
+    let seats = links.iter().find(|link| link["id"] == "L3").expect("L3");
+    assert_ne!(seats["status"], "FAIL", "R3: a stopped worker is not a seat fault; diagnose={diagnose_json}");
+    let argv = diagnose_json["next_action"]["argv"].as_array().cloned().unwrap_or_default();
     assert!(
-        diagnose_text.contains("tmux_session_missing")
-            && diagnose_text.contains("team-agent restart"),
-        "R3: diagnose must carry the restart repair for missing tmux session; diagnose={diagnose_json}; tmux_log={}",
+        diagnose_json["ok"] == false
+            && argv.first().is_some_and(|arg| arg == "team-agent")
+            && argv.iter().any(|arg| arg == "restart" || arg == "claim-leader")
+            && argv.windows(2).any(|pair| pair[0] == "--team" && pair[1] == TEAM),
+        "R3: diagnose must carry an executable team-scoped repair; diagnose={diagnose_json}; tmux_log={}",
         case.tmux_log()
     );
 }
@@ -210,13 +219,23 @@ fn restart_after_convergence_uses_physical_spawn_on_selected_endpoint() {
             )
         });
 
-    assert_eq!(
-        restart_json.get("status").and_then(Value::as_str),
-        Some("restarted"),
+    // 95cb2f3d/e0652b62: a worker restart that succeeds while the leader
+    // binding is still unverified reports restarted_binding_pending (ok:true)
+    // with a claim-leader next action; physical spawn assertions are unchanged.
+    let status = restart_json.get("status").and_then(Value::as_str);
+    assert!(
+        matches!(status, Some("restarted" | "restarted_binding_pending")) && restart_json["ok"] == true,
         "R4 setup: restart must complete before physical endpoint assertions; output={}; tmux_log={}",
         output_text(&restart),
         case.tmux_log()
     );
+    if status == Some("restarted_binding_pending") {
+        assert!(
+            restart_json["next_actions"].as_array().is_some_and(|actions| actions.iter()
+                .any(|action| action.as_str().is_some_and(|text| text.starts_with("team-agent claim-leader")))),
+            "R4: a pending leader binding must name its claim-leader next action; output={restart_json}"
+        );
+    }
     assert!(
         !spawn_event
             .get("argv")

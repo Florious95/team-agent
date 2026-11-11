@@ -86,10 +86,18 @@ fn cross_boot_stale_bindings_are_visible_in_status_and_diagnose_without_mutation
         human_text.contains("name: helper") && human_text.contains("runtime_status: unknown"),
         "RED1: human status must use the same unknown brief projection; output={human_text}"
     );
+    // 262f6cdb (doctor v1) retired the runtime_bindings_stale_after_boot
+    // issue id: the cross-boot stale binding is visible as a failed L3 seat
+    // naming the worker, with a restart next_action for that seat.
+    let seats = diagnose["links"].as_array().and_then(|links| links.iter().find(|link| link["id"] == "L3")).cloned()
+        .unwrap_or(Value::Null);
+    let next = diagnose["next_action"]["argv"].as_array().cloned().unwrap_or_default();
     assert!(
-        value_contains(&diagnose, "runtime_bindings_stale_after_boot")
-            && value_contains(&diagnose, "team-agent restart"),
-        "RED1: diagnose --json must include runtime_bindings_stale_after_boot and a restart hint; diagnose={diagnose}"
+        seats["status"] == "FAIL"
+            && seats["message"].as_str().is_some_and(|message| message.contains(WORKER))
+            && next.iter().any(|arg| arg == "restart")
+            && next.iter().any(|arg| arg == WORKER),
+        "RED1: diagnose --json must expose the stale binding with a restart hint; diagnose={diagnose}"
     );
     case.assert_runtime_files_unchanged(before, "RED1 status/diagnose read-only");
 }
@@ -472,10 +480,6 @@ fn parse_json_output(output: &Output, label: &str) -> Value {
             text(&output.stderr)
         )
     })
-}
-
-fn value_contains(value: &Value, needle: &str) -> bool {
-    value.to_string().contains(needle)
 }
 
 fn text(bytes: &[u8]) -> String {

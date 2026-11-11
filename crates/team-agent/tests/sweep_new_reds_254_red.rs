@@ -53,26 +53,19 @@ fn diagnose_live_fake_team_uses_active_team_projection() {
         })
         .expect("diagnose should return JSON"),
     );
-    let runtime = &out["runtime"];
+    // 262f6cdb (doctor v1): the selected team is the report's `team`, and the
+    // return link reads the selected team's registered receiver (%1), never
+    // the raw top-level (unbound) projection.
     assert_eq!(
-        runtime["team_key"],
+        out["team"],
         json!("teamA"),
         "diagnose --workspace <runtime> must report the active selected team key, not raw top-level state; out={out}"
     );
-    assert_eq!(
-        runtime["session_name"],
-        json!("team-teamA"),
-        "diagnose must use teams[active].session_name; out={out}"
-    );
+    assert_eq!(link(&out, "L1")["status"], "PASS", "{out}");
+    let ret = link(&out, "L6")["message"].as_str().unwrap_or_default().to_string();
     assert!(
-        runtime["agent_count"].as_u64().unwrap_or(0) >= 1,
-        "diagnose must count agents from the selected team projection; out={out}"
-    );
-    assert!(
-        !out["issues"]
-            .as_array()
-            .is_some_and(|issues| issues.iter().any(|issue| issue.as_str() == Some("leader_not_attached"))),
-        "selected team has an attached leader_receiver; raw top-level leader_not_attached is a false positive; out={out}"
+        ret.contains("registered %1@") && !ret.contains("registered unbound@"),
+        "selected team has an attached leader_receiver; raw top-level unbound is a false positive; out={out}"
     );
 }
 
@@ -109,20 +102,14 @@ fn diagnose_selected_team_without_registry_is_unbound() {
         })
         .expect("diagnose should return JSON"),
     );
-    assert!(
-        out["issues"].as_array().is_some_and(|issues| issues
-            .iter()
-            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
-        "state-only attached fixture must stay undeliverable as index_missing without a registry row; out={out}"
-    );
+    // 262f6cdb (doctor v1): a state-only receiver without a valid registry
+    // row is never delivered (L6 does not pass), and with its host down the
+    // single repair is the host's, not an executable claim.
+    assert_ne!(link(&out, "L6")["status"], "PASS", "state-only attached fixture must stay undeliverable as index_missing without a registry row; out={out}");
     assert_ne!(out["ok"], json!(true));
-    let repairs = out["suggested_repairs"].clone();
+    let repairs = json!([out["next_action"]]);
     assert!(
-        repairs.to_string().contains("do not claim-leader"),
-        "index-missing copy must forbid claim; repairs={repairs}"
-    );
-    assert!(
-        !repairs_induce_claim_command(&repairs),
+        !next_action_induces_claim(&out),
         "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
@@ -161,20 +148,14 @@ fn diagnose_selected_team_with_mismatched_registry_is_unbound() {
         })
         .expect("diagnose should return JSON"),
     );
-    assert!(
-        out["issues"].as_array().is_some_and(|issues| issues
-            .iter()
-            .any(|issue| issue.as_str() == Some("leader_registry_index_missing"))),
-        "foreign-workspace registry row must stay undeliverable as index_missing; out={out}"
-    );
+    // 262f6cdb (doctor v1): a state-only receiver without a valid registry
+    // row is never delivered (L6 does not pass), and with its host down the
+    // single repair is the host's, not an executable claim.
+    assert_ne!(link(&out, "L6")["status"], "PASS", "foreign-workspace registry row must stay undeliverable as index_missing; out={out}");
     assert_ne!(out["ok"], json!(true));
-    let repairs = out["suggested_repairs"].clone();
+    let repairs = json!([out["next_action"]]);
     assert!(
-        repairs.to_string().contains("do not claim-leader"),
-        "index-missing copy must forbid claim; repairs={repairs}"
-    );
-    assert!(
-        !repairs_induce_claim_command(&repairs),
+        !next_action_induces_claim(&out),
         "index-missing must not induce an executable claim command; repairs={repairs}"
     );
 }
@@ -275,37 +256,46 @@ fn doctor_fake_team_without_profiles_passes_profile_not_required() {
         })
         .expect("doctor should return JSON"),
     );
-    assert_eq!(
-        out["ok"],
-        json!(true),
+    // 262f6cdb + A3 (ec3ef36e): doctor v1 has no profile check at all; this
+    // team dir without runtime is only the typed L1 no-runtime failure, and
+    // missing profile dirs are never a blocker.
+    assert!(
+        out.get("profile_smoke").is_none() && !out.to_string().contains("profile"),
         "fake teams do not require profiles; missing profile dirs are informational, not blockers. out={out}"
     );
-    assert_eq!(out["profile_smoke"]["status"], "not_required");
+    assert_eq!(link(&out, "L1")["status"], "FAIL", "{out}");
+    assert!(link(&out, "L1")["message"].as_str().is_some_and(|message| message.contains("has no runtime state")), "{out}");
 }
 
 #[test]
 fn attach_leader_help_lists_pane_provider_and_dispatches_handler() {
+    // e0652b62 retired attach-leader: the verb is refused before any effect
+    // and its retirement message names the replacement, claim-leader from the
+    // intended leader terminal (--confirm only to replace a live leader). The
+    // typed handler is gone; dispatch keeps an explicit retirement arm.
     let emit = source("src/cli/emit.rs");
     let types = source("src/cli/types.rs");
     let cli_mod = source("src/cli/mod.rs");
-    let help = team_agent::cli::emit::__test_command_help(Some("attach-leader"));
     let dispatch = source_section(&emit, "fn dispatch", "const LEADER_PASSTHROUGH_COMMANDS");
-    let parser = source_section(&emit, "fn parse_args", "fn next_arg");
+    let root = std::env::temp_dir().join(format!("ta-sweep254-attach-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for args in [vec!["attach-leader", "--help"], vec!["attach-leader", "--pane", "%1", "--provider", "codex", "--json"]] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_team-agent"))
+            .args(&args).current_dir(&root).env("HOME", &root)
+            .env_remove("TMUX").env_remove("TMUX_PANE").output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(!out.status.success() && text.contains("retired") && text.contains("claim-leader"),
+            "{args:?}: retirement must name claim-leader; code={:?} output={text}", out.status.code());
+    }
+    assert!(!root.join(".team").exists(), "retired attach-leader must have no effects");
+    let _ = std::fs::remove_dir_all(&root);
     assert!(
-        help.contains("--pane") && help.contains("--provider"),
-        "attach-leader help must list explicit --pane and --provider; help={help}"
+        dispatch.contains("\"attach-leader\" | \"takeover\"") && dispatch.contains("team-agent claim-leader"),
+        "dispatch must keep an explicit retirement arm naming claim-leader; dispatch={dispatch}"
     );
     assert!(
-        dispatch.contains("\"attach-leader\"") && dispatch.contains("cmd_attach_leader"),
-        "attach-leader must be a real dispatch arm, not help-only; dispatch={dispatch}"
-    );
-    assert!(
-        parser.contains("\"--pane\"") && parser.contains("\"--provider\""),
-        "attach-leader parser must accept --pane and --provider; parser={parser}"
-    );
-    assert!(
-        types.contains("pub struct AttachLeaderArgs") && cli_mod.contains("pub fn cmd_attach_leader"),
-        "attach-leader must have typed args and a public handler that writes leader_receiver; types/cli missing"
+        !types.contains("pub struct AttachLeaderArgs") && !cli_mod.contains("pub fn cmd_attach_leader"),
+        "the retired attach-leader handler must not survive as a reachable typed path"
     );
 }
 
@@ -463,21 +453,15 @@ fn mcp_send_same_team_owner_delivers_physically_without_a_queue_row() {
     assert_eq!(harness.pane_contains_count("team_b_leader", canary), 0);
 }
 
-fn repairs_induce_claim_command(repairs: &Value) -> bool {
-    let Some(items) = repairs.as_array() else {
-        return false;
-    };
-    items.iter().any(|repair| {
-        ["hint_action", "action"].iter().any(|field| {
-            repair
-                .get(*field)
-                .and_then(Value::as_str)
-                .is_some_and(|text| {
-                    let trimmed = text.trim();
-                    trimmed.starts_with("team-agent claim-leader") || trimmed == "claim-leader"
-                })
-        })
-    })
+// 262f6cdb (doctor v1): six ordered links plus one `next_action` argv.
+fn link<'a>(out: &'a Value, id: &str) -> &'a Value {
+    let links = out["links"].as_array().unwrap_or_else(|| panic!("doctor v1 links: {out}"));
+    assert_eq!(links.len(), 6, "{out}");
+    links.iter().find(|link| link["id"] == id).unwrap()
+}
+
+fn next_action_induces_claim(out: &Value) -> bool {
+    out["next_action"]["argv"].as_array().is_some_and(|argv| argv.iter().any(|arg| arg == "claim-leader"))
 }
 
 fn json_result(result: team_agent::cli::CmdResult) -> Value {

@@ -159,11 +159,15 @@ fn stale_legacy_snapshot_is_marked_or_reported_and_never_consumed_by_product_rea
             .is_some_and(|command| command.contains(NEW_ENDPOINT) && command.contains("legacy-05-session:worker.%new")),
         "F0-4 RED2: accepted current probe must produce an exact non-empty tmux command; node={node}"
     );
+    // 262f6cdb retired doctor's issue inventory (incl. legacy_snapshot_stale).
+    // The kept F0 property is "never consumed": doctor v1 resolves the team
+    // from current state and none of its evidence comes from the divergent
+    // legacy snapshot's stale endpoint.
+    assert_eq!(diagnose["schema"], "team-agent.doctor.v1", "{diagnose}");
+    assert_eq!(diagnose["team"], TEAM, "{diagnose}");
     assert!(
-        issue_ids(&diagnose)
-            .iter()
-            .any(|issue| issue == "legacy_snapshot_stale"),
-        "F0-4 RED2: a divergent legacy snapshot must be visibly marked/reported as `legacy_snapshot_stale` instead of silently ignored; diagnose={diagnose}"
+        !diagnose.to_string().contains(OLD_ENDPOINT),
+        "F0-4 RED2: doctor must never consume the divergent legacy snapshot; diagnose={diagnose}"
     );
 
     let offenders = source_lines_under("src")
@@ -396,24 +400,6 @@ fn status_node(value: &Value) -> Option<&Value> {
         .and_then(|nodes| nodes.iter().find(|node| {
             node.get("name").and_then(Value::as_str) == Some(WORKER)
         }))
-}
-
-fn issue_ids(value: &Value) -> Vec<String> {
-    value
-        .get("issues")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|issue| {
-            issue.as_str().map(str::to_string).or_else(|| {
-                issue
-                    .get("id")
-                    .or_else(|| issue.get("code"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        })
-        .collect()
 }
 
 fn write_json(path: &Path, value: &Value) {

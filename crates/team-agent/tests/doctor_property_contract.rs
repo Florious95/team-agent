@@ -145,38 +145,29 @@ fn p3_human_doctor_is_bounded_and_control_clean_for_generated_inputs() {
         args.push("--json");
         let json = run_with_env(&args, &workspace, &home, None);
         let expected: Value = serde_json::from_slice(&json.stdout).expect("doctor JSON evidence");
-        let mut detail_count = 0;
+        // 262f6cdb replaced `details:`/`runtime=` triage with per-link lines;
+        // A1/A3 (ec3ef36e) bound every human line to 160 bytes and type the
+        // no-runtime L1 failure. JSON keeps the full evidence.
         for (line_no, line) in human.lines().enumerate() {
-            if let Some(details) = line.strip_prefix("details: ") {
-                detail_count += 1;
-                let details: Value = serde_json::from_str(details).expect("complete diagnostic JSON");
-                for key in ["error", "issues", "suggested_repairs"] {
-                    if expected.get(key).is_some() {
-                        assert_eq!(details.get(key), expected.get(key), "P3 lost full {key}");
-                    }
-                }
-            } else {
-                assert!(
-                    line.as_bytes().len() <= 160,
-                    "P3 RED: case={index} triage line={line_no} is {} bytes: {line:?}",
-                    line.as_bytes().len()
-                );
-            }
+            assert!(
+                line.as_bytes().len() <= 160,
+                "P3 RED: case={index} triage line={line_no} is {} bytes: {line:?}",
+                line.as_bytes().len()
+            );
             assert!(
                 !line.chars().any(char::is_control),
                 "P3 RED: case={index} leaked control character: {line:?}"
             );
         }
-        assert_eq!(detail_count, 1, "P3 full details must appear exactly once");
         assert_eq!(json.status.code(), output.status.code(), "P3 text/JSON exit parity");
+        assert_eq!(output.status.code(), Some(1), "{human}");
+        assert_eq!(expected["schema"], "team-agent.doctor.v1", "{expected}");
+        let scope = &expected["links"][0];
+        assert_eq!((scope["id"].as_str(), scope["status"].as_str()), (Some("L1"), Some("FAIL")), "{expected}");
+        assert!(human.contains("L1 scope [FAIL]"), "{human}");
         if team.is_empty() {
-            assert!(output.status.success(), "{human}");
-            assert!(human.contains("runtime=not_present"), "{human}");
+            assert!(scope["message"].as_str().is_some_and(|message| message.contains("has no runtime state")), "{expected}");
             assert!(!human.contains("team_spec_or_runtime_missing"), "{human}");
-        } else {
-            assert_eq!(output.status.code(), Some(1), "{human}");
-            assert!(human.contains("runtime_selection_failed"), "{human}");
-            assert!(human.contains("repair: action=unable to select runtime team:"), "{human}");
         }
         assert!(
             !human.contains("providers: {")
@@ -239,19 +230,19 @@ fn p4_doctor_issues_are_monotone_and_text_json_exit_codes_match() {
             text(&json_output.stderr)
         )
     });
-    let issues = report
-        .get("issues")
-        .and_then(Value::as_array)
-        .expect("doctor report issues array");
+    // 262f6cdb: ok is "all six links PASS"; the unbound leader keeps the
+    // return link (L6) from passing, which forces final ok:false.
+    let links = report.get("links").and_then(Value::as_array).expect("doctor v1 links");
     assert!(
-        !issues.is_empty(),
-        "P4 fixture must enter the unbound registry issue path: {report}"
+        links.iter().any(|link| link["id"] == "L6" && link["status"] != "PASS"),
+        "P4 fixture must enter the unbound leader path: {report}"
     );
     assert_eq!(
         report.get("ok").and_then(Value::as_bool),
-        Some(false),
-        "P4 RED: non-empty doctor issues must force final ok:false: {report}"
+        Some(links.iter().all(|link| link["status"] == "PASS")),
+        "P4 RED: ok must equal all links passing: {report}"
     );
+    assert_eq!(report.get("ok").and_then(Value::as_bool), Some(false), "{report}");
     assert_eq!(
         json_output.status.code(),
         Some(1),
@@ -287,52 +278,27 @@ fn p5_json_shape_keeps_provider_keys_unknown_and_probe_not_run() {
         None,
     );
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
-    for key in [
-        "event_log",
-        "issues",
-        "ok",
-        "providers",
-        "runtime",
-        "suggested_repairs",
-    ] {
+    // 262f6cdb: the v1 shape is schema/ok/team/workspace + six links, with
+    // next_action/avoid when not ok. Provider version/auth probing is not part
+    // of doctor at all (no probe ever runs; see P1), so no provider inventory
+    // or probe status is reported.
+    for key in ["schema", "ok", "team", "workspace", "links", "next_action", "avoid"] {
         assert!(
             report.get(key).is_some(),
             "P5 missing top-level key {key}: {report}"
         );
     }
-    let providers = report
-        .get("providers")
-        .and_then(Value::as_object)
-        .expect("providers object");
-    assert!(providers.get("cursor_agent").is_none());
-    for key in [
-        "claude",
-        "claude_code",
-        "codex",
-        "gemini_cli",
-        "grok",
-    ] {
-        let provider = providers.get(key).expect("provider key retained");
-        assert_eq!(
-            provider.get("version").and_then(Value::as_str),
-            Some("unknown")
-        );
-        assert_eq!(
-            provider.get("auth").and_then(Value::as_str),
-            Some("unknown")
-        );
-        assert_eq!(
-            provider.get("probe_status").and_then(Value::as_str),
-            Some("not_run"),
-            "P5 provider probe status invariant failed for {key}: {provider}"
-        );
+    assert_eq!(report["schema"], "team-agent.doctor.v1", "{report}");
+    let links = report["links"].as_array().expect("links array");
+    assert_eq!(links.len(), 6, "{report}");
+    for link in links {
+        for field in ["id", "link", "status", "proof", "message"] {
+            assert!(link.get(field).is_some(), "P5 link lost {field}: {link}");
+        }
     }
-    let fake = providers.get("fake").expect("fake provider key retained");
-    assert_eq!(fake.get("version").and_then(Value::as_str), Some("fake"));
-    assert_eq!(
-        fake.get("probe_status").and_then(Value::as_str),
-        Some("not_run")
-    );
+    for retired in ["providers", "probe_status", "version", "auth"] {
+        assert_eq!(count_key(&report, retired), 0, "P5 provider probe evidence leaked ({retired}): {report}");
+    }
 }
 
 #[test]
@@ -358,31 +324,20 @@ fn p6_secret_scan_ignores_examples_but_catches_real_line_start_assignments() {
         None,
     );
     let report: Value = serde_json::from_slice(&output.stdout).expect("doctor JSON");
-    let findings = report
-        .pointer("/secret_scan/findings")
-        .and_then(Value::as_array)
-        .expect("secret findings array");
-    assert_eq!(
-        findings.len(),
-        2,
-        "P6 RED: comments/string examples must not be findings, while two real assignments remain: {findings:?}"
-    );
-    for finding in findings {
-        assert_eq!(
-            finding.get("path").and_then(Value::as_str),
-            Some("redaction.rs")
-        );
-        assert_eq!(
-            finding.get("rule").and_then(Value::as_str),
-            Some("api_key_assignment")
-        );
-        assert!(finding.get("match_excerpt").is_none());
+    // 262f6cdb retired the secret-scan inventory: doctor neither reports
+    // findings nor ever echoes a secret value or excerpt in either renderer.
+    assert_eq!(report["schema"], "team-agent.doctor.v1", "{report}");
+    for retired in ["secret_scan", "findings", "match_excerpt"] {
+        assert_eq!(count_key(&report, retired), 0, "P6 secret inventory leaked ({retired}): {report}");
     }
-    assert_eq!(findings[0]["line"], 4);
-    assert_eq!(findings[1]["line"], 5);
     assert_eq!(output.status.code(), Some(1));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-positive"));
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-export-positive"));
+    let human = run_with_env(&["doctor", "--workspace", workspace_arg.as_str()], &workspace, &home, None);
+    for out in [&output, &human] {
+        for secret in ["synthetic-positive", "synthetic-export-positive", "synthetic-example", "synthetic-comment"] {
+            assert!(!String::from_utf8_lossy(&out.stdout).contains(secret), "P6 leaked {secret}");
+            assert!(!String::from_utf8_lossy(&out.stderr).contains(secret), "P6 leaked {secret}");
+        }
+    }
 }
 
 #[test]
@@ -437,11 +392,13 @@ fn p7_doctor_is_read_only_and_selected_team_does_not_leak_other_team() {
                 text(&output.stderr)
             )
         });
+        // 262f6cdb: the selected team is the v1 report's `team`, resolved by L1.
         assert_eq!(
-            report.pointer("/runtime/team_key").and_then(Value::as_str),
+            report.get("team").and_then(Value::as_str),
             Some(team),
-            "P7 selected team must be reflected in runtime summary: {report}"
+            "P7 selected team must be reflected in the report: {report}"
         );
+        assert_eq!(report["links"][0]["status"], "PASS", "{report}");
         if team == "alpha" {
             assert!(
                 !text(&output.stdout).contains("beta-only-agent"),
@@ -583,4 +540,15 @@ fn path(path: &Path) -> String {
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn count_key(value: &Value, key: &str) -> usize {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .map(|(name, child)| usize::from(name == key) + count_key(child, key))
+            .sum(),
+        Value::Array(items) => items.iter().map(|child| count_key(child, key)).sum(),
+        _ => 0,
+    }
 }
