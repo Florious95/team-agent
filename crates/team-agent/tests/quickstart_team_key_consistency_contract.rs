@@ -298,9 +298,22 @@ fn new_quick_start_has_single_identity_and_consistent_addressing_matrix() {
         vec![DISPLAY_NAME.to_string()],
         "new team: the teams map must hold exactly the canonical display-name key"
     );
+    // B4 (5e1315ee) namespaces worker sessions by workspace:
+    // compiler::default_session_name = team-<workspace short hash>-<slug(team)>.
+    // The display name is already slug-shaped, so it is used verbatim.
+    assert!(
+        DISPLAY_NAME.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
+        "{DISPLAY_NAME}"
+    );
     assert_eq!(
         state.get("session_name").and_then(Value::as_str),
-        Some(format!("team-{DISPLAY_NAME}").as_str()),
+        Some(
+            format!(
+                "team-{}-{DISPLAY_NAME}",
+                team_agent::tmux_backend::workspace_short_hash_pub(&case.workspace)
+            )
+            .as_str()
+        ),
         "new team: session derives from the same single identity"
     );
 
