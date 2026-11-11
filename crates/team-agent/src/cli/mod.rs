@@ -1753,6 +1753,11 @@ pub mod lifecycle_port {
                 .then(|| format!("unverified carrier identity: {}", unverified_carriers.join("; "))));
         let mut killed_sessions = Vec::new();
         let mut spared_sessions = Vec::new();
+        let mut target_listing_known = false;
+        let mut listed_target_gone = false;
+        let worker_endpoint_matches = transport.tmux_endpoint().as_deref()
+            .zip(legacy_worker_tmux_endpoint(&state))
+            .is_some_and(|(observed, recorded)| observed == recorded);
         deadline.check("kill_session")?;
         if let Some(session) = session_name.as_ref() {
             // E49 (0.3.24 P0, shutdown kills leader CLI): managed-leader topology
@@ -1790,6 +1795,8 @@ pub mod lifecycle_port {
             } else {
                 SessionOwnership::Unknown
             };
+            target_listing_known = live_targets_known;
+            listed_target_gone = ownership == SessionOwnership::Gone;
             if ownership != SessionOwnership::Owned {
                 push_unique_session(&mut spared_sessions, session.clone());
                 if ownership == SessionOwnership::Unknown {
@@ -1907,7 +1914,7 @@ pub mod lifecycle_port {
         }
         spared_sessions.retain(|session| transport.has_session(session).unwrap_or(true));
         deadline.check("session_residuals")?;
-        let (session_residuals, session_residual_error) = session_residuals_after_reap_many(
+        let (mut session_residuals, session_residual_error) = session_residuals_after_reap_many(
             transport,
             &run_workspace,
             &killed_sessions,
@@ -1915,6 +1922,19 @@ pub mod lifecycle_port {
         );
         if let Some(error) = session_residual_error {
             kill_error.get_or_insert(error);
+        }
+        let mut absence_verified = false;
+        if killed_sessions.is_empty() && target_listing_known && listed_target_gone && worker_endpoint_matches {
+            if let Some(session) = session_name.as_ref() {
+                // A successful empty listing is not enough: verify every existing
+                // endpoint boundary, including the primary transport itself.
+                let (residuals, error) = session_residuals_after_reap(
+                    transport, &run_workspace, session, true,
+                );
+                absence_verified = residuals.is_empty() && error.is_none();
+                session_residuals.extend(residuals);
+                if let Some(error) = error { kill_error.get_or_insert(error); }
+            }
         }
         let event_log = crate::event_log::EventLog::new(&run_workspace);
         let owned_endpoint = owned_shutdown_endpoint(&run_workspace, &state, transport);
@@ -1988,6 +2008,15 @@ pub mod lifecycle_port {
             let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
             coordinator_post_stop = coordinator_post_stop_observation(&wp, stopped.pid);
         }
+        let carriers_gone = absence_verified && std::iter::once(&state)
+            .chain(state.get("teams").and_then(Value::as_object).into_iter()
+                .flat_map(|teams| teams.values()).filter(|_| reap_scope == ShutdownReapScope::Workspace))
+            .flat_map(|scope| scope.get("agents").and_then(Value::as_object)
+                .into_iter().flat_map(|agents| agents.values()))
+            .all(|row| ["provider_pid", "process_id", "pid", "child_pid", "pane_pid"].iter()
+                .filter_map(|key| row.get(key).filter(|value| !value.is_null()))
+                .all(|value| value_u32(value).is_some_and(|pid|
+                    crate::lifecycle::carrier::observe(row, pid).state.gone())));
         let probe_timeout = crate::os_probe::probe_timeout();
         let probe_timeout_kind = probe_timeout.as_ref().map(|timeout| timeout.probe);
         // swallow batch 1: a failed ps probe degrades cleanup truthfully — the
@@ -2008,13 +2037,26 @@ pub mod lifecycle_port {
         // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.2):
         // shutdown 只把 agent.status 打成 "stopped" 会让 team 自身留在
         // `status:null` 的"看起来还活着"形态,进而卡活队写入的 SaveConflict。
-        // 只有 session_killed=true(无 kill error / 无 session/process/file
-        // residual / 无 verification degrade)才把匹配 team 的 status 打成
-        // "shutdown";degraded/false-green shutdown 保留 null,由 diagnose
-        // 走 dirty state 排查通道。
+        // Mark the team shutdown only after verified closure (kill or strict
+        // absence), without errors, residuals, spared targets or degradation.
+        // Unverified cleanup must retain the dirty state for diagnosis.
         let target_session_spared = session_name.as_ref().is_some_and(|target|
             spared_sessions.iter().any(|session| session == target));
-        let clean_stop = session_killed && !target_session_spared && !verification_degraded;
+        let (session_closed, clean_stop) = shutdown_closure(ShutdownClosureInput {
+            killed: !killed_sessions.is_empty(),
+            target_named: session_name.is_some(),
+            listing_known: target_listing_known,
+            listed_gone: listed_target_gone,
+            endpoint_matches: worker_endpoint_matches,
+            absence_verified,
+            carriers_gone,
+            kill_error: kill_error.is_some(),
+            session_residuals: !session_residuals.is_empty(),
+            process_residuals: !process_residuals.is_empty(),
+            file_residuals: !owned_file_residuals.is_empty(),
+            spared: target_session_spared,
+            degraded: verification_degraded,
+        });
         // A spared or unverified session must retain its live seat registrations.
         if clean_stop { mark_agents_stopped(&mut state); }
         restore_native_rows(&mut state);
@@ -2094,6 +2136,7 @@ pub mod lifecycle_port {
                     "team": team,
                     "session_name": session_name.as_ref().map(|s| s.as_str().to_string()),
                     "session_killed": session_killed,
+                    "session_closed": session_closed,
                     "killed_sessions": killed_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     "spared_sessions": spared_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     "coordinator_status": coordinator_status,
@@ -2132,6 +2175,7 @@ pub mod lifecycle_port {
             "team": team,
             "session_name": session_name.map(|s| s.as_str().to_string()),
             "session_killed": session_killed,
+            "session_closed": session_closed,
             "killed_sessions": killed_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "spared_sessions": spared_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "residuals": {
@@ -2335,6 +2379,70 @@ pub mod lifecycle_port {
             Err(e) => {
                 json!({ "pid": pid, "action": "terminate_failed", "reason": e.to_string() })
             }
+        }
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct ShutdownClosureInput {
+        killed: bool,
+        target_named: bool,
+        listing_known: bool,
+        listed_gone: bool,
+        endpoint_matches: bool,
+        absence_verified: bool,
+        carriers_gone: bool,
+        kill_error: bool,
+        session_residuals: bool,
+        process_residuals: bool,
+        file_residuals: bool,
+        spared: bool,
+        degraded: bool,
+    }
+
+    fn shutdown_closure(input: ShutdownClosureInput) -> (bool, bool) {
+        let verified_absence = input.target_named && input.listing_known && input.listed_gone
+            && input.endpoint_matches && input.absence_verified && input.carriers_gone && !input.spared;
+        let closed = (input.killed || verified_absence) && !input.kill_error
+            && !input.session_residuals && !input.process_residuals && !input.file_residuals;
+        (closed, closed && !input.spared && !input.degraded)
+    }
+
+    #[test]
+    fn a14_shutdown_closure_table_preserves_all_fences() {
+        let verified = ShutdownClosureInput {
+            target_named: true, listing_known: true, listed_gone: true,
+            endpoint_matches: true, absence_verified: true, carriers_gone: true,
+            ..ShutdownClosureInput::default()
+        };
+        assert_eq!(shutdown_closure(verified), (true, true), "V: dead or reused carriers");
+        assert_eq!(shutdown_closure(ShutdownClosureInput {
+            killed: true, ..ShutdownClosureInput::default()
+        }), (true, true), "K: existing successful kill path");
+        for (name, input) in [
+            ("no target", ShutdownClosureInput { target_named: false, ..verified }),
+            ("failed enumeration", ShutdownClosureInput { listing_known: false, ..verified }),
+            ("not Gone", ShutdownClosureInput { listed_gone: false, ..verified }),
+            ("wrong endpoint", ShutdownClosureInput { endpoint_matches: false, ..verified }),
+            ("has_session error/unverified absence", ShutdownClosureInput { absence_verified: false, ..verified }),
+            ("carrier not gone", ShutdownClosureInput { carriers_gone: false, ..verified }),
+        ] {
+            assert_eq!(shutdown_closure(input), (false, false), "{name}");
+        }
+        for killed in [false, true] {
+            let base = ShutdownClosureInput { killed, ..verified };
+            for (name, input) in [
+                ("native failure/audit or kill error", ShutdownClosureInput { kill_error: true, ..base }),
+                ("Unknown or stopped Possible carrier", ShutdownClosureInput { kill_error: true, carriers_gone: false, ..base }),
+                ("session residual", ShutdownClosureInput { session_residuals: true, ..base }),
+                ("process residual", ShutdownClosureInput { process_residuals: true, ..base }),
+                ("owned-file residual", ShutdownClosureInput { file_residuals: true, ..base }),
+            ] {
+                assert_eq!(shutdown_closure(input), (false, false), "{name}, K={killed}");
+            }
+            assert_eq!(shutdown_closure(ShutdownClosureInput { spared: true, ..base }),
+                (killed, false), "protected/foreign/unknown target, K={killed}");
+            assert_eq!(shutdown_closure(ShutdownClosureInput { degraded: true, ..base }),
+                (true, false), "probe/ps/lsof degradation, K={killed}");
         }
     }
 
