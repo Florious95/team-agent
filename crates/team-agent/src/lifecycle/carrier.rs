@@ -128,7 +128,7 @@ pub(crate) fn observe(row: &Value, pid: u32) -> CarrierObservation {
 }
 
 /// Denials apply across projections and PID aliases, not just selected roots.
-pub(crate) fn protected_roots(state: &Value) -> std::collections::BTreeMap<u32, Observation> {
+pub(crate) fn protected_roots(state: &Value) -> std::collections::BTreeMap<u32, CarrierObservation> {
     let mut roots = std::collections::BTreeMap::new();
     for scope in std::iter::once(state).chain(
         state
@@ -160,7 +160,7 @@ pub(crate) fn protected_roots(state: &Value) -> std::collections::BTreeMap<u32, 
                     && row["status"] == "stopped"))
                     && roots
                         .get(&pid)
-                        .is_none_or(|old: &Observation| old.state == CarrierState::Reused)
+                        .is_none_or(|old: &CarrierObservation| old.state == CarrierState::Reused)
                 {
                     roots.insert(pid, observation);
                 }
@@ -174,7 +174,7 @@ pub(crate) fn protected_roots(state: &Value) -> std::collections::BTreeMap<u32, 
 /// descendant cannot regain kill eligibility through another discovery path.
 pub(crate) fn protected_target(
     pid: u32,
-    roots: &std::collections::BTreeMap<u32, Observation>,
+    roots: &std::collections::BTreeMap<u32, CarrierObservation>,
 ) -> Option<&str> {
     fn ancestor(ancestor: u32, mut child: u32) -> bool {
         let mut seen = std::collections::BTreeSet::new();
