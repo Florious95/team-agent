@@ -28,7 +28,8 @@ fn lnch_001_quick_start_basic() {
     std::fs::rename(ws.path().join("agents"), documented_team_dir.join("agents"))
         .expect("move agents into .team/current");
 
-    let mut out = run_ta(&ws, &["quick-start", ".team/current"]);
+    // D1: `quick-start` is retired; the handbook form is `start --from .team/current`.
+    let mut out = run_ta(&ws, &["start", "--from", ".team/current"]);
     let mut twin_observation = TwinObservation::from_manifest();
     // Diagnostics if it fails — quick-start can degrade for non-bug reasons
     // (no tmux, sandbox), but in our test env it should succeed.

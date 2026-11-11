@@ -5,7 +5,7 @@ use crate::framework::*;
 fn inbox_001_mailbox_is_append_only_and_non_consuming() {
     let ws = TestWorkspace::new("inbox001").with_fake_spec(&["a"]);
     let path = ws.path().to_str().unwrap();
-    assert!(run_ta(&ws, &["quick-start", "--workspace", path, "--json"]).is_success());
+    assert!(run_ta(&ws, &["start", "--workspace", path, "--json"]).is_success());
     assert!(run_ta(&ws, &["stop-agent", "a", "--workspace", path, "--json"]).is_success());
     let physical = run_ta(
         &ws,

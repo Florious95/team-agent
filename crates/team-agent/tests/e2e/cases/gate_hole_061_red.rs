@@ -67,25 +67,27 @@ fn tooth_1_existing_launch_smoke_runs_documented_quick_start_verbatim() {
         "TOOTH-1 RED: existing hard-smoke test `{LNCH_CASE}` is missing"
     );
     let compact = launch.split_whitespace().collect::<String>();
+    // D1: `quick-start` is retired. The documented launch argv is now
+    // `team-agent start --from .team/current` (team-agent-operator.md:92).
     assert!(
-        compact.contains(r#"["quick-start",".team/current"]"#),
-        "TOOTH-1 RED: `{LNCH_CASE}` never executes the SKILL.md argv verbatim: \
-         `team-agent quick-start .team/current` (no --workspace/--team-id)."
+        compact.contains(r#"["start","--from",".team/current"]"#),
+        "TOOTH-1 RED: `{LNCH_CASE}` never executes the documented argv verbatim: \
+         `team-agent start --from .team/current` (no --workspace/--team)."
     );
     assert!(
         !compact.contains("quick_start_fake("),
         "TOOTH-1 RED: `{LNCH_CASE}` still routes through the convenience helper that adds \
-         --workspace/--team-id instead of the documented public argv."
+         --workspace/--team instead of the documented public argv."
     );
 
     // Independent assembly canary: after the existing hard smoke is repaired,
     // this contract executes the same real CLI process and verifies the
     // project-root runtime, canonical identity, and worker addressing.
     let ws = documented_fake_team("gate061-doc", "coder");
-    let out = run_ta(&ws, &["quick-start", ".team/current"]);
+    let out = run_ta(&ws, &["start", "--from", ".team/current"]);
     assert_eq!(
         out.argv,
-        vec!["team-agent", "quick-start", ".team/current"],
+        vec!["team-agent", "start", "--from", ".team/current"],
         "TOOTH-1: runner changed the documented argv"
     );
     assert_eq!(out.exit_code, 0,
@@ -675,13 +677,14 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[test]
 fn missing_caller_refuses_documented_launch_before_runtime_or_workers() {
     let ws = documented_fake_team("gate061-no-caller", "coder");
-    let out = run_ta_env(&ws, &["quick-start", ".team/current", "--json"],
+    // D1: `quick-start` is retired; rule M maps it flag-for-flag onto `start --from`.
+    let out = run_ta_env(&ws, &["start", "--from", ".team/current", "--json"],
         &[("TMUX", ""), ("TMUX_PANE", "")]);
     assert_eq!(out.exit_code, 1);
     let report = out.json();
-    // 1d2d4d5a routes quick-start through the canonical unified-start
-    // envelope: the step receipt is preflight_blocked and every recorded
-    // effect is zero (no worker panes, no coordinator).
+    // 1d2d4d5a: unified start answers with the canonical envelope: the step
+    // receipt is preflight_blocked and every recorded effect is zero (no
+    // worker panes, no coordinator).
     assert_eq!(report["ok"], false, "{report}");
     assert_eq!(report["status"], "failed", "{report}");
     assert_eq!(report["steps"][0]["receipt"]["status"], "preflight_blocked", "{report}");
@@ -884,18 +887,20 @@ fn assert_original_result_collect_negative_canary() {
 }
 
 fn assert_documented_argv_canary() {
-    let accepts = |argv: &[&str]| argv == ["quick-start", ".team/current"];
-    assert!(accepts(&["quick-start", ".team/current"]));
+    let accepts = |argv: &[&str]| argv == ["start", "--from", ".team/current"];
+    assert!(accepts(&["start", "--from", ".team/current"]));
     assert!(!accepts(&[
-        "quick-start",
+        "start",
+        "--from",
         ".team/current",
         "--workspace",
         ".",
     ]));
     assert!(!accepts(&[
-        "quick-start",
+        "start",
+        "--from",
         ".team/current",
-        "--team-id",
+        "--team",
         "current",
     ]));
 }

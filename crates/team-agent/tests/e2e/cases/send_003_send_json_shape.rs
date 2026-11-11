@@ -6,7 +6,7 @@ use serde_json::Value;
 fn send_003_send_json_shape_locks_public_keys() {
     let ws = TestWorkspace::new("send003").with_fake_spec(&["a"]);
     let path = ws.path().to_str().unwrap();
-    assert!(run_ta(&ws, &["quick-start", "--workspace", path, "--json"]).is_success());
+    assert!(run_ta(&ws, &["start", "--workspace", path, "--json"]).is_success());
     let result = run_ta(
         &ws,
         &["send", "a", "shape-token", "--workspace", path, "--json"],

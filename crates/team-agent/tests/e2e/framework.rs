@@ -1919,13 +1919,14 @@ pub fn quick_start_fake(ws: &TestWorkspace, team_id: &str) -> TaResult {
     let result = run_ta(
         ws,
         &[
-            "quick-start",
+            // D1: `quick-start` is retired; rule M maps it flag-for-flag onto `start --from`.
+            "start",
+            "--from",
             &ws_str,
             "--workspace",
             &ws_str,
-            "--team-id",
+            "--team",
             team_id,
-            "--yes",
             "--no-display",
             "--json",
         ],

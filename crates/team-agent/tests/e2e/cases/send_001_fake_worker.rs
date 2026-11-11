@@ -9,7 +9,7 @@ mod mcp_sim_harness;
 fn send_001_delivers_to_fake_worker() {
     let ws = TestWorkspace::new("send001").with_fake_spec(&["a"]);
     let workspace = ws.path().to_str().unwrap();
-    let quick = run_ta(&ws, &["quick-start", "--workspace", workspace, "--json"]);
+    let quick = run_ta(&ws, &["start", "--workspace", workspace, "--json"]);
     assert!(quick.is_success(), "{} {}", quick.stdout, quick.stderr);
     let token = "SEND001_DIRECT_INPUT";
     let send = run_ta(

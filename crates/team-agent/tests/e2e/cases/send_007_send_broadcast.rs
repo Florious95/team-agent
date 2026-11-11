@@ -5,7 +5,7 @@ use crate::framework::*;
 fn send_007_broadcast_fanout_status() {
     let ws = TestWorkspace::new("send007").with_fake_spec(&["a", "b"]);
     let path = ws.path().to_str().unwrap();
-    assert!(run_ta(&ws, &["quick-start", "--workspace", path, "--json"]).is_success());
+    assert!(run_ta(&ws, &["start", "--workspace", path, "--json"]).is_success());
     let result = run_ta(
         &ws,
         &[
