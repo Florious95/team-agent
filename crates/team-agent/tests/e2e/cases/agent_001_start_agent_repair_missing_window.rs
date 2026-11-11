@@ -15,7 +15,7 @@ fn agent_001_start_agent_repairs_missing_window() {
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     let stopped = run_ta(
         &ws,
         &[
@@ -92,7 +92,7 @@ fn agent_001_force_never_leaves_duplicate_same_role_panes() {
         qs.stderr
     );
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     let before_state = ws.read_state();
     let before_agent = state_agent(&before_state, "a");
     let before = same_role_panes(&ws, &session, "a");

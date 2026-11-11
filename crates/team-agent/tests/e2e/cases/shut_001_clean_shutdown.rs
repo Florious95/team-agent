@@ -24,7 +24,7 @@ fn shut_001_clean_shutdown_kills_worker_session() {
         qs.stderr
     );
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
 
     // tmux session should appear (give it a moment for the coordinator/launcher)
     wait_for_or_panic(

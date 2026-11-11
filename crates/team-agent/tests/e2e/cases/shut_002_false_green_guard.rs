@@ -27,7 +27,7 @@ fn shut_002_false_green_guard() {
         qs.stdout
     );
 
-    let worker_session = worker_session_name(team_id);
+    let worker_session = worker_session_name(&ws, team_id);
 
     // Make leader_receiver collide with the worker session — classic dirty
     // topology that triggered the 0.3.39 false-green.

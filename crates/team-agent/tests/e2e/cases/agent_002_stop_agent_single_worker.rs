@@ -45,7 +45,7 @@ fn agent_002_stop_agent_stops_only_target_worker() {
         Some("running")
     );
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     assert!(
         tmux_window_exists_for_workspace(&ws, &session, "b"),
         "sibling worker window b should remain live"

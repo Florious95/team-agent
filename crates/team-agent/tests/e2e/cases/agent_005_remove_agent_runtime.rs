@@ -39,7 +39,7 @@ fn agent_005_remove_agent_runtime() {
         !state_has_agent(&state, "b"),
         "removed agent b should be absent from top-level state; state={state}"
     );
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     assert!(
         !tmux_window_exists_for_workspace(&ws, &session, "b"),
         "removed worker window b should be absent"

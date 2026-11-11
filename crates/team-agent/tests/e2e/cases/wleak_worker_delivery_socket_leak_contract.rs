@@ -149,7 +149,7 @@ fn wleak_start_agent_rejects_stale_cached_foreign_pane() {
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     let pane_b = pane_for_window(&ws, &session, "b");
     // Start only admits stopped seats; poison the tuple after stopping its owner.
     let stop = run_ta(&ws, &["stop-agent", "a", "--workspace", ws_path, "--json"]);
@@ -201,7 +201,7 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxServerGuard::for_workspace(&ws);
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     let pane_b = pane_for_window(&ws, &session, "b");
     write_agent_pane_tuple(&ws, "a", &pane_b);
 

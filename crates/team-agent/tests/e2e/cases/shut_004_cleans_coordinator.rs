@@ -58,7 +58,7 @@ fn shut_004_shutdown_cleans_coordinator_sidecar() {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     assert!(
         !spared.iter().any(|v| v.as_str() == Some(session.as_str())),
         "worker session {session} should NOT be in spared_sessions; got {spared:?}"

@@ -70,7 +70,7 @@ fn lnch_001_quick_start_basic() {
     }
     assert!(twin_observation.observe(
         out.stdout
-            .contains(&format!("session_name: {}", worker_session_name(team_id)))),
+            .contains(&format!("session_name: {}", worker_session_name(&ws, team_id)))),
         "public output must expose the canonical session name: {}",
         out.stdout
     );
@@ -78,7 +78,7 @@ fn lnch_001_quick_start_basic() {
     // state.json written and shape correct
     assert_file_exists(&ws.state_json_path());
     assert_json_field_eq_str(&state, "/active_team_key", team_id);
-    assert_json_field_eq_str(&state, "/session_name", &worker_session_name(team_id));
+    assert_json_field_eq_str(&state, "/session_name", &worker_session_name(&ws, team_id));
     assert_json_field_present(&state, "/tmux_endpoint");
     assert_json_field_present(&state, "/tmux_socket");
     assert_json_field_present(&state, "/agents/a");

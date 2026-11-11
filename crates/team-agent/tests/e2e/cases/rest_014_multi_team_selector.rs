@@ -74,7 +74,7 @@ fn rest_014_restart_team_selector_targets_named_team() {
         .pointer("/session_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let expected = worker_session_name(team_a);
+    let expected = worker_session_name(&ws, team_a);
     assert_eq!(
         session_name, expected,
         "restart --team {team_a} should target session {expected}; got {session_name:?} (json={j})"

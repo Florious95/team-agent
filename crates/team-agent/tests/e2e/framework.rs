@@ -344,7 +344,7 @@ impl TestWorkspace {
     /// restart to wake stopped seats. Preserve every other worker fact.
     pub fn seed_crashed_workers_for_restart(&self, team_id: &str, agent_ids: &[&str]) {
         let mut state = self.read_state();
-        let session = worker_session_name(team_id);
+        let session = worker_session_name(self, team_id);
         let keys: Vec<String> = state["teams"]
             .as_object()
             .expect("crash fixture needs canonical teams")
@@ -2232,11 +2232,20 @@ fn disable_fake_worker_tty_echo(ws: &TestWorkspace) {
 #[cfg(not(unix))]
 fn disable_fake_worker_tty_echo(_ws: &TestWorkspace) {}
 
-/// Sanitize team_id into the tmux session name as the runtime does:
-/// session = `team-<team_id>` (lowercased, no transformation needed for our
-/// safe ids). Use this everywhere to avoid scattering the convention.
-pub fn worker_session_name(team_id: &str) -> String {
-    format!("team-{team_id}")
+/// The worker tmux session name the runtime derives for `team_id` in `ws`.
+/// 5e1315ee namespaces worker sessions by workspace:
+/// compiler::default_session_name = team-<workspace short hash>-<slug(team)>.
+/// Our fixture team ids are already slug-shaped, so they are used verbatim.
+/// Use this everywhere to avoid scattering the convention.
+pub fn worker_session_name(ws: &TestWorkspace, team_id: &str) -> String {
+    assert!(
+        team_id.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
+        "{team_id}"
+    );
+    format!(
+        "team-{}-{team_id}",
+        team_agent::tmux_backend::workspace_short_hash_pub(ws.path())
+    )
 }
 
 /// Read `tmux_socket` from state.json (full path) and check whether a session

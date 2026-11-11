@@ -51,7 +51,7 @@ fn agent_004_add_agent_runtime() {
         Some(ws.path().to_str().unwrap())
     );
 
-    let session = worker_session_name(team_id);
+    let session = worker_session_name(&ws, team_id);
     assert!(
         tmux_window_exists_for_workspace(&ws, &session, "b"),
         "add-agent should create worker window b"
