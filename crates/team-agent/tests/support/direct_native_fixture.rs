@@ -64,7 +64,16 @@ impl NativeAuthority {
         let root = canonical.as_path();
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let tmux = selected("tmux");
-        let python = selected("python3");
+        let python_launcher = selected("python3");
+        // macOS's public python3 may be a dispatcher; observe its actual interpreter,
+        // but launch through the public command/PATH rather than renaming the dispatcher.
+        let observed = Command::new("python3")
+            .args(["-c", "import os, sys; print(os.path.realpath(sys.executable))"])
+            .output().unwrap();
+        assert!(observed.status.success());
+        let python = PathBuf::from(String::from_utf8(observed.stdout).unwrap().trim())
+            .canonicalize().unwrap();
+        let launcher_hash = fingerprint_file(&python_launcher, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         let cwd = resolve_cwd(root).unwrap();
         let scope = backend::scope_for(&cwd, "alpha").unwrap();
         let endpoint = format!("framework:{}", scope.as_str());
@@ -82,12 +91,11 @@ impl NativeAuthority {
         std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
             .open(binding_root.join("framework-binding.json")).unwrap()
             .write_all(&serde_json::to_vec(&binding).unwrap()).unwrap();
-        let image = root.join("native-python");
-        std::os::unix::fs::symlink(&python, &image).unwrap();
         let native_hash = fingerprint_file(&python, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         let native = physical_support::native(native_hash);
         let mut descriptor = physical_support::descriptor("single", &native);
         descriptor.identity.id = provider;
+        descriptor.identity.binary = "python3";
         descriptor.session.fresh = FreshSession::NotApplicable;
         let script = root.join("native-receiver.py");
         let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -103,7 +111,8 @@ impl NativeAuthority {
             operation: Operation::Fresh, mode: LaunchMode::FullWorker, auth: AuthMode::NativeSubscription,
             model: Some("single".into()), role_effort: None, team_effort: None, prompt: Some("controlled input budget".into()),
             bypass: false, paths: LaunchPaths { candidate, cwd, runtime_root: transport_root.clone(),
-                executable: python, launcher: physical_support::public_launcher(&image, native_hash) },
+                executable: python, launcher: LaunchEntrypoint { command: "python3".into(),
+                    search_path: std::env::var_os("PATH").unwrap(), executable: python_launcher, sha256: launcher_hash } },
             channel: Channel::Tmux, input_profile: Some("physical-fixture".into()), evidence_kind: EvidenceKind::Native,
             preassigned_session: None, resume: None, fork: None };
         let resolved = resolve_launch(&descriptor, &hooks, &request, None).unwrap();
@@ -128,7 +137,8 @@ impl NativeAuthority {
         assert!(store.unfinished().unwrap().is_empty());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !helper_file.exists() {
-            assert!(Instant::now() < deadline, "native MCP descendant never started");
+            assert!(Instant::now() < deadline, "native MCP descendant never started: {:?}",
+                Command::new("tmux").args(["-S", &owned.socket, "capture-pane", "-p", "-t", &owned.pane]).output());
             std::thread::sleep(Duration::from_millis(10));
         }
         let helper_pid = std::fs::read_to_string(helper_file).unwrap().trim().parse().unwrap();
