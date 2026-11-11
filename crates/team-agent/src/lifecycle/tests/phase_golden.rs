@@ -96,40 +96,20 @@ fn hermetic_caller_envs() -> &'static [&'static str] {
 #[serial_test::serial(env)]
 fn phase_golden_missing_registry_requires_index_publication_not_claim() {
     let diagnose = run_diagnose_after_unbound_state_fixture();
-    let issues = diagnose
-        .get("issues")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let issue_ids: Vec<&str> = issues
-        .iter()
-        .filter_map(|issue| issue.as_str())
-        .collect();
-    assert_eq!(
-        issue_ids
-            .iter()
-            .copied()
-            .filter(|id| *id == "leader_registry_index_missing")
-            .count(),
-        1,
-        "tombstone after seeded owner without registry must be exactly index-missing; diagnose={diagnose}"
-    );
-    assert!(
-        !issue_ids.contains(&"leader_receiver_not_committed"),
-        "parallel not_committed bool must not appear; diagnose={diagnose}"
-    );
-    let repairs = diagnose
-        .get("suggested_repairs")
-        .map(Value::to_string)
-        .unwrap_or_default();
-    assert!(
-        repairs.contains("publish the leader registry index"),
-        "index-missing repair must publish the index; diagnose={diagnose}"
-    );
-    assert!(
-        !repairs.contains("team-agent claim-leader --confirm"),
-        "index-missing must not recommend claim-leader --confirm; diagnose={diagnose}"
-    );
+    // 262f6cdb: the scoped physical chain supersedes the inventory-only index oracle.
+    // This unspawned fixture has no host: publishing a discovery index cannot repair it.
+    assert_eq!(diagnose["schema"], "team-agent.doctor.v1");
+    assert_eq!(diagnose["ok"], false);
+    assert_eq!(diagnose["first_broken_link"], "L2");
+    assert_eq!(diagnose["links"][0]["status"], "PASS");
+    assert_eq!(diagnose["links"][1]["status"], "FAIL");
+    let repairs = diagnose["next_action"]["argv"].as_array().unwrap();
+    assert_eq!(repairs[0], "team-agent");
+    assert_eq!(repairs[1], "restart");
+    assert!(!repairs.iter().any(|arg| arg == "claim-leader" || arg == "--confirm" || arg == "--force"),
+        "an absent host must not become a takeover recommendation: {diagnose}");
+    assert!(!diagnose.to_string().contains("leader_receiver_not_committed"),
+        "parallel not_committed authority must not return: {diagnose}");
 }
 
 fn two_worker_team_dir(hermetic: &HermeticTestEnv) -> PathBuf {

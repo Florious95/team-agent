@@ -193,14 +193,12 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
         json!(false),
         "diagnose missing profile must emit ok:false JSON; stdout={stdout} stderr={stderr}"
     );
-    assert_eq!(json["profile_smoke"]["ok"], false, "{json}");
-    assert!(
-        json["profile_smoke"].to_string().contains("profile"),
-        "diagnose missing profile must identify the scoped configuration failure: {json}"
-    );
-    assert!(json["providers"].as_object().unwrap().values().all(|provider| {
-        provider["probe_status"] == "not_run"
-    }));
+    // 262f6cdb: doctor v1 diagnoses the missing runtime, not retired HTTP/profile inventory.
+    assert_eq!(json["schema"], "team-agent.doctor.v1");
+    assert_eq!(json["first_broken_link"], "L1");
+    assert_eq!(json["links"][0]["status"], "FAIL");
+    assert!(json.get("profile_smoke").is_none(), "{json}");
+    assert!(json.get("providers").is_none(), "{json}");
     assert!(
         !stdout.contains("tokens") && !stderr.contains("tokens"),
         "diagnose dry-run must not consume provider tokens or report token usage; stdout={stdout} stderr={stderr}"

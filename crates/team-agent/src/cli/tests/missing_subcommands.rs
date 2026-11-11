@@ -150,9 +150,8 @@ fn cli_argv(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| (*s).to_string()).collect()
 }
 
-// ── diagnose ── attached is host-registry authority, not state.json self-sign.
-// Seed leader_receiver=attached + a ~/.team-agent/leaders/ row for this workspace
-// + NO session_name + NO agents -> issues=[] -> EXIT 0.
+// 262f6cdb: a reachable leader is only L6; it cannot certify a missing L2 host.
+// Registry rows are derived discovery, never standalone binding authority.
 #[test]
 #[serial(env)]
 fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
@@ -193,7 +192,7 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
             &cli_argv(&["doctor", "--workspace", &ws.to_string_lossy(), "--json"]),
             &ws,
         );
-        assert_eq!(code, ExitCode::Ok, "M3: a healthy binding with no runtime fault is healthy; no coordinator is required");
+        assert_eq!(code, ExitCode::Error, "262f6cdb: a healthy leader cannot certify an absent host");
         let result = cmd_doctor(&DoctorArgs {
             workspace: ws.clone(), json: true, team: None,
             spec: None, gate: None, comms: false, fix: false,
@@ -202,7 +201,13 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
         let CmdOutput::Json(report) = result.output else {
             panic!("expected JSON diagnostic report");
         };
-        let issues = report["issues"].to_string();
+        assert_eq!(report["schema"], "team-agent.doctor.v1");
+        assert_eq!(report["first_broken_link"], "L2");
+        assert_eq!(report["links"][0]["status"], "PASS");
+        assert_eq!(report["links"][1]["status"], "FAIL");
+        assert_eq!(report["links"][5]["status"], "WARN");
+        assert!(report["links"][5]["message"].as_str().unwrap().contains("leader reachable"), "{report}");
+        let issues = report["links"].to_string();
         assert!(!issues.contains("coordinator"), "M3: doctor must not demand a coordinator: {report}");
         for binding_failure in ["leader_not_attached", "leader_receiver_unbound", "leader_workspace_mismatch"] {
             assert!(!issues.contains(binding_failure), "healthy binding regressed: {report}");
@@ -216,7 +221,7 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
 fn dispatch_routes_diagnose_self_signed_attached_without_registry_is_not_ok() {
     // 已废除的行为：旧实现只信 `state.json` 的自签 attached（F2 谎话本体），此断言证明它确实没了。
     // 夹具只种 leader_receiver.status=attached，注册表无该 workspace 条目。
-    // 旧 diagnose 会因此报 Ok；新 diagnose 必须以注册表为可投递权威，判非 Ok。
+    // 262f6cdb: neither a self-signed row nor a registry entry substitutes for physical link evidence.
     let _env = EnvUnsetGuard::unset(&[
         "TMUX",
         "TMUX_PANE",

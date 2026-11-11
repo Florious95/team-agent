@@ -391,7 +391,7 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     let team = write_profile_fixture(env.root(), server.base_url(), &profile_token);
     let result = cmd_doctor(&DoctorArgs {
         spec: Some(team.join("TEAM.md")),
-        workspace: team,
+        workspace: team.clone(),
         gate: None,
         comms: false,
         team: None,
@@ -401,18 +401,26 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
         confirm: false,
         json: true,
     })
-        .expect("profile smoke returns a diagnostic report");
+        .expect("doctor returns a scoped diagnostic report");
     let report = match result.output {
         CmdOutput::Json(value) => value,
         other => panic!("expected JSON doctor output, got {other:?}"),
     };
     let report_text = report.to_string();
-    let text = report
-        .get("profile_smoke")
-        .unwrap_or_else(|| panic!("doctor must expose profile_smoke; report={report}"))
-        .to_string();
+    // 262f6cdb: doctor v1 no longer executes profile HTTP checks.
+    assert_eq!(report["schema"], "team-agent.doctor.v1");
+    assert!(report.get("profile_smoke").is_none(), "{report}");
+    assert!(!server.was_called(), "doctor must not spend a profile request");
+    // Keep the sanitizer's explicit-token/truncation oracle independent of the retired doctor hook.
+    let spec = crate::compiler::compile_team(&team).unwrap();
+    let profile = crate::lifecycle::profile_smoke::profile_smoke_checks_for_agents_with_profile_dir(
+        &team, spec.get("agents").unwrap().as_list().unwrap(), Some(&team.join("profiles")),
+        Duration::from_secs(1));
+    let text = serde_json::to_string(&profile).unwrap();
     let profile_policy_preserved = !report_text.contains(&marker)
         && !report_text.contains(&profile_token)
+        && !text.contains(&marker)
+        && !text.contains(&profile_token)
         && !text.contains(tail_sentinel)
         && text.contains(REDACTED)
         && text.contains("proxy.invalid:8443/path")

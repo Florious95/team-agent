@@ -606,6 +606,8 @@ impl RecordedSpawn {
 
 #[derive(Debug, Default)]
 struct RecordingTransport {
+    // 7cba7b44: spawned receipts and subsequent native snapshots must describe the same tuple.
+    inner: crate::transport::test_support::OfflineTransport,
     spawns: Mutex<Vec<RecordedSpawn>>,
     injected: Mutex<Vec<Target>>,
     session_present: bool,
@@ -646,19 +648,15 @@ impl RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        env: &BTreeMap<String, String>,
-    ) -> SpawnResult {
+        env: &BTreeMap<String, String>, cwd: &Path,
+    ) -> Result<SpawnResult, TransportError> {
         let mut spawns = self.spawns.lock().unwrap();
         spawns.push(RecordedSpawn {
             argv: argv.to_vec(),
             env: env.clone(),
         });
-        SpawnResult {
-            pane_id: PaneId::new(format!("%{}", spawns.len())),
-            session: session.clone(),
-            window: window.clone(),
-            child_pid: None,
-        }
+        drop(spawns);
+        self.inner.spawn_into(session, window, argv, cwd, env)
     }
 }
 
@@ -672,10 +670,10 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env))
+        self.spawn_result(session, window, argv, env, cwd)
     }
 
     fn spawn_into(
@@ -683,10 +681,10 @@ impl Transport for RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env))
+        self.spawn_result(session, window, argv, env, cwd)
     }
 
 
@@ -716,17 +714,11 @@ impl Transport for RecordingTransport {
     }
 
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
-        let spawns = self.spawns.lock().unwrap();
-        Ok(Some(
-            spawns
-                .iter()
-                .enumerate()
-                .any(|(idx, _)| pane.as_str() == format!("%{}", idx + 1)),
-        ))
+        self.inner.has_pane(pane)
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        self.inner.list_targets()
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {

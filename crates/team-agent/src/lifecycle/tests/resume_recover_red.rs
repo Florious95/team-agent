@@ -275,7 +275,7 @@ impl ResumeTransport {
         let state = load_runtime_state(workspace).unwrap();
         // 9d07405b / 3e3eb288: the fake session carries the fixture's real scope tags.
         Self { ownership: crate::transport::test_support::OfflineTransport::new().with_session_owner(
-            workspace, crate::state::projection::team_state_key(&state), state["generation"].as_str().unwrap_or("")),
+            workspace, crate::state::projection::team_state_key(&state), crate::state::projection::session_generation(&state).unwrap_or("")),
             ..Self::default() }
     }
 }

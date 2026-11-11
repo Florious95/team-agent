@@ -167,6 +167,8 @@ fn temp_ws(label: &str) -> PathBuf {
 
 #[derive(Debug, Default)]
 struct PanicOnStartupPromptTransport {
+    // 7cba7b44: spawned receipts and subsequent native snapshots must describe the same tuple.
+    inner: crate::transport::test_support::OfflineTransport,
     spawns: Mutex<Vec<String>>,
 }
 
@@ -184,16 +186,13 @@ impl PanicOnStartupPromptTransport {
         kind: &'static str,
         session: &SessionName,
         window: &WindowName,
-    ) -> SpawnResult {
+        argv: &[String], cwd: &Path, env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         let mut spawns = self.spawns.lock().expect("spawns lock");
-        let pane_index = spawns.len();
         spawns.push(kind.to_string());
-        SpawnResult {
-            pane_id: PaneId::new(format!("%{pane_index}")),
-            session: session.clone(),
-            window: window.clone(),
-            child_pid: None,
-        }
+        drop(spawns);
+        if kind == "spawn_first" { self.inner.spawn_first(session, window, argv, cwd, env) }
+        else { self.inner.spawn_into(session, window, argv, cwd, env) }
     }
 }
 
@@ -206,22 +205,22 @@ impl Transport for PanicOnStartupPromptTransport {
         &self,
         session: &SessionName,
         window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result("spawn_first", session, window))
+        self.spawn_result("spawn_first", session, window, argv, cwd, env)
     }
 
     fn spawn_into(
         &self,
         session: &SessionName,
         window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result("spawn_into", session, window))
+        self.spawn_result("spawn_into", session, window, argv, cwd, env)
     }
 
 
@@ -249,17 +248,11 @@ impl Transport for PanicOnStartupPromptTransport {
     }
 
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
-        let spawns = self.spawns.lock().expect("spawns lock");
-        Ok(Some(
-            spawns
-                .iter()
-                .enumerate()
-                .any(|(idx, _)| pane.as_str() == format!("%{idx}")),
-        ))
+        self.inner.has_pane(pane)
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        self.inner.list_targets()
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
