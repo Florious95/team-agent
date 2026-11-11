@@ -189,8 +189,13 @@ impl SeatCase {
             )
             .expect("write second team role doc");
         }
+        // Ruled exception to rule M (stage1-test-opus): a second whole-team start
+        // in a workspace that already has a runtime needs an explicit creation
+        // source, so the rewritten workspace TEAM.md/agents are passed as --from.
         let (_, value) = self.cli_json(&[
             "start",
+            "--from",
+            self.workspace_str(),
             "--workspace",
             self.workspace_str(),
             "--team",
