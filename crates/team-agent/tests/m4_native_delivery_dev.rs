@@ -15,7 +15,22 @@ use team_agent_contract::{
 
 #[test]
 #[ignore = "internal owned terminal child, not a skipped acceptance case"]
-fn native_terminal_fixture() { physical_support::native_terminal::run(); }
+fn native_terminal_fixture() {
+    // 671d6db5: cold-start delivery waits for launch-scoped MCP startup
+    // evidence. Model the native's MCP helper as a real, bounded (<=120s)
+    // descendant; the test registers it as this incarnation's connection.
+    if let Some(log) = std::env::args_os().nth(8) {
+        let helper = std::process::Command::new("/bin/sleep").arg("100").spawn().unwrap();
+        std::fs::write(helper_pid_path(&PathBuf::from(log)), helper.id().to_string()).unwrap();
+    }
+    physical_support::native_terminal::run();
+}
+
+fn helper_pid_path(event_log: &std::path::Path) -> PathBuf {
+    let mut path = event_log.as_os_str().to_owned();
+    path.push(".mcp-helper-pid");
+    PathBuf::from(path)
+}
 
 fn limits() -> HostLimits {
     HostLimits { command_output: OutputLimits { stdout: 256 * 1024, stderr: 65536, stdin: 1024 * 1024 },
@@ -99,6 +114,33 @@ fn committed_starting_seat_is_located_and_receives_managed_send() {
     assert!(!store.leased(&identity.seat).unwrap());
     assert!(store.unfinished().unwrap().is_empty());
     owned.target = seat.physical.clone();
+    // 671d6db5 cold-start readiness fence: publish the startup handshake the
+    // way the MCP transport does after flushing both responses (a real native
+    // descendant connection; initialize + tools/list). Production readiness is
+    // not bypassed: delivery still waits on startup_handshake_observed.
+    let pid_file = helper_pid_path(&transport_root.join(physical_support::native_terminal::event_log_name(&identity)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline, "native fixture never spawned its MCP helper");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let helper_pid: u32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    let sleep = PathBuf::from("/bin/sleep").canonicalize().unwrap();
+    let sleep_sha256 = fingerprint_file(&sleep, 1024 * 1024 * 1024, Duration::from_secs(5)).unwrap();
+    let helper = team_agent_contract::host::process::capture_process(helper_pid, &sleep, sleep_sha256, Duration::from_secs(5)).unwrap();
+    let connection = InstanceId::new("d10-startup").unwrap();
+    store.register_connection(&team_agent_contract::orchestration::protocol::ConnectionRecord {
+        identity: identity.clone(), connection: connection.clone(), server_key: seat.server_key.clone(),
+        binding_key: seat.binding_key.clone(), process: helper,
+        native_process: seat.physical.as_ref().unwrap().process.clone(), closed: false,
+    }).unwrap();
+    let context = team_agent_contract::orchestration::mcp::CallContext { identity: identity.clone(),
+        binding_key: seat.binding_key.clone(), connection_id: connection, task_id: "startup".into() };
+    assert!(!store.startup_handshake_observed(&identity).unwrap());
+    for (id, method) in [(1, "initialize"), (2, "tools/list")] {
+        team_agent_contract::orchestration::mcp::response_written(&mut store, &context, &json!({"id": id, "method": method})).unwrap();
+    }
+    assert!(store.startup_handshake_observed(&identity).unwrap());
     let snapshot = json!({"team_key":"d10","active_team_key":"d10","teams":{"d10":{"team_key":"d10",
         "agents":{"worker":{"provider":"pi_tui","runtime_family":"contract","status":"running",
             "native_endpoint":seat.endpoint,"pane_id":seat.pane,"native_pid":seat.process.as_ref().unwrap().pid}}}}});

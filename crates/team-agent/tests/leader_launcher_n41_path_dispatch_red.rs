@@ -358,6 +358,10 @@ impl Case {
             .current_dir(&self.workspace)
             .env("HOME", self.env.home())
             .env("TMPDIR", &self.tmpdir)
+            // 7d43286d: named endpoints resolve in tmux's configured socket
+            // root (TMUX_TMPDIR, which the hermetic env otherwise points at
+            // its own root), so the owned short root is selected explicitly.
+            .env("TMUX_TMPDIR", &self.tmpdir)
             .env("PATH", self.test_path())
             .env("TEAM_AGENT_TEST_TMUX_LOG", &self.tmux_log_path)
             .env("TEAM_AGENT_TEST_PROVIDER_LOG", &self.provider_log_path)

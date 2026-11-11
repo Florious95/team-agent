@@ -447,6 +447,23 @@ fn seed_state_with_leader_anchor(
     leader_pane: &str,
 ) {
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
+    let leader_receiver = json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "pane_id": leader_pane,
+        "provider": "copilot"
+    });
+    let agents = json!({
+        "w1": {
+            "agent_id": "w1",
+            "status": "running",
+            "provider": "fake",
+            "window": "w1",
+            "pane_id": "%1"
+        }
+    });
+    // 0c909953 retired the top-level-only team seam: the primary team of this
+    // hybrid fixture is also published in `teams` (the top-level mirror stays).
     save_runtime_state(
         workspace,
         &json!({
@@ -454,6 +471,15 @@ fn seed_state_with_leader_anchor(
             "team_key": session_name,
             "generation": "fixture",
             "teams": {
+                session_name: {
+                    "session_name": session_name,
+                    "team_key": session_name,
+                    "generation": "fixture",
+                    "is_external_leader": true,
+                    "leader_receiver": leader_receiver.clone(),
+                    "agents": agents.clone(),
+                    "tasks": []
+                },
                 tail_session: {
                     "session_name": tail_session,
                     "team_key": tail_session,
@@ -461,21 +487,8 @@ fn seed_state_with_leader_anchor(
                 }
             },
             "is_external_leader": true,
-            "leader_receiver": {
-                "mode": "direct_tmux",
-                "status": "attached",
-                "pane_id": leader_pane,
-                "provider": "copilot"
-            },
-            "agents": {
-                "w1": {
-                    "agent_id": "w1",
-                    "status": "running",
-                    "provider": "fake",
-                    "window": "w1",
-                    "pane_id": "%1"
-                }
-            },
+            "leader_receiver": leader_receiver,
+            "agents": agents,
             "tasks": []
         }),
     )
