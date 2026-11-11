@@ -61,12 +61,11 @@ impl SeatCase {
             socket: PathBuf::new(),
         };
         let (ok, value) = case.cli_json(&[
-            "quick-start",
+            "start",
             "--workspace",
             case.workspace_str(),
-            "--team-id",
+            "--team",
             team,
-            "--yes",
             "--json",
         ]);
         // The owned external caller permits this positive worker fixture;
@@ -192,12 +191,11 @@ impl SeatCase {
             .expect("write second team role doc");
         }
         let (_, value) = self.cli_json(&[
-            "quick-start",
+            "start",
             "--workspace",
             self.workspace_str(),
-            "--team-id",
+            "--team",
             team,
-            "--yes",
             "--json",
         ]);
         assert!(

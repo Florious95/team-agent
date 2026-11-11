@@ -131,13 +131,13 @@ impl SupermarketCase {
     fn quick_start(&self, team: &str) {
         let source = self.team_dir(team);
         let out = self.run([
-            "quick-start",
+            "start",
+            "--from",
             source,
             "--workspace",
             self.ws(),
-            "--team-id",
+            "--team",
             team,
-            "--yes",
             "--json",
         ]);
         let json = json_output(&out);

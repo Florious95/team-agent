@@ -95,12 +95,11 @@ impl CloneScopeCase {
         // out-of-case) spec-name-vs-runtime-key divergence instead of the clone
         // registration path under test.
         let output = case.run_cli(&[
-            "quick-start",
+            "start",
             "--workspace",
             case.workspace_str(),
-            "--team-id",
+            "--team",
             TEAM_NAME,
-            "--yes",
             "--no-display",
             "--json",
         ]);

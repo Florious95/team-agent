@@ -115,13 +115,12 @@ impl RealTeam {
     fn quick_start(&mut self, worker: &str) -> Value {
         self.write_role(worker);
         let out = self.run(&[
-            "quick-start",
+            "start",
+            "--from",
             &self.root.join("teamdir").to_string_lossy(),
             "--workspace",
             &self.ws(),
-            "--name",
-            &self.team,
-            "--yes",
+            // D1: `--name` has no replacement; TEAM.md `name:` names the team.
             "--json",
         ]);
         let v = json(&out);

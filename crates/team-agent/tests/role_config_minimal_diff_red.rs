@@ -135,13 +135,13 @@ fn quick_start(ws: &TestWorkspace, team_id: &str, shims: &ProviderShims) {
     let result = run_ta_env(
         ws,
         &[
-            "quick-start",
+            "start",
+            "--from",
             root,
             "--workspace",
             root,
-            "--team-id",
+            "--team",
             team_id,
-            "--yes",
             "--no-display",
             "--json",
         ],

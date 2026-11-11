@@ -51,10 +51,9 @@ impl DupWindowCase {
         let workspace = env.workspace(tag);
         write_team_docs(&workspace, workers);
         let args = vec![
-            "quick-start",
+            "start",
             "--workspace",
             workspace.to_str().expect("workspace utf8"),
-            "--yes",
             "--json",
         ];
         let output = env.run_cli(&workspace, &args);

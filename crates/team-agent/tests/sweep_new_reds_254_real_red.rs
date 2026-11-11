@@ -502,15 +502,14 @@ impl RealCase {
     fn quick_start(&self, team_key: &str, _agent: &str, env: &[(&str, &str)]) -> CliRun {
         self.run_cli(
             &[
-                "quick-start",
+                "start",
+                "--from",
                 self.root.join(team_key).to_string_lossy().as_ref(),
                 "--workspace",
                 self.root_str().as_str(),
-                "--team-id",
+                "--team",
                 team_key,
-                "--name",
-                team_key,
-                "--yes",
+                // D1: `--name` has no replacement; TEAM.md `name:` names the team.
                 "--json",
             ],
             env,

@@ -206,13 +206,13 @@ fn fake_provider_quick_start_shutdown_does_not_resurrect_killed_session_aliases(
     let quick_start = run_team_agent_with_timeout(
         &case.workspace,
         &[
-            "quick-start",
+            "start",
+            "--from",
             team_dir.to_str().unwrap(),
             "--workspace",
             case.workspace.to_str().unwrap(),
-            "--team-id",
+            "--team",
             "current",
-            "--yes",
             "--json",
         ],
         Duration::from_secs(12),

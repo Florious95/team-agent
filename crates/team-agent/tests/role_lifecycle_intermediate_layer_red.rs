@@ -85,7 +85,7 @@ fn ws_seed(tag: &str, provider: &str, model: &str, effort: Option<&str>) -> (Tes
     fs::write(ws.path().join("agents/seed.md"), role("seed", provider, model, effort, false, "Seed prompt.")).unwrap();
     let shims = Shims::install(&ws);
     let root = ws.path().to_string_lossy().into_owned();
-    let out = run_ta_env(&ws, &["quick-start", &root, "--workspace", &root, "--team-id", "rolelife", "--yes", "--no-display", "--json"], &shims.env());
+    let out = run_ta_env(&ws, &["start", "--from", &root, "--workspace", &root, "--team", "rolelife", "--no-display", "--json"], &shims.env());
     assert!(quick_start_workers_available(&out), "quick-start failed: {} {}", out.stdout, out.stderr);
     if let Some(s) = ws.read_state().get("tmux_socket").and_then(Json::as_str) { ws.register_owned_tmux_socket(Path::new(s)); }
     (ws, shims)

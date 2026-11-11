@@ -45,13 +45,13 @@ impl Fixture {
         let root = self.ws.path().to_str().unwrap();
         let team = self.ws.path().file_name().unwrap().to_str().unwrap();
         let output = self.run(&[
-            "quick-start",
+            "start",
+            "--from",
             root,
             "--workspace",
             root,
-            "--team-id",
+            "--team",
             team,
-            "--yes",
             "--no-display",
             "--json",
         ]);

@@ -178,7 +178,7 @@ exec '{tmux}' "$@"
         let dir_s = dir.to_string_lossy().to_string();
         // 1d2d4d5a: `--name` is refused by unified start. TEAM.md `name:` declares the team and
         // `--team` selects it explicitly (a bay can hold several teams in one workspace).
-        let run = self.ta(&["quick-start", &dir_s, "--team", team, "--yes"]);
+        let run = self.ta(&["start", "--from", &dir_s, "--team", team]);
         assert!(run.ok(), "FIXTURE: quick-start of `{team}` must succeed: {}", run.describe());
         self.remember_sockets(&run.json);
         self.teams.push(team.to_string());

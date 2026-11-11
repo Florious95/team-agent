@@ -84,10 +84,9 @@ impl TargetCase {
             socket: PathBuf::new(),
         };
         let output = case.run_cli(&[
-            "quick-start",
+            "start",
             "--workspace",
             case.workspace_str(),
-            "--yes",
             "--no-display",
             "--json",
         ]);

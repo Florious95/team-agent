@@ -116,12 +116,12 @@ impl Case {
 
     fn quick_start(&mut self) {
         let out = self.run(&[
-            "quick-start",
+            "start",
+            "--from",
             self.ws(),
             "--workspace",
             self.ws(),
             // 1d2d4d5a: `--name` is refused by unified start; TEAM.md `name:` names the team.
-            "--yes",
             "--json",
         ]);
         if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {

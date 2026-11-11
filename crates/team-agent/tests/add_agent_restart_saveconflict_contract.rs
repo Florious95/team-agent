@@ -386,13 +386,13 @@ impl CliCase {
 
     fn quick_start(&self) -> Output {
         self.run([
-            "quick-start",
+            "start",
+            "--from",
             self.team_dir.to_str().unwrap(),
             "--workspace",
             self.ws(),
-            "--team-id",
+            "--team",
             self.team(),
-            "--yes",
             "--no-display",
             "--json",
         ])

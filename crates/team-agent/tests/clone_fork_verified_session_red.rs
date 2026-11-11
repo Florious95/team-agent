@@ -106,13 +106,12 @@ impl Case {
 
     fn quick_start(&mut self) {
         let out = self.run(&[
-            "quick-start",
+            "start",
+            "--from",
             self.ws(),
             "--workspace",
             self.ws(),
-            "--name",
-            TEAM_NAME,
-            "--yes",
+            // D1: `--name` has no replacement; TEAM.md `name:` names the team.
             "--json",
         ]);
         if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
