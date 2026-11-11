@@ -37,6 +37,10 @@ fn rec_003_diagnose_output() {
         .filter_map(|link| link["id"].as_str())
         .collect();
     assert_eq!(ids, ["L1", "L2", "L3", "L4", "L5", "L6"], "doctor v1 link ids: {j}");
+    // 262f6cdb (doctor_probe.rs:512-514): the repair (next_action) and the avoid
+    // note are emitted exactly when the report is unhealthy.
+    assert_eq!(j.get("next_action").is_some(), j["ok"] == false, "{j}");
+    assert_eq!(j.get("avoid").is_some(), j["ok"] == false, "{j}");
 
     let _ = run_ta(
         &ws,
