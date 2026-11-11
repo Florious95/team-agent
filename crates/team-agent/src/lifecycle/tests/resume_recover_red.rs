@@ -162,6 +162,7 @@ impl ResumeFixture {
         save_runtime_state(
             &self.team,
             &json!({
+                "team_key": "resumeteam",
                 "active_team_key": "resumeteam",
                 "team_dir": self.team.to_string_lossy().to_string(),
                 "spec_path": self.team.join("team.spec.yaml").to_string_lossy().to_string(),

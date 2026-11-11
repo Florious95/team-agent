@@ -100,7 +100,7 @@ fn phase_golden_missing_registry_requires_index_publication_not_claim() {
     // This unspawned fixture has no host: publishing a discovery index cannot repair it.
     assert_eq!(diagnose["schema"], "team-agent.doctor.v1");
     assert_eq!(diagnose["ok"], false);
-    assert_eq!(diagnose["first_broken_link"], "L2");
+    assert_eq!(diagnose["links"][1]["id"], "L2");
     assert_eq!(diagnose["links"][0]["status"], "PASS");
     assert_eq!(diagnose["links"][1]["status"], "FAIL");
     let repairs = diagnose["next_action"]["argv"].as_array().unwrap();

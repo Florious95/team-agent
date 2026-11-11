@@ -348,13 +348,13 @@ fn clone_ok(case: &Case, source: &str, dest: &str, phase: &str) {
 fn clone_agent_preserves_source_tools() {
     let case = Case::start();
     let qs = case.run(&[
-        "quick-start",
+        // 1d2d4d5a: preserve the role declarations through the public start surface.
+        "start", "--from",
         case.ws(),
         "--workspace",
         case.ws(),
-        "--name",
+        "--team",
         TEAM_NAME,
-        "--yes",
         "--json",
     ]);
     case.observe("after_quick_start");

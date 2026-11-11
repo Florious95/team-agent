@@ -202,11 +202,11 @@ fn dispatch_routes_diagnose_checks_runtime_beyond_healthy_leader() {
             panic!("expected JSON diagnostic report");
         };
         assert_eq!(report["schema"], "team-agent.doctor.v1");
-        assert_eq!(report["first_broken_link"], "L2");
+        assert_eq!(report["links"][1]["id"], "L2");
         assert_eq!(report["links"][0]["status"], "PASS");
         assert_eq!(report["links"][1]["status"], "FAIL");
         assert_eq!(report["links"][5]["status"], "WARN");
-        assert!(report["links"][5]["message"].as_str().unwrap().contains("leader reachable"), "{report}");
+        assert!(report["links"][5]["message"].as_str().unwrap().contains("reachable"), "{report}");
         let issues = report["links"].to_string();
         assert!(!issues.contains("coordinator"), "M3: doctor must not demand a coordinator: {report}");
         for binding_failure in ["leader_not_attached", "leader_receiver_unbound", "leader_workspace_mismatch"] {

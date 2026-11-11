@@ -195,7 +195,7 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
     );
     // 262f6cdb: doctor v1 diagnoses the missing runtime, not retired HTTP/profile inventory.
     assert_eq!(json["schema"], "team-agent.doctor.v1");
-    assert_eq!(json["first_broken_link"], "L1");
+    assert_eq!(json["links"][0]["id"], "L1");
     assert_eq!(json["links"][0]["status"], "FAIL");
     assert!(json.get("profile_smoke").is_none(), "{json}");
     assert!(json.get("providers").is_none(), "{json}");

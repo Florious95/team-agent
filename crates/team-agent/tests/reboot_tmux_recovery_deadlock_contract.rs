@@ -133,22 +133,22 @@ fn claim_live_absolute_endpoint_converges_running_worker_bindings() {
 #[test]
 #[serial(env)]
 fn claim_uses_observed_target_endpoint_not_state_or_tmux_env() {
-    let case = RecoveryCase::new("claim-observed-endpoint")
+    let mut case = RecoveryCase::new("claim-observed-endpoint")
         .with_old_server_live(false)
         .with_tmux_env_socket(DEAD_ENV_SOCKET);
     case.seed_split_state(TEAM, TEAM_SESSION, OLD_SOCKET, OLD_SOCKET, true);
     case.write_minimal_team_spec(TEAM, TEAM_SESSION);
 
-    let claim = case.run_ta(&[
-        "claim-leader",
-        "--workspace",
-        case.workspace_str(),
-        "--team",
-        TEAM,
-        "--confirm",
-        "--json",
-        "--detail",
-    ]);
+    // 0afe88c5: a dead caller endpoint is not an alternate source of authority.
+    let before = fs::read(case.workspace.join(".team/runtime/state.json")).unwrap();
+    let refused = case.run_ta(&["claim-leader", "--workspace", case.workspace_str(),
+        "--team", TEAM, "--confirm", "--json", "--detail"]);
+    let refusal = json_output(&refused, "dead caller refusal");
+    assert!(!refused.status.success() && refusal["reason"] == "caller_pane_not_live", "{refusal}");
+    assert_eq!(fs::read(case.workspace.join(".team/runtime/state.json")).unwrap(), before);
+    case.tmux_env_socket = case.workspace.join("live-caller.sock").to_string_lossy().into_owned();
+    let claim = case.run_ta(&["claim-leader", "--workspace", case.workspace_str(),
+        "--team", TEAM, "--confirm", "--json", "--detail"]);
     let claim_json = json_output(&claim, "RED4 claim-leader");
     let observed = case.observed_caller_endpoint();
     let state = case.read_state();
@@ -194,8 +194,7 @@ fn claim_uses_observed_target_endpoint_not_state_or_tmux_env() {
 #[serial(env)]
 fn scoped_claim_persists_convergence_to_restart_selected_state() {
     let case = RecoveryCase::new("scoped-claim-persist")
-        .with_old_server_live(false)
-        .with_tmux_env_socket(case_new_env_socket());
+        .with_old_server_live(false);
     case.seed_multi_team_state();
     case.write_minimal_team_spec(RETAINED_TEAM, RETAINED_SESSION);
 
@@ -245,8 +244,7 @@ fn scoped_claim_persists_convergence_to_restart_selected_state() {
 #[serial(env)]
 fn claim_leader_explicit_team_resolves_shutdown_or_all_dead_team() {
     let case = RecoveryCase::new("all-dead-retained-alias")
-        .with_old_server_live(false)
-        .with_tmux_env_socket(case_new_env_socket());
+        .with_old_server_live(false);
     case.seed_all_dead_retained_alias_state();
     case.write_minimal_team_spec(RETAINED_TEAM, RETAINED_SESSION);
 
@@ -751,23 +749,12 @@ tasks: []
     }
 
     fn observed_caller_endpoint(&self) -> String {
-        self.tmux_log()
-            .lines()
-            .filter(|line| line.contains(" list-panes "))
-            .filter_map(|line| line.split('\t').next())
-            .find(|endpoint| {
-                *endpoint != "default"
-                    && *endpoint != OLD_SOCKET
-                    && *endpoint != DEAD_ENV_SOCKET
-                    && *endpoint != self.tmux_env_socket
-            })
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no observed caller endpoint in fake tmux log: {}",
-                    self.tmux_log()
-                )
-            })
+        // 0afe88c5: an unrelated discovery probe is not the caller observation.
+        assert!(Path::new(&self.tmux_env_socket).is_absolute());
+        assert!(self.tmux_log().lines().any(|line|
+            line.split('\t').next() == Some(self.tmux_env_socket.as_str())
+                && line.contains(" list-panes ")), "caller must actually be observed: {}", self.tmux_log());
+        self.tmux_env_socket.clone()
     }
 
     fn tmux_log_path(&self) -> PathBuf {
@@ -806,9 +793,6 @@ fn stopped_worker() -> Value {
     })
 }
 
-fn case_new_env_socket() -> &'static str {
-    "ta-0529-env-live"
-}
 
 fn pane_line(
     pane: &str,

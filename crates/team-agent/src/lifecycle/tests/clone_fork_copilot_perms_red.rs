@@ -209,15 +209,17 @@ impl Case {
 
     fn quick_start(&mut self) {
         let out = self.run(&[
-            "quick-start",
+            // 1d2d4d5a: public creation uses declared roles and an explicit team key.
+            "start", "--from",
             self.ws(),
             "--workspace",
             self.ws(),
-            "--name",
+            "--team",
             TEAM_NAME,
-            "--yes",
             "--json",
         ]);
+        assert!(out.status.success(), "fixture start must actually launch: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
             if let Some(cmd) = v
                 .get("attach_commands")
@@ -281,7 +283,7 @@ impl Case {
 
     fn fork(&self, as_name: &str) -> Value {
         let out = self.run(&[
-            "fork-agent",
+            "agent", "fork",
             SOURCE,
             "--as",
             as_name,

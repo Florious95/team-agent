@@ -101,6 +101,9 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
     let team = fake_only_team_dir(&hermetic, "external-pane-collision");
     let workspace = team.parent().expect("teamdir has parent workspace");
+    // c28a675f / c8639440: distinct endpoints and an actual live external carrier.
+    let carrier = super::hermetic_guard::spawn_owned_coordinator(workspace);
+    assert!(crate::lifecycle::carrier::birth_identity(carrier.id()).is_some());
     let caller = PaneInfo {
         pane_id: PaneId::new("%0"),
         session: SessionName::new("leader"),
@@ -111,13 +114,12 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         current_command: Some("codex".to_string()),
         current_path: Some(workspace.to_path_buf()),
         active: true,
-        pane_pid: None,
+        pane_pid: Some(carrier.id()),
         leader_env: Default::default(),
     };
     let transport = RecordingTransport::new()
         .with_windows(vec![WindowName::new("faker")])
-        .with_tmux_endpoint(caller_endpoint)
-        .with_targets(vec![caller.clone()]);
+        .with_tmux_endpoint(&workspace.join("worker.sock").to_string_lossy());
     let live = crate::transport::test_support::OfflineTransport::default()
         .with_tmux_endpoint(caller_endpoint)
         .with_targets(vec![caller]);

@@ -114,16 +114,25 @@ fn send_message_without_framework_identity_fails_closed() {
 #[test]
 fn send_message_worker_recipient_ignores_dead_coordinator() {
     let fixture = direct_fixture::DirectFixture::new();
+    let tools = TeamOrchestratorTools::with_identity(
+        &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
+    );
+    // e0652b62: establish the legitimate first-send timestamp before the no-repair oracle.
+    let primed = tools.send_message_with_presentation(
+        &MessageTarget::Single("worker-1".into()), "establish first send", None, None, None, None, None).unwrap().to_value();
+    assert_eq!(primed["delivery"], "physical");
+    fixture.received("Team Agent message from leader:\n\nestablish first send");
     let coordinator_ws = crate::coordinator::WorkspacePath::new(fixture.root.clone());
-    let stale_pid = crate::coordinator::Pid::new(99_999_999);
+    // A real, synchronously reaped child replaces an arbitrary host PID constant.
+    let exited = std::process::Command::new("/bin/sh").env_clear().current_dir(&fixture.root)
+        .args(["-c", "printf '%s\\n' \"$$\""]).output().unwrap();
+    assert!(exited.status.success());
+    let stale_pid = crate::coordinator::Pid::new(String::from_utf8(exited.stdout).unwrap().trim().parse().unwrap());
     crate::coordinator::write_coordinator_metadata(
         &coordinator_ws, stale_pid, crate::coordinator::MetadataSource::Boot,
     ).unwrap();
     std::fs::write(crate::coordinator::coordinator_pid_path(&coordinator_ws), stale_pid.to_string()).unwrap();
     let before = std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap();
-    let tools = TeamOrchestratorTools::with_identity(
-        &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
-    );
     let value = tools.send_message_with_presentation(
         &MessageTarget::Single("worker-1".into()), "no coordinator required", None, None, None, None, None).unwrap().to_value();
     assert_eq!(value["status"], "sent");
