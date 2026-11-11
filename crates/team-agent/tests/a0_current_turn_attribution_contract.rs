@@ -245,8 +245,14 @@ impl A0Case {
     }
 
     fn result_rows(&self, summary: &str) -> Vec<ResultRow> {
-        team_agent::inbox_store::read(&self.workspace, "leader", 100, None).unwrap()["messages"]
-            .as_array().unwrap().iter()
+        // 8b09d7b4/8b94b206: `active_team_key` is not read authority, so an unscoped read
+        // of this two-team workspace is refused as ambiguous. Read each team's
+        // inbox explicitly and merge (deduplicated by message id).
+        let mut seen = std::collections::HashSet::new();
+        [TEAM_A, TEAM_B].iter()
+            .flat_map(|team| team_agent::inbox_store::read(&self.workspace, "leader", 100, Some(team))
+                .unwrap()["messages"].as_array().unwrap().clone())
+            .filter(|record| seen.insert(record["message_id"].to_string()))
             .filter(|record| record["sender"] == WORKER && record["content"] == summary)
             .map(|record| ResultRow {
                 owner_team_id: record["team"].as_str().map(str::to_string),

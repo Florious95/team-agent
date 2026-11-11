@@ -72,9 +72,16 @@ fn red_1_bare_to_name_explicit_team_scope_matrix() {
         "send", "--to-name", "beta", &active_token,
         "--workspace", path(&case.local), "--json",
     ]);
-    let active_json = json_stdout(&active, "bare name uses explicit active-team snapshot");
-    assert!(active.status.success(), "{active_json}");
-    case.assert_physical_delivery(&active_json, "local-naming-beta", &active_token);
+    // 8b09d7b4: `active_team_key` is a projection pointer, not caller
+    // authority; a bare name live in two teams stays ambiguous even when the
+    // snapshot records an active team.
+    let active_json = json_stdout(&active, "bare name ignores the active-team pointer");
+    assert_eq!(active.status.code(), Some(1), "{active_json}");
+    assert_eq!(active_json["reason"], json!("name_ambiguous"), "{active_json}");
+    let names = candidate_names(&active_json);
+    assert!(names.contains(&"qa-naming/beta".to_string()), "{active_json}");
+    assert!(names.contains(&"qa-sibling/beta".to_string()), "{active_json}");
+    case.assert_no_pane_contains(&active_token);
 
     // Without an active selection, multiple teams remain genuinely ambiguous.
     let state_path = case.local.join(".team/runtime/state.json");
@@ -358,7 +365,8 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
         "--mailbox",
         "appends to the independent inbox without injecting into the conversation",
         "paste + enter completes synchronously without coordinator queues or sqlite writes",
-        "acceptance is not delivery or completion",
+        // 5f0bc003 rewrote the send next-action to the polling-advisory form.
+        "physical submission is not acceptance or completion",
         "--socket socket --pane %n --dialect provider",
     ] {
         assert!(

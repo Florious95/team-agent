@@ -104,11 +104,36 @@ fn qualified_addresses_use_their_own_scope_without_a_caller_snapshot() {
     assert_eq!(result["status"], "stored");
     let inbox = team_agent::inbox_store::read(&target, "w1", 10, Some("beta")).unwrap();
     assert_eq!(inbox["messages"].as_array().unwrap().len(), 1);
-    // A workspace-qualified bare name selects that workspace's active team.
+    // 8b09d7b4: `active_team_key` is a projection pointer, not caller
+    // authority. A workspace-qualified bare name live in two of that
+    // workspace's teams is genuinely ambiguous and refused before any effect;
+    // the explicit `<workspace>::<team>/<agent>` form selects the team.
+    let ambiguous = send(
+        &fixture.0,
+        &format!("{}::w1", target.display()),
+        Some("beta"),
+        OPERATOR,
+    );
+    let ambiguous = ambiguous.unwrap_or_else(|error| json!({"ok": false, "status": "refused", "error": error}));
+    assert_eq!(ambiguous["ok"], false, "{ambiguous}");
+    assert_eq!(ambiguous["status"], "refused", "{ambiguous}");
+    assert_eq!(
+        team_agent::inbox_store::read(&target, "w1", 10, Some("alpha")).unwrap()["messages"],
+        json!([]),
+        "an ambiguous address has no effect: {ambiguous}"
+    );
+    assert_eq!(
+        team_agent::inbox_store::read(&target, "w1", 10, Some("beta")).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "an ambiguous address has no effect: {ambiguous}"
+    );
     assert_eq!(
         send(
             &fixture.0,
-            &format!("{}::w1", target.display()),
+            &format!("{}::alpha/w1", target.display()),
             Some("beta"),
             OPERATOR
         )
