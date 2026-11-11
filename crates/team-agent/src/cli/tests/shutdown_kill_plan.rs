@@ -1853,7 +1853,7 @@ exit 0
         }
         let pid: u32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
         let mut row = json!({"status":"running","provider":"fake","window":"worker","provider_pid":pid});
-        crate::lifecycle::carrier::record(&mut row, Some(pid));
+        crate::lifecycle::carrier::record(row.as_object_mut().unwrap(), Some(pid));
         let carrier = Self { guard, pid, row, signal_log, exit_log };
         carrier.assert_possible();
         carrier

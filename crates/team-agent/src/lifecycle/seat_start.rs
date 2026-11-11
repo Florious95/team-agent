@@ -1709,12 +1709,12 @@ mod tests {
         // c8639440: record real owned carriers while alive, then prove the gone/live boundary.
         use std::io::Write;
         let mut child = carrier_fixture::FixtureGroup::presence(temp.path(), std::time::Duration::from_secs(30));
-        super::super::carrier::record(&mut selected.state["agents"]["reviewer"], Some(child.id()));
+        super::super::carrier::record(selected.state["agents"]["reviewer"].as_object_mut().unwrap(), Some(child.id()));
         child.stdin.as_mut().unwrap().write_all(b"exit\n").unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(carrier_birth(&selected, &id).unwrap(), Value::Null);
         let live = carrier_fixture::FixtureGroup::presence(temp.path(), std::time::Duration::from_secs(30));
-        super::super::carrier::record(&mut selected.state["agents"]["reviewer"], Some(live.id()));
+        super::super::carrier::record(selected.state["agents"]["reviewer"].as_object_mut().unwrap(), Some(live.id()));
         assert!(!carrier_birth(&selected, &id).unwrap().is_null());
     }
 

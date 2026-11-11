@@ -942,7 +942,7 @@ fn shell_supervised_claude_is_live_for_both_team_start_spellings() {
         "provider":"claude", "status":"running", "pane_id":fields[0], "pane_pid":pid, "window":"one"
     });
     // c8639440: bind the observed, test-owned shell to its real birth identity.
-    crate::lifecycle::carrier::record(&mut raw["teams"]["fixture"]["agents"]["one"], Some(pid));
+    crate::lifecycle::carrier::record(raw["teams"]["fixture"]["agents"]["one"].as_object_mut().unwrap(), Some(pid));
     std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
     let before = std::fs::read(&state).unwrap();
     let selected = resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly).unwrap();
