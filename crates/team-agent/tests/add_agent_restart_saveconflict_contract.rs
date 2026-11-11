@@ -167,9 +167,11 @@ fn missing_dynamic_role_file_fails_closed_without_pruning_live_helper() {
         text.contains("dynamic role file missing") && text.contains(helper.to_str().unwrap()),
         "RED2: error must name the missing dynamic role file path; output={text}"
     );
+    // The guidance now points only at restoring the role file; removing the seat
+    // to repair its declaration is explicitly ruled out (R-SWEEP30 cluster G).
     assert!(
-        text.contains("restore") && text.contains("remove-agent"),
-        "RED2: error action must point to restoring the role file or removing the dynamic agent; output={text}"
+        text.contains("restore") && text.contains("do not remove the seat") && !text.contains("remove-agent"),
+        "RED2: error action must point to restoring the role file, never to removing the dynamic agent; output={text}"
     );
     assert!(
         !text.contains("state save conflict") && !text.contains("SaveConflict"),

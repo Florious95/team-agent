@@ -724,28 +724,45 @@ fn h9_actual_worker_stop_start_and_refusal_guards_keep_owned_resources_and_roles
     ws.retain_owned_session_placeholder_window("hold");
     let state = ws.read_state();
     let role = fs::read(ws.path().join("agents/worker.md")).unwrap();
+    let identical_add = vec![
+        "add-agent",
+        "worker",
+        "--provider",
+        "fake",
+        "--model",
+        "fake",
+        "--bypass",
+        "false",
+        "--json",
+    ];
     for args in [
         vec!["reset-agent", "worker", "--json"],
         vec!["remove-agent", "worker", "--json"],
-        vec![
-            "add-agent",
-            "worker",
-            "--provider",
-            "fake",
-            "--model",
-            "fake",
-            "--bypass",
-            "false",
-            "--json",
-        ],
+        identical_add.clone(),
+        vec!["add-agent", "worker", "--model", "fake9", "--json"],
         vec!["fork-agent", "worker", "--as", "child", "--json"],
     ] {
         let out = framework::run_ta_env(&ws, &args, &[("HOME", env.home().to_str().unwrap())]);
-        assert_ne!(
-            out.exit_code, 0,
-            "H9 missing consent/unsupported fork must refuse: {}",
-            out.stdout
-        );
+        if args == identical_add {
+            // 34d41fc7: re-declaring the running seat unchanged is the idempotent
+            // already_running no-op; a changed declaration (fake9) still refuses.
+            assert_eq!(out.exit_code, 0, "H9 identical add-agent must be a no-op: {}", out.stdout);
+            let value = out.json();
+            assert_eq!(value["status"], "already_running", "{value}");
+            assert_eq!(value["steps"], serde_json::json!([]), "{value}");
+            assert!(
+                value["skipped"]
+                    .as_array()
+                    .is_some_and(|skipped| skipped.iter().any(|entry| entry["reason"] == "already_running")),
+                "{value}"
+            );
+        } else {
+            assert_ne!(
+                out.exit_code, 0,
+                "H9 missing consent/unsupported fork must refuse: {}",
+                out.stdout
+            );
+        }
         assert_eq!(
             ws.read_state(),
             state,

@@ -130,7 +130,15 @@ fn editing_role_text_does_not_rewrite_the_live_process_policy() {
         "changed policy must not be silently adopted: {}",
         plan.stdout
     );
-    assert!(format!("{}{}", plan.stdout, plan.stderr).contains("drift"));
+    // The planner refuses the configuration change on the running seat and names
+    // the explicit stop it needs first (R-SWEEP30 cluster G).
+    let text = format!("{}{}", plan.stdout, plan.stderr);
+    assert!(
+        text.contains("is running")
+            && text.contains("team-agent stop worker_true")
+            && text.contains("before changing its configuration"),
+        "{text}"
+    );
     assert_eq!(fs::read(fixture.argv_path("worker_true")).unwrap(), argv);
     fixture.assert_policy("worker_true", true);
 }
