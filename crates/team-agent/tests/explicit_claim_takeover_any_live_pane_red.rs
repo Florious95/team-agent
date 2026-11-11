@@ -35,14 +35,22 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
     let hermetic = HermeticTestEnv::enter("explicit-claim-takeover");
     let ws = hermetic.workspace("any-live-pane");
     seed_runtime_state(&ws);
-    let fake_tmux = fake_tmux_bin(&ws);
+    // The npm-launched Codex leader pane reports pane_current_command=node.
+    // Its provider comes from the live pane process (an interpreter running
+    // the codex entrypoint script), never the pane's command name.
+    let pane_process = PaneProcess::spawn(&ws);
+    let fake_tmux = fake_tmux_bin(&ws, pane_process.0.id());
     let path = format!(
         "{}:{}",
         fake_tmux.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    // 0afe88c5 (lease.rs absolute-endpoint rule): an explicit claim stamps
+    // the caller's observed pane on an absolute tmux endpoint.
+    let tmux = format!("{},123,0", hermetic.root().join("tmux-any-live-pane.sock").display());
     let caller_env = [
         ("PATH", path.as_str()),
+        ("TMUX", tmux.as_str()),
         ("TMUX_PANE", CALLER_PANE),
         ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
         ("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-a"),
@@ -83,13 +91,14 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
         ],
         &caller_env,
     );
-    if let Some(failure) = cli_success_failure(
-        &takeover,
-        "takeover must claim from any live caller pane, including pane_current_command=node",
-    ) {
-        failures.push(failure);
+    // e0652b62 retired `takeover`: it is refused before any effect and names
+    // the replacement; the claim-leader registry entry is left unchanged.
+    let refusal = format!("{}{}", String::from_utf8_lossy(&takeover.stdout), String::from_utf8_lossy(&takeover.stderr));
+    if takeover.status.success() || !(refusal.contains("retired") && refusal.contains("claim-leader")) {
+        failures.push(format!("takeover must be a retired verb naming claim-leader; code={:?} output={refusal}",
+            takeover.status.code()));
     }
-    assert_single_registry_source(&hermetic, "takeover");
+    assert_single_registry_source(&hermetic, "claim-leader");
     hermetic.assert_real_registry_unchanged(real_registry);
 
     assert!(
@@ -774,12 +783,31 @@ fn seed_runtime_state(ws: &Path) {
     .unwrap();
 }
 
-fn fake_tmux_bin(ws: &Path) -> PathBuf {
+/// A bounded (<=120s), test-owned live pane process (`<interpreter> codex.py`,
+/// the shape of `node .../codex.js`); killed on drop.
+struct PaneProcess(std::process::Child);
+
+impl PaneProcess {
+    fn spawn(ws: &Path) -> Self {
+        let script = ws.join("codex.py");
+        std::fs::write(&script, "import time\ntime.sleep(100)\n").unwrap();
+        Self(std::process::Command::new("python3").arg(&script).spawn().unwrap())
+    }
+}
+
+impl Drop for PaneProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn fake_tmux_bin(ws: &Path, pane_pid: u32) -> PathBuf {
     let bin_dir = ws.join("fake-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let tmux = bin_dir.join("tmux");
     let line = format!(
-        "{pane}\tteam-current\t0\tleader\t0\t/dev/ttys001\tnode\t1\t{cwd}\t1\t0\n",
+        "{pane}\tteam-current\t0\tleader\t0\t/dev/ttys001\tnode\t1\t{cwd}\t1\t0\t{pane_pid}\n",
         pane = CALLER_PANE,
         cwd = ws.display(),
     );

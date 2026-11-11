@@ -35,7 +35,7 @@ fn live_owner_without_confirm_is_refused() {
             "current",
             "--json",
         ],
-        &[("PATH", path.as_str()), ("TMUX_PANE", CALLER_PANE)],
+        &[("PATH", path.as_str()), ("TMUX", &tmux_env(&ws)), ("TMUX_PANE", CALLER_PANE)],
     );
     assert_eq!(output.status.code(), Some(1));
     let value = json_output(&output);
@@ -69,12 +69,23 @@ fn dead_owner_without_confirm_is_reclaimed() {
             "current",
             "--json",
         ],
-        &[("PATH", path.as_str()), ("TMUX_PANE", CALLER_PANE)],
+        &[("PATH", path.as_str()), ("TMUX", &tmux_env(&ws)), ("TMUX_PANE", CALLER_PANE)],
     );
-    assert!(output.status.success());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     let value = json_output(&output);
     assert_eq!(value["ok"], json!(true), "value={value}");
     assert_eq!(value["status"], json!("claimed"), "value={value}");
+}
+
+/// 0afe88c5 (lease.rs absolute-endpoint rule): an explicit claim stamps the
+/// caller's observed pane on an absolute tmux endpoint, so the caller runs with
+/// an absolute `$TMUX` socket that the team state also records.
+fn socket(ws: &Path) -> String {
+    ws.join("leader.sock").to_string_lossy().into_owned()
+}
+
+fn tmux_env(ws: &Path) -> String {
+    format!("{},4242,0", socket(ws))
 }
 
 fn seed_state(ws: &Path, owner_pane: &str) {
@@ -82,12 +93,14 @@ fn seed_state(ws: &Path, owner_pane: &str) {
         ws,
         &json!({
             "active_team_key": "current",
+            "tmux_socket": socket(ws),
             "session_name": "team-current",
             "team_dir": ws.to_string_lossy().to_string(),
             "team_owner": {"pane_id": owner_pane, "owner_epoch": 2, "leader_session_uuid": "owner"},
             "leader_receiver": {"pane_id": owner_pane, "owner_epoch": 2, "leader_session_uuid": "owner"},
             "teams": {"current": {
                 "status": "alive",
+                "tmux_socket": socket(ws),
                 "session_name": "team-current",
                 "team_dir": ws.to_string_lossy().to_string(),
                 "team_owner": {"pane_id": owner_pane, "owner_epoch": 2, "leader_session_uuid": "owner"},

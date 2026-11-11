@@ -100,11 +100,14 @@ fn red2_live_worker_tuple_still_refuses_self_promotion() {
         Some("caller_not_leader_shaped"),
         "RED2: anti-self-promotion guard must remain for endpoint/session/window/pane/pid validated workers; value={value}"
     );
+    // c28a675f added the earlier endpoint-qualified worker gate, whose copy
+    // names the worker and redirects to the actual leader pane.
     assert!(
         value
             .get("action")
             .and_then(Value::as_str)
-            .is_some_and(|action| action.contains("not a worker pane")),
+            .is_some_and(|action| action.contains("not a worker pane")
+                || action.contains(&format!("registered as active worker {WORKER}; use the actual leader pane"))),
         "RED2: refusal must tell the operator not to claim from a worker pane; value={value}"
     );
 }
@@ -297,6 +300,7 @@ enum PaneShape {
 struct LegacyPaneCase {
     workspace: PathBuf,
     fake_bin: PathBuf,
+    shape: PaneShape,
 }
 
 impl LegacyPaneCase {
@@ -309,7 +313,20 @@ impl LegacyPaneCase {
         Self {
             workspace,
             fake_bin,
+            shape,
         }
+    }
+
+    /// 0afe88c5 (lease.rs absolute-endpoint rule): a claim stamps the caller's
+    /// observed pane on its absolute `$TMUX` endpoint. The stale-legacy caller
+    /// is the leader pane on NEW_SOCKET; the live-worker caller is the worker
+    /// pane on the worker's recorded endpoint (team `tmux_endpoint`).
+    fn caller_tmux(&self) -> String {
+        let socket = match self.shape {
+            PaneShape::StaleLegacyWorker => NEW_SOCKET,
+            PaneShape::LiveWorkerTuple => OLD_SOCKET,
+        };
+        format!("{socket},4242,0")
     }
 
     fn workspace_str(&self) -> &str {
@@ -344,6 +361,7 @@ impl LegacyPaneCase {
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env("TMUX", self.caller_tmux())
             .env("TMUX_PANE", CALLER_PANE)
             .env("TEAM_AGENT_LEADER_PROVIDER", "codex")
             .env("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-deadlock-red")
