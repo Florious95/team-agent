@@ -414,8 +414,22 @@ pub fn claim_leader(
         caller_pane_info,
         scoped_team.map(|_| team_id.as_str()),
         None,
+        None,
     )?;
     Ok(result)
+}
+
+#[derive(Debug)]
+pub(crate) struct InceptionRegistryPublication {
+    receipt: super::registry::RegistryWriteReceipt,
+    previous: Option<Vec<u8>>,
+}
+
+impl InceptionRegistryPublication {
+    pub(crate) fn restore(&self) -> Result<super::registry::RegistryRollback, LeaderError> {
+        super::registry::restore_entry_if_current_matches(&self.receipt, self.previous.as_deref())
+            .map_err(|error| LeaderError::Start(format!("leader registry rollback failed: {error}")))
+    }
 }
 
 /// Automatic inception uses the same non-forcing, worker-fenced claim path.
@@ -430,7 +444,7 @@ pub(crate) fn incept_launched_leader(
     metadata: &Value,
     external: bool,
     mode: super::LeaderStartMode,
-) -> Result<(), LeaderError> {
+) -> Result<Option<InceptionRegistryPublication>, LeaderError> {
     let raw = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     if !raw.is_object() {
         return Err(LeaderError::Start("runtime state must be a JSON object".into()));
@@ -460,16 +474,34 @@ pub(crate) fn incept_launched_leader(
     let liveness = AnyPaneLiveness {
         live_panes: [observed.pane_id.as_str().to_string()].into_iter().collect(),
     };
+    let previous = match super::registry::registry_dir() {
+        Some(dir) => match std::fs::read(dir.join(format!("{}__{team}.json", super::registry::workspace_hash(workspace)))) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(LeaderError::Start(format!("cannot snapshot leader registry: {error}"))),
+        },
+        None => None,
+    };
+    let mut receipt = None;
     let result = claim_lease_no_incident_with_target(
         workspace, &mut state, Some(team), &identity.team_id, &observed.pane_id,
         false, &crate::event_log::EventLog::new(workspace), &liveness,
-        Some(&mut target), Some(observed), Some(team), Some(metadata),
-    )?;
-    if result.ok || matches!(result.reason,
-        Some(LeaseReason::PreviousOwnerAliveRefused | LeaseReason::ForceConfirmRequired)) {
-        return Ok(());
+        Some(&mut target), Some(observed), Some(team), Some(metadata), Some(&mut receipt),
+    );
+    let publication = receipt.map(|receipt| InceptionRegistryPublication { receipt, previous });
+    let result = result.and_then(|result| {
+        if result.ok || matches!(result.reason,
+            Some(LeaseReason::PreviousOwnerAliveRefused | LeaseReason::ForceConfirmRequired)) {
+            Ok(())
+        } else {
+            Err(LeaderError::Start(format!("leader inception refused: {:?}", result.reason)))
+        }
+    });
+    if let Err(error) = result {
+        if let Some(publication) = &publication { publication.restore()?; }
+        return Err(error);
     }
-    Err(LeaderError::Start(format!("leader inception refused: {:?}", result.reason)))
+    Ok(publication)
 }
 
 /// `_claim_lease_no_incident`(`__init__.py:598`)。Gap 39 统一 lease:无 ambiguous incident →
@@ -517,6 +549,7 @@ pub(crate) fn claim_lease_no_incident(
         None,
         scoped_team,
         None,
+        None,
     )
 }
 
@@ -551,6 +584,7 @@ fn claim_lease_no_incident_with_target(
     caller_pane_info: Option<&PaneInfo>,
     scoped_team: Option<&str>,
     launch_metadata: Option<&Value>,
+    mut registry_receipt: Option<&mut Option<super::registry::RegistryWriteReceipt>>,
 ) -> Result<LeaseResult, LeaderError> {
     let _ = team;
     let pre_epoch = current_owner_epoch(state);
@@ -647,8 +681,9 @@ fn claim_lease_no_incident_with_target(
             }
         }
         apply_launch_metadata(state, team_id.as_str(), launch_metadata);
-        write_claim_state(workspace, state, scoped_team, team,
+        let publication = write_claim_state(workspace, state, scoped_team, team,
             caller_target.is_some().then_some((&expected_owner, &expected_receiver)))?;
+        if let Some(receipt) = registry_receipt.as_deref_mut() { *receipt = publication; }
         if converged || observation_refreshed {
             if observation_refreshed {
                 event_log.write(
@@ -879,8 +914,9 @@ fn claim_lease_no_incident_with_target(
             observed_endpoint.as_deref(), Some(team_id.as_str()), caller_target.as_deref());
     }
     apply_launch_metadata(state, team_id.as_str(), launch_metadata);
-    write_claim_state(workspace, state, scoped_team, team,
+    let publication = write_claim_state(workspace, state, scoped_team, team,
         caller_target.is_some().then_some((&expected_owner, &expected_receiver)))?;
+    if let Some(receipt) = registry_receipt.as_deref_mut() { *receipt = publication; }
     if converged {
         topology_convergence = verify_persisted_topology_convergence(
             workspace,
@@ -2180,7 +2216,7 @@ pub(crate) fn write_lease_dual_state_with_expected(
     state: &Value,
     expected_owner: &Value,
     expected_receiver: &Value,
-) -> Result<(), LeaderError> {
+) -> Result<Option<super::registry::RegistryWriteReceipt>, LeaderError> {
     let team_key = canonical_owner_write_key(state);
     publish_binding(workspace, state, &team_key,
         crate::state::repository::StateWriteIntent::ClaimLeaderFreshCaller {
@@ -2203,7 +2239,7 @@ pub fn write_lease_dual_state(workspace: &Path, state: &Value) -> Result<(), Lea
     // caller still owns all of that.
     let team_key = canonical_owner_write_key(state);
     publish_binding(workspace, state, &team_key,
-        crate::state::repository::StateWriteIntent::ClaimLeader { team_key: team_key.as_str() })
+        crate::state::repository::StateWriteIntent::ClaimLeader { team_key: team_key.as_str() }).map(|_| ())
 }
 
 /// Retire the positively owned legacy writer before publishing a new receiver.
@@ -2213,12 +2249,11 @@ fn publish_binding(
     state: &Value,
     team_key: &str,
     intent: crate::state::repository::StateWriteIntent<'_>,
-) -> Result<(), LeaderError> {
+) -> Result<Option<super::registry::RegistryWriteReceipt>, LeaderError> {
     commit_binding(workspace, state, intent)?;
-    let _ = super::registry::register_binding_from_state_best_effort(
+    Ok(super::registry::register_binding_from_state_best_effort(
         workspace, Some(team_key), "claim-leader",
-    );
-    Ok(())
+    ).receipt)
 }
 
 fn commit_binding(
@@ -2257,15 +2292,18 @@ fn write_claim_state(
     scoped_team: Option<&str>,
     team_key: Option<&str>,
     expected: Option<(&Value, &Value)>,
-) -> Result<(), LeaderError> {
+) -> Result<Option<super::registry::RegistryWriteReceipt>, LeaderError> {
     if let Some(team) = scoped_team {
-        save_claim_team_scoped_state(workspace, state, team, expected)?;
-        Ok(())
+        save_claim_team_scoped_state(workspace, state, team, expected)
     } else {
         let _ = team_key;
         match expected {
             Some((owner, receiver)) => write_lease_dual_state_with_expected(workspace, state, owner, receiver),
-            None => write_lease_dual_state(workspace, state),
+            None => {
+                let key = canonical_owner_write_key(state);
+                publish_binding(workspace, state, &key,
+                    crate::state::repository::StateWriteIntent::ClaimLeader { team_key: &key })
+            }
         }
     }
 }
@@ -2275,7 +2313,7 @@ fn save_claim_team_scoped_state(
     state: &Value,
     target_key: &str,
     expected: Option<(&Value, &Value)>,
-) -> Result<(), LeaderError> {
+) -> Result<Option<super::registry::RegistryWriteReceipt>, LeaderError> {
     let existing = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     let mut teams = existing
         .get("teams")

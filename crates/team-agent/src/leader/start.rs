@@ -1088,17 +1088,20 @@ fn execute_managed_leader_plan_attempt(
     let (rename_result, rename_stderr) =
         lock_down_window_rename(&transport, session, &spawned.window);
     write_window_rename_lockdown_event(workspace, &rename_result, &rename_stderr);
-    if let Err(error) = persist_managed_leader_binding(plan, workspace, &spawned) {
-        cleanup_managed_leader_resources(
-            &transport,
-            session,
-            &spawned,
-            session_existed_before,
-            workspace,
-            "binding_persist_failed",
-        );
-        return Err(error);
-    }
+    let publication = match persist_managed_leader_binding(plan, workspace, &spawned) {
+        Ok(publication) => publication,
+        Err(error) => {
+            cleanup_managed_leader_resources(
+                &transport,
+                session,
+                &spawned,
+                session_existed_before,
+                workspace,
+                "binding_persist_failed",
+            );
+            return Err(error);
+        }
+    };
     spawn_managed_provider_startup_prompt_handler(
         plan.provider,
         workspace.to_path_buf(),
@@ -1136,10 +1139,12 @@ fn execute_managed_leader_plan_attempt(
                 workspace,
                 "launcher_spawn_failed",
             );
+            if let Some(publication) = &publication { publication.restore()?; }
             return Err(error);
         }
     };
     if process.intentional_teardown {
+        if let Some(publication) = &publication { publication.restore()?; }
         return Ok(LeaderLaunchOutcome {
             status: LeaderLaunchStatus::Exited,
             exit_code: Some(0),
@@ -1157,6 +1162,8 @@ fn execute_managed_leader_plan_attempt(
             workspace,
             "launcher_exit_failed",
         );
+        // Roll this attempt back before the retry captures its own registry preimage.
+        if let Some(publication) = &publication { publication.restore()?; }
         let failure = LeaderError::Start(leader_launcher_failure(&process));
         if allow_attach_recovery {
             if let Ok(retry_plan) = managed_leader_attach_recovery_plan(plan, workspace) {
@@ -1174,6 +1181,7 @@ fn execute_managed_leader_plan_attempt(
             workspace,
             "provider_not_live_after_attach",
         );
+        if let Some(publication) = &publication { publication.restore()?; }
         return Err(error);
     }
     Ok(LeaderLaunchOutcome {
@@ -1586,7 +1594,7 @@ fn persist_managed_leader_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
     spawned: &SpawnResult,
-) -> Result<(), LeaderError> {
+) -> Result<Option<super::lease::InceptionRegistryPublication>, LeaderError> {
     let identity = plan
         .identity
         .as_ref()
@@ -1643,7 +1651,7 @@ fn persist_exec_provider_leader_binding(
         &metadata,
         is_external_leader,
         plan.mode,
-    )
+    ).map(|_| ())
 }
 
 enum CurrentTmuxPaneInfoError {
@@ -3145,6 +3153,45 @@ mod tests {
             "owner pane_id must be gone: {loaded}"
         );
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn managed_registry_rollback_restores_exact_previous_bytes() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let _env = EnvGuard::set(&[("HOME", home.to_str())]);
+        let plan = persist_test_plan(temp.path());
+        let registry = crate::leader::registry::registry_dir().unwrap();
+        std::fs::create_dir_all(&registry).unwrap();
+        let path = registry.join(format!("{}__current.json", crate::leader::registry::workspace_hash(temp.path())));
+        let previous = b"{\n  \"prior_discovery_record\": true\n}\n";
+        std::fs::write(&path, previous).unwrap();
+        let publication = persist_managed_leader_binding(&plan, temp.path(), &managed_spawn_result())
+            .unwrap().expect("inception must return its registry write receipt");
+        assert_ne!(std::fs::read(&path).unwrap(), previous);
+        assert_eq!(publication.restore().unwrap(), crate::leader::registry::RegistryRollback::Restored);
+        assert_eq!(std::fs::read(path).unwrap(), previous);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn managed_registry_rollback_preserves_a_concurrent_winner() {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let _env = EnvGuard::set(&[("HOME", home.to_str())]);
+        let plan = persist_test_plan(temp.path());
+        let publication = persist_managed_leader_binding(&plan, temp.path(), &managed_spawn_result())
+            .unwrap().expect("inception must return its registry write receipt");
+        let winner = crate::leader::registry::build_entry(temp.path(), "current", "tmux",
+            serde_json::json!({"status":"attached", "pane_id":"%winner"}), 20,
+            "concurrent-writer", chrono::Utc::now().to_rfc3339());
+        let receipt = crate::leader::registry::write_entry_best_effort_with_receipt(&winner).unwrap();
+        let before = std::fs::read(&receipt.path).unwrap();
+        assert_eq!(publication.restore().unwrap(), crate::leader::registry::RegistryRollback::Superseded);
+        assert_eq!(std::fs::read(&receipt.path).unwrap(), before);
     }
 
     #[test]
