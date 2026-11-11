@@ -2780,6 +2780,15 @@ pub mod lifecycle_port {
             );
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
+        // R-P6E: only explicit Dead evidence skips the post-grace identity snapshot.
+        pids.retain(|pid| {
+            crate::platform::process::reap_child_if_possible(*pid);
+            !matches!(crate::platform::process::pid_liveness(*pid),
+                Ok(crate::platform::process::ProcessLiveness::Dead))
+        });
+        if pids.is_empty() {
+            return;
+        }
         // Re-probe identity before escalation.  If the probe fails, refuse the
         // force signal rather than risking a recycled PID.
         if let Ok(live_table) = probed_process_table() {
