@@ -104,7 +104,7 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     // c28a675f / c8639440: distinct endpoints and an actual live external carrier.
     let carrier = hermetic::spawn_owned_coordinator(workspace);
     assert!(crate::lifecycle::carrier::birth_identity(carrier.id()).is_some());
-    let caller = PaneInfo {
+    let mut caller = PaneInfo {
         pane_id: PaneId::new("%0"),
         session: SessionName::new("leader"),
         window_index: Some(0),
@@ -117,9 +117,15 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         pane_pid: Some(carrier.id()),
         leader_env: Default::default(),
     };
+    // R-RS031 / 37928560: both observations carry the same already-published live nonce.
+    caller.leader_env.insert(
+        crate::tmux_backend::PANE_BINDING_NONCE_METADATA_KEY.to_string(),
+        "rs031-caller-nonce".to_string(),
+    );
+    let worker_endpoint = workspace.join("worker.sock").to_string_lossy().into_owned();
     let transport = RecordingTransport::new()
         .with_windows(vec![WindowName::new("faker")])
-        .with_tmux_endpoint(workspace.join("worker.sock").to_string_lossy().into_owned())
+        .with_tmux_endpoint(worker_endpoint.clone())
         .with_targets(vec![caller.clone()]);
     let live = crate::transport::test_support::OfflineTransport::default()
         .with_tmux_endpoint(caller_endpoint)
@@ -130,6 +136,7 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         })
         .expect("quick-start should reach worker spawn path"),
     );
+    assert_eq!(launch.tmux_endpoint.as_deref(), Some(worker_endpoint.as_str()));
     let worker_pane = launch
         .started
         .iter()
@@ -142,6 +149,16 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     );
 
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
+    let receiver = state.pointer("/teams/verify031/leader_receiver").expect("canonical receiver");
+    assert_eq!(receiver["binding_nonce"], "rs031-caller-nonce");
+    assert_eq!(receiver["tmux_socket"], caller_endpoint);
+    assert_eq!(receiver["scope_authority"], "fresh_caller");
+    assert_eq!(receiver["status"], "attached");
+    assert_eq!(
+        PathBuf::from(receiver["authorized_team_workspace"].as_str().expect("authorized workspace")).canonicalize().unwrap(),
+        workspace.canonicalize().unwrap(),
+    );
+    assert_ne!(launch.tmux_endpoint.as_deref(), receiver["tmux_socket"].as_str());
     let top_receiver_pane = state
         .get("leader_receiver")
         .and_then(|receiver| receiver.get("pane_id"))
