@@ -44,6 +44,7 @@ fn mcp_stdio_report_result_appends_envelope_without_creating_database() {
         serde_json::to_vec(&record["envelope"]["artifacts"]).unwrap(),
         serde_json::to_vec(&artifacts).unwrap()
     );
-    fixture.received(&format!("Team Agent result from worker-1:\n\n{canary}"));
+    // c28a675f: the fixture leader is a distinct pane (no leader/worker collision).
+    fixture.leader_received(&format!("Team Agent result from worker-1:\n\n{canary}"));
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }

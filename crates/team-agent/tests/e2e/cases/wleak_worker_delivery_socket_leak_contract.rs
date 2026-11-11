@@ -49,7 +49,7 @@ fn wleak_published_endpoint_wins_over_advisory_window_names() {
     fixture.set_state(&state);
     let value = direct_cli(&fixture, &["worker-1", "endpoint-authority"]);
     assert_eq!(value["delivery"], "physical");
-    fixture.received("Team Agent message from leader:\n\nendpoint-authority");
+    fixture.received("Team Agent message from operator:\n\nendpoint-authority");
     assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
@@ -83,7 +83,7 @@ fn wleak_failed_send_does_not_replay_after_endpoint_repair() {
     fixture.set_state(&original);
     let sent = direct_cli(&fixture, &["worker-1", "manual-retry"]);
     assert_eq!(sent["delivery"], "physical");
-    fixture.received("Team Agent message from leader:\n\nmanual-retry");
+    fixture.received("Team Agent message from operator:\n\nmanual-retry");
     assert_eq!(std::fs::read_to_string(fixture.root.join("received")).unwrap().matches("manual-retry").count(), 1);
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }
@@ -99,7 +99,7 @@ fn wleak_send_receipt_records_physical_target_without_coordinator_events() {
     assert_eq!(value["accepted"], Value::Null);
     // R-M1a (M1 store-first): the physical receipt names its durable inbox record.
     assert!(fixture.inbox("worker-1").iter().any(|record| record["message_id"] == value["message_id"]), "{value}");
-    fixture.received("Team Agent message from leader:\n\nphysical-receipt");
+    fixture.received("Team Agent message from operator:\n\nphysical-receipt");
     assert!(!fixture.root.join(".team/logs/events.jsonl").exists());
 }
 
@@ -124,7 +124,7 @@ fn wleak_stale_session_and_window_do_not_veto_an_explicit_live_pane() {
     fixture.set_state(&state);
     let value = direct_cli(&fixture, &["worker-1", "no-session-gate"]);
     assert_eq!(value["delivery"], "physical");
-    fixture.received("Team Agent message from leader:\n\nno-session-gate");
+    fixture.received("Team Agent message from operator:\n\nno-session-gate");
 }
 
 #[test]
@@ -134,8 +134,10 @@ fn wleak_named_leader_uses_published_socket_without_cross_socket_fallback() {
     let value = direct_cli(&fixture, &["--to-name", "current/leader", "named-leader"]);
     assert_eq!(value["delivery"], "physical");
     assert_eq!(value["recipient"], "leader");
-    fixture.received("Team Agent message from leader:\n\nnamed-leader");
+    // c28a675f: the fixture leader is a distinct pane (no leader/worker collision).
+    fixture.leader_received("Team Agent message from operator:\n\nnamed-leader");
     assert!(std::fs::read(foreign.root.join("received")).unwrap().is_empty());
+    assert!(std::fs::read(foreign.root.join("leader-received")).unwrap().is_empty());
 }
 
 #[test]
@@ -276,9 +278,11 @@ fn direct_state(fixture: &direct_fixture::DirectFixture) -> Value {
     serde_json::from_slice(&std::fs::read(fixture.root.join(".team/runtime/state.json")).unwrap()).unwrap()
 }
 
+/// An unbound CLI caller: since a68f07e4 its messages read `from operator`.
 fn direct_cli(fixture: &direct_fixture::DirectFixture, args: &[&str]) -> Value {
     let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .arg("send").args(args).args(["--workspace", fixture.root.to_str().unwrap(), "--json"])
+        .env_remove("TMUX").env_remove("TMUX_PANE")
         .env_remove("TEAM_AGENT_ID").env_remove("TEAM_AGENT_AGENT_ID")
         .env_remove("TEAM_AGENT_WORKSPACE").env_remove("TEAM_AGENT_OWNER_TEAM_ID")
         .env_remove("TEAM_AGENT_TEAM_ID").output().unwrap();

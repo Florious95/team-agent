@@ -134,10 +134,13 @@ fn attaching_a_leader_does_not_replay_old_inbox_records() {
         .unwrap()
         .to_value();
     assert_eq!(live["status"], "sent");
-    fixture.received("Team Agent message from worker-1:\n\nnew live reply");
-    assert!(!std::fs::read_to_string(fixture.root.join("received"))
-        .unwrap()
-        .contains("old offline reply"));
+    // c28a675f: the fixture leader is a distinct pane (no leader/worker collision).
+    fixture.leader_received("Team Agent message from worker-1:\n\nnew live reply");
+    for pane in ["leader-received", "received"] {
+        assert!(!std::fs::read_to_string(fixture.root.join(pane))
+            .unwrap()
+            .contains("old offline reply"), "{pane}");
+    }
     let after = fixture.inbox_bytes();
     assert!(before.iter().all(|(path, bytes)| after.get(path).is_some_and(|later| later.starts_with(bytes))),
         "attaching must not rewrite or replay earlier inbox records");

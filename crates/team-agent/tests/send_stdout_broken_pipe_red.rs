@@ -51,7 +51,8 @@ fn physical_send_completes_once_when_stdout_is_closed() {
     let _env = hermetic::HermeticTestEnv::enter("physical_send_completes_once_when_stdout_is_closed");
     let fixture = DirectFixture::new();
     send_with_closed_stdout(&fixture, false);
-    fixture.received("Team Agent message from leader:\n\nclosed stdout token");
+    // a68f07e4: an unbound CLI caller is labelled `operator`.
+    fixture.received("Team Agent message from operator:\n\nclosed stdout token");
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("received"))
             .unwrap()

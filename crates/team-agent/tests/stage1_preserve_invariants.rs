@@ -799,7 +799,8 @@ fn prop_inbox_keeps_per_recipient_order_exact_content_contiguous_seq_and_scope()
                 );
                 assert_eq!(record["recipient"], recipient);
                 assert_eq!(record["team"], TEAM);
-                assert_eq!(record["sender"], "leader");
+                // a68f07e4: the unbound CLI caller is labelled `operator`.
+                assert_eq!(record["sender"], "operator");
             }
         }
         ws.assert_no_legacy_artifacts();

@@ -23,9 +23,12 @@ use serde_json::{json, Value};
 /// Native seats resolve to `codex_tui`; `codex` is the alias a configured dialect can use.
 const CODEX_DIALECTS: [&str; 2] = ["codex_tui", "codex"];
 const HEADER: &str = "Team Agent message from leader:\n\n";
+/// a68f07e4: station send from an unbound CLI caller presents `from operator`.
+const SEMANTIC_HEADER: &str = "Team Agent message from operator:\n\n";
 
-const RECEIVER: &str = r#"import codecs, json, os, sys, tty
+const RECEIVER: &str = r#"import codecs, json, os, signal, sys, tty
 from pathlib import Path
+signal.alarm(110)  # bounded lifetime even if the owning test never drops
 root = Path(sys.argv[1])
 tty.setraw(0)
 os.write(1, b"".join(b"history line %d\r\n" % i for i in range(120)))
@@ -88,6 +91,7 @@ impl CodexPane {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(root.join(".team/runtime")).unwrap();
+        fs::create_dir_all(root.join("home")).unwrap();
         let script = root.join("codex_composer.py");
         fs::write(&script, RECEIVER).unwrap();
         let socket = root.join("t.sock").to_string_lossy().into_owned();
@@ -136,6 +140,8 @@ impl CodexPane {
     fn cli(&self, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command.args(args).args(["--workspace", self.root.to_str().unwrap(), "--json"]);
+        // Never run the real binary against the developer's real HOME.
+        command.env("HOME", self.root.join("home"));
         for (key, _) in std::env::vars() {
             if key.starts_with("TEAM_AGENT_") || key == "TMUX" || key == "TMUX_PANE" {
                 command.env_remove(key);
@@ -266,7 +272,7 @@ fn copy_mode_pane_semantic_send_cancels_mode_and_submits_one_turn() {
     pane.scroll_into_copy_mode();
     let content = "致 Astra (Codex)：请立即运行你的 20 个测试 Drill。完成后立即汇报！";
     let output = pane.semantic_send("codex_tui", content);
-    let expected = format!("{HEADER}{content}");
+    let expected = format!("{SEMANTIC_HEADER}{content}");
     let result = one_intact_turn(&pane, &output, &expected).and_then(|()| framed_and_mode_cleared(&pane, &expected));
     report(result.err().map(|error| format!("[A copy-mode semantic codex_tui] {error}")).into_iter().collect());
 }
@@ -294,7 +300,7 @@ fn trailing_mention_tail_semantic_send_submits_one_intact_turn() {
     for content in ["Report back to @leader", "Load the skill $leader"] {
         let pane = CodexPane::new();
         let output = pane.semantic_send("codex_tui", content);
-        if let Err(error) = one_intact_turn(&pane, &output, &format!("{HEADER}{content}")) {
+        if let Err(error) = one_intact_turn(&pane, &output, &format!("{SEMANTIC_HEADER}{content}")) {
             failures.push(format!("[B mention semantic codex_tui {content:?}] {error}"));
         }
     }

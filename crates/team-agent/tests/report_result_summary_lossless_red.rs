@@ -61,6 +61,7 @@ fn report_result_notification_preserves_long_multiline_summary_verbatim() {
     assert_eq!(records[0]["message_id"], report.body["message_id"]);
     assert_eq!(records[0]["envelope"]["summary"], summary);
     assert_eq!(records[0]["content"], summary);
-    fixture.received(&format!("Team Agent result from worker-1:\n\n{summary}"));
+    // c28a675f: the fixture leader is a distinct pane (no leader/worker collision).
+    fixture.leader_received(&format!("Team Agent result from worker-1:\n\n{summary}"));
     assert!(!fixture.root.join(".team/runtime/team.db").exists());
 }

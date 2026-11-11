@@ -73,10 +73,26 @@ fn tp03_worker_result_route_is_inert_and_cannot_redirect_leader_delivery() {
     assert!(!leader.root.join(".team/inbox/worker-1.jsonl").exists());
     assert!(!leader.root.join(".team/inbox/pipeline.jsonl").exists());
     assert!(!leader.root.join(".team/runtime/team.db").exists());
-    assert_eq!(
-        std::fs::read(leader.root.join(".team/runtime/state.json")).unwrap(),
-        state_before
-    );
+    // cfd9eb90: delivery may stamp worker-1's first interaction and the state
+    // writer normalizes the document (top-level mirror, explicit nulls). Any
+    // other change (pane_id, tmux_socket, leader, status) still fails.
+    let before: serde_json::Value = serde_json::from_slice(&state_before).unwrap();
+    let after: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(leader.root.join(".team/runtime/state.json")).unwrap()).unwrap();
+    let (observed, mut expected) = (&after["teams"]["current"], before["teams"]["current"].clone());
+    if let Some(stamp) = observed["agents"]["worker-1"].get("first_send_at") {
+        assert!(stamp.as_str().is_some_and(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).is_ok()), "{stamp}");
+        expected["agents"]["worker-1"]["first_send_at"] = stamp.clone();
+    }
+    for (key, value) in observed.as_object().unwrap() {
+        match expected.get(key) {
+            Some(old) => assert_eq!(old, value, "report_result must not change {key}"),
+            None => assert!(value.is_null() || key == "active_team_key", "report_result added {key}: {value}"),
+        }
+    }
+    for key in expected.as_object().unwrap().keys() {
+        assert!(observed.get(key).is_some(), "report_result removed {key}");
+    }
 }
 
 #[test]
@@ -106,6 +122,7 @@ fn tp10_real_mcp_preserves_novel_business_status_byte_for_byte() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["message_id"], call.body["message_id"]);
     assert_eq!(records[0]["envelope"]["status"], novel_status);
-    harness.received("Team Agent result from worker-1:\n\nTP10_REAL_MCP_OPAQUE_STATUS");
+    // c28a675f: the fixture leader is a distinct pane (no leader/worker collision).
+    harness.leader_received("Team Agent result from worker-1:\n\nTP10_REAL_MCP_OPAQUE_STATUS");
     assert!(!harness.root.join(".team/runtime/team.db").exists());
 }

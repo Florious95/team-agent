@@ -9,7 +9,12 @@ use std::time::{Duration, Instant};
 pub struct DirectFixture {
     pub root: PathBuf,
     pub socket: String,
+    /// Worker receiver; bytes land in `<root>/received`.
     pub pane: String,
+    /// c28a675f: a pane registered as both leader and active worker is a
+    /// leader/worker collision that is never delivered to, so the leader
+    /// receiver is a distinct pane; bytes land in `<root>/leader-received`.
+    pub leader_pane: String,
 }
 
 impl DirectFixture {
@@ -27,13 +32,15 @@ impl DirectFixture {
         std::fs::write(
             &script,
             format!(
-                r#"import os, tty
+                r#"import os, signal, sys, tty
 from pathlib import Path
+signal.alarm(110)  # bounded lifetime even if the owning test never drops
 tty.setraw(0)
 os.write(1, b'\x1b[?2004h')
 root = Path({root:?})
-with (root / 'received').open('ab', buffering=0) as out:
-    (root / 'ready').touch()
+name = sys.argv[1]
+with (root / name).open('ab', buffering=0) as out:
+    (root / (name + '.ready')).touch()
     while True:
         out.write(os.read(0, 65536))
 "#,
@@ -53,7 +60,7 @@ with (root / 'received').open('ab', buffering=0) as out:
                 "-s",
                 "oracle",
             ])
-            .arg(format!("python3 '{}'", script.display()))
+            .arg(format!("python3 '{}' received", script.display()))
             .output()
             .unwrap();
         assert!(
@@ -61,17 +68,30 @@ with (root / 'received').open('ab', buffering=0) as out:
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let pane = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        let output = Command::new("tmux")
+            .args(["-S", &socket, "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "oracle"])
+            .arg(format!("python3 '{}' leader-received", script.display()))
+            .output()
+            .unwrap();
         let fixture = Self {
             root,
             socket,
-            pane: String::from_utf8(output.stdout).unwrap().trim().into(),
+            pane,
+            leader_pane: String::from_utf8(output.stdout).unwrap().trim().into(),
         };
-        fixture.wait_for(|| fixture.root.join("ready").exists());
+        assert!(
+            output.status.success() && fixture.leader_pane.starts_with('%'),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fixture.wait_for(|| fixture.root.join("received.ready").exists()
+            && fixture.root.join("leader-received.ready").exists());
         fixture.set_state(&json!({
             "active_team_key": "current",
             "teams": {"current": {
                 "team_id": "current", "status": "stopped", "tmux_socket": fixture.socket,
-                "leader": {"pane_id": fixture.pane},
+                "leader": {"pane_id": fixture.leader_pane},
                 "agents": {"worker-1": {"status": "running", "pane_id": fixture.pane}}
             }}
         }));
@@ -98,14 +118,32 @@ with (root / 'received').open('ab', buffering=0) as out:
         }
     }
 
+    /// The worker pane received `text` as one bracketed paste plus Enter.
     pub fn received(&self, text: &str) {
+        self.received_in("received", text);
+    }
+
+    /// The distinct leader pane received `text` as one bracketed paste plus Enter.
+    pub fn leader_received(&self, text: &str) {
+        self.received_in("leader-received", text);
+    }
+
+    fn received_in(&self, file: &str, text: &str) {
         let expected = format!("\x1b[200~{text}\x1b[201~\r").into_bytes();
-        self.wait_for(|| {
-            std::fs::read(self.root.join("received"))
-                .unwrap_or_default()
-                .windows(expected.len())
-                .any(|bytes| bytes == expected)
-        });
+        let path = self.root.join(file);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read(&path)
+            .unwrap_or_default()
+            .windows(expected.len())
+            .any(|bytes| bytes == expected)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "physical receiver {file} timed out: {:?}",
+                String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default())
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// Durable inbox records of `recipient` in this fixture's team, read through the store's public

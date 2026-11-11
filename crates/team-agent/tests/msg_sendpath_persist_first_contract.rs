@@ -14,6 +14,8 @@ use direct_fixture::DirectFixture;
 use serde_json::{json, Value};
 use std::process::{Command, Output};
 
+/// An unbound CLI caller (no registered leader pane in its environment): since
+/// a68f07e4 its messages are presented as `from operator`, never `from leader`.
 fn cli(fixture: &DirectFixture, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .arg("send")
@@ -71,7 +73,7 @@ fn c1_dead_coordinator_is_ignored_and_snapshot_is_immutable() {
     let started = chrono::Utc::now();
     sent(cli(&fixture, &["worker-1", "without coordinator"]));
     let finished = chrono::Utc::now();
-    fixture.received("Team Agent message from leader:\n\nwithout coordinator");
+    fixture.received("Team Agent message from operator:\n\nwithout coordinator");
     let observed_bytes = std::fs::read(&state_path).unwrap();
     let observed: Value = serde_json::from_slice(&observed_bytes).unwrap();
     let stamp = observed["teams"]["current"]["agents"]["worker-1"]["first_send_at"]
@@ -90,7 +92,7 @@ fn c1_dead_coordinator_is_ignored_and_snapshot_is_immutable() {
         }
     }
     sent(cli(&fixture, &["worker-1", "subsequent delivery"]));
-    fixture.received("Team Agent message from leader:\n\nsubsequent delivery");
+    fixture.received("Team Agent message from operator:\n\nsubsequent delivery");
     assert_eq!(std::fs::read(&state_path).unwrap(), observed_bytes, "first_send_at must remain the first delivery");
     // M5 upgrade cleanup may retire stale legacy coordinator metadata, but never rewrites it.
     if let Ok(recorded) = std::fs::read_to_string(&pid_path) {
@@ -109,7 +111,7 @@ fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
     sent(cli(&fixture, &["worker-1", "positional"]));
     sent(cli(&fixture, &["--to-name", "worker-1", "alias"]));
     // M5 admission ruling: an explicit self-target is refused before any effect, so the MCP sender is
-    // the leader seat (the fixture's leader and worker share one pane).
+    // the leader seat (the fixture's leader is its own distinct pane, c28a675f).
     let mut worker = mcp_sim_harness::spawn_mcp_client(&fixture.root, "leader", "current");
     let report = worker.call_tool(
         "send_message",
@@ -119,9 +121,10 @@ fn c2_positional_alias_and_real_mcp_share_physical_delivery() {
     assert_eq!(report.body["delivery"], "physical");
     // R-M1a: MCP shares the CLI store-first core, so its receipt names the inbox record too.
     assert!(report.body["message_id"].as_str().is_some_and(|id| !id.is_empty()), "{}", report.body);
+    // a68f07e4: an unbound CLI caller is labelled `operator`; the MCP leader seat stays `leader`.
     for (sender, content) in [
-        ("leader", "positional"),
-        ("leader", "alias"),
+        ("operator", "positional"),
+        ("operator", "alias"),
         ("leader", "MCP physical"),
     ] {
         fixture.received(&format!("Team Agent message from {sender}:\n\n{content}"));
@@ -149,7 +152,7 @@ fn c3_unresolved_recipients_refuse_without_delivery_or_persistence() {
         );
     }
     sent(cli(&fixture, &["worker-1", "positive barrier"]));
-    fixture.received("Team Agent message from leader:\n\npositive barrier");
+    fixture.received("Team Agent message from operator:\n\npositive barrier");
     assert!(!std::fs::read_to_string(fixture.root.join("received"))
         .unwrap()
         .contains("must not arrive"));
@@ -181,7 +184,7 @@ fn c4_failed_physical_send_is_not_queued_and_explicit_retry_delivers_once() {
         "inbox storage without physical delivery must not stamp session observations");
     std::fs::write(fixture.root.join(".team/runtime/state.json"), original).unwrap();
     sent(cli(&fixture, &["worker-1", "retry payload"]));
-    fixture.received("Team Agent message from leader:\n\nretry payload");
+    fixture.received("Team Agent message from operator:\n\nretry payload");
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("received"))
             .unwrap()
@@ -206,7 +209,7 @@ fn c5_fanout_reports_physical_failure_without_manufacturing_queued_obligations()
         }
     }}}));
     let output = cli(&fixture, &["--to", "worker-1,worker-2", "partial fanout"]);
-    fixture.received("Team Agent message from leader:\n\npartial fanout");
+    fixture.received("Team Agent message from operator:\n\npartial fanout");
     // R-M1b + per-recipient receipts: a runtime failure of one recipient never aborts the batch and
     // never manufactures a queued obligation. (The receipt-list key itself is pinned by the
     // D-M5-2b oracles, so it is not asserted here.)
