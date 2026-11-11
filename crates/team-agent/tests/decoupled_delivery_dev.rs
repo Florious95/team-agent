@@ -1,6 +1,5 @@
 //! Developer-owned tests for the physical actuator and independent inbound log.
 use std::fs;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
@@ -10,84 +9,36 @@ use team_agent::messaging::MessageTarget;
 use team_agent::model::enums::ResultStatus;
 use team_agent::model::ids::{AgentId, TeamKey};
 
-struct Fixture {
-    root: PathBuf,
-    socket: String,
-    pane: String,
+#[path = "support/direct_fixture.rs"]
+mod direct_fixture;
+
+// B6 / c28a675f: reuse the shared fixture's genuinely distinct receiver panes.
+struct Fixture(direct_fixture::DirectFixture);
+impl std::ops::Deref for Fixture {
+    type Target = direct_fixture::DirectFixture;
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
 impl Fixture {
     fn new() -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "ta-direct-dev-{}-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::create_dir_all(root.join(".team/runtime")).unwrap();
-        let socket = root.join("tmux.sock").to_string_lossy().into_owned();
-        let script = root.join("receiver.py");
-        fs::write(
-            &script,
-            format!(
-                r#"import os, tty
-from pathlib import Path
-tty.setraw(0)
-os.write(1, b'\x1b[?2004h')
-root = Path({root:?})
-with (root / 'received').open('ab', buffering=0) as out:
-    (root / 'ready').touch()
-    while True:
-        out.write(os.read(0, 65536))
-"#,
-                root = root.to_string_lossy()
-            ),
-        )
-        .unwrap();
-        let output = Command::new("tmux")
-            .args([
-                "-S",
-                &socket,
-                "new-session",
-                "-d",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                "-s",
-                "direct-test",
-            ])
-            .arg(format!("python3 '{}'", script.display()))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let pane = String::from_utf8(output.stdout).unwrap().trim().to_string();
-        let fixture = Self { root, socket, pane };
-        fixture.wait_for(|| fixture.root.join("ready").exists());
-        let state = json!({"active_team_key": "alpha", "tmux_socket": fixture.socket,
+        let fixture = Self(direct_fixture::DirectFixture::new());
+        assert_ne!(fixture.pane, fixture.leader_pane);
+        assert!(Command::new("tmux")
+            .args(["-S", &fixture.socket, "rename-session", "-t", "oracle", "direct-test"])
+            .status().unwrap().success());
+        fixture.set_state(&json!({"active_team_key": "alpha", "tmux_socket": fixture.socket,
             "teams": {"alpha": {"team_id": "alpha", "team_name": "friendly", "status": "stopped",
-                "tmux_socket": fixture.socket, "leader": {"pane_id": fixture.pane, "provider": "retired-provider"},
-                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "running"}}}}});
-        fs::write(
-            fixture.root.join(".team/runtime/state.json"),
-            serde_json::to_vec(&state).unwrap(),
-        )
-        .unwrap();
+                "tmux_socket": fixture.socket, "leader": {"pane_id": fixture.leader_pane, "provider": "retired-provider"},
+                "agents": {"worker": {"pane_id": fixture.pane, "provider": "retired-provider", "status": "running"}}}}}));
         fixture
     }
-    fn wait_for(&self, mut condition: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !condition() {
-            assert!(
-                Instant::now() < deadline,
-                "physical receiver timed out: {:?}",
-                fs::read(self.root.join("received"))
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    // B9 / cfd9eb90: perform the legitimate first-send stamp before measuring no-repair.
+    // The measured tests retain exact byte equality, not an expanded mutation allowlist.
+    fn prime_first_send(&self) {
+        let result = self.leader_tools().send_message_with_presentation(
+            &MessageTarget::Single("worker".into()), "fixture first-send precondition",
+            None, None, None, None, None).unwrap().to_value();
+        assert_eq!(result["status"], "sent", "{result}");
+        self.received("Team Agent message from leader:\n\nfixture first-send precondition");
     }
     fn cli(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
@@ -107,15 +58,6 @@ with (root / 'received').open('ab', buffering=0) as out:
             .env_remove("TEAM_AGENT_TEAM_ID");
         command
     }
-    fn received(&self, expected: &str) {
-        let expected = format!("\x1b[200~{expected}\x1b[201~\r").into_bytes();
-        self.wait_for(|| {
-            fs::read(self.root.join("received"))
-                .unwrap_or_default()
-                .windows(expected.len())
-                .any(|bytes| bytes == expected)
-        });
-    }
     fn tools(&self) -> TeamOrchestratorTools {
         TeamOrchestratorTools::with_identity(
             &self.root,
@@ -125,7 +67,7 @@ with (root / 'received').open('ab', buffering=0) as out:
     }
 
     /// M5 admission ruling: an explicit self-target is refused before any effect, so MCP sends
-    /// addressed to `worker` come from the leader seat (the fixture's leader and worker share one pane).
+    /// addressed to `worker` come from the separate leader seat (B6 / c28a675f).
     fn leader_tools(&self) -> TeamOrchestratorTools {
         TeamOrchestratorTools::with_identity(
             &self.root,
@@ -134,18 +76,10 @@ with (root / 'received').open('ab', buffering=0) as out:
         )
     }
 }
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .args(["-S", &self.socket, "kill-server"])
-            .output();
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
 #[test]
 fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
     let fixture = Fixture::new();
+    fixture.prime_first_send();
     let path = fixture.root.join(".team/runtime/state.json");
     let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     let team = &mut state["teams"]["alpha"];
@@ -163,7 +97,8 @@ fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
     assert_eq!(located["endpoints"][0]["socket"], fixture.socket);
     let sent = fixture.cli(&["send", "worker", "native fallback", "--team", "alpha"]);
     assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stderr));
-    fixture.received("Team Agent message from leader:\n\nnative fallback");
+    // B5 / a68f07e4: an unbound CLI caller is the operator, not the leader.
+    fixture.received("Team Agent message from operator:\n\nnative fallback");
     assert_eq!(fs::read(&path).unwrap(), before);
     assert!(!fixture.root.join(".team/db").exists());
 }
@@ -267,6 +202,7 @@ sys.exit(result.returncode)
 #[test]
 fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mcp() {
     let fixture = Fixture::new();
+    fixture.prime_first_send();
     assert!(Command::new("tmux")
         .args(["-S", &fixture.socket, "rename-window", "-t", &fixture.pane, "worker"])
         .status().unwrap().success());
@@ -289,7 +225,8 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
         let content = format!("live despite stale {field}");
         let output = fixture.cli(&["send", "worker", &content, "--team", "alpha"]);
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        fixture.received(&format!("Team Agent message from leader:\n\n{content}"));
+        // B5 / a68f07e4: CLI operator and MCP leader remain distinct physical frames.
+        fixture.received(&format!("Team Agent message from operator:\n\n{content}"));
         let result = fixture.leader_tools().send_message_with_presentation(
             &MessageTarget::Single("worker".into()), &content, None, None, None,
 
@@ -304,7 +241,7 @@ fn logical_send_uses_live_pane_despite_stale_metadata_dead_status_and_missing_mc
     fs::write(&path, serde_json::to_vec(&valid).unwrap()).unwrap();
     let output = fixture.cli(&["send", "worker", "live despite dead status", "--team", "alpha"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    fixture.received("Team Agent message from leader:\n\nlive despite dead status");
+    fixture.received("Team Agent message from operator:\n\nlive despite dead status");
     assert!(!fixture.root.join(".team/db").exists());
     assert!(Command::new("tmux").args(["-S", &fixture.socket, "kill-pane", "-t", &fixture.pane])
         .status().unwrap().success());
@@ -357,6 +294,7 @@ fn raw_send_needs_no_snapshot_and_preserves_bracketed_multiline_payload() {
 #[test]
 fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database() {
     let fixture = Fixture::new();
+    fixture.prime_first_send();
     let state_path = fixture.root.join(".team/runtime/state.json");
     let before = fs::read(&state_path).unwrap();
     let db_path = fixture.root.join(".team/runtime/team.db");
@@ -369,7 +307,8 @@ fn cli_and_mcp_send_ignore_dead_coordinator_and_never_modify_runtime_or_database
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    fixture.received("Team Agent message from leader:\n\ndirect CLI");
+    // B5 / a68f07e4: preserve MCP leader framing below; the CLI is an operator.
+    fixture.received("Team Agent message from operator:\n\ndirect CLI");
     let result = fixture
         .leader_tools()
         .send_message_with_presentation(
@@ -418,6 +357,7 @@ fn replies_and_results_append_to_inbox_without_database_or_receipt_state() {
         .unwrap()
         .to_value();
     assert_eq!(message["status"], "sent");
+    fixture.leader_received("Team Agent message from worker:\n\nreply");
     let result = tools
         .report_result_with_presentation(
             None,
