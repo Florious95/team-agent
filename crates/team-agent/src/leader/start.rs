@@ -3491,6 +3491,8 @@ mod tests {
         let socket = receiver["tmux_socket"].as_str().unwrap();
         let mut pane = managed_pane_info(&managed_spawn_result());
         pane.pane_id = PaneId::new(receiver["pane_id"].as_str().unwrap());
+        // d2d7ebc6: a live pane instance includes its recorded PID, not just the pane number.
+        pane.pane_pid = receiver["pane_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok());
         crate::transport_factory::with_leader_endpoint_transport(
             socket,
             crate::transport::test_support::OfflineTransport::new().with_targets(vec![pane]),

@@ -870,7 +870,8 @@ fn stopped_text_without_physical_identity_is_unknown_and_standalone_source_keeps
             &json!({"status":"stopped","provider":"pi"})
         )
         .unwrap(),
-        Observation::Unknown
+        // c8639440 / D3: explicitly stopped with cleared physical pointers is verified stopped.
+        Observation::StoppedVerified
     );
     assert_eq!(
         observe(
@@ -940,6 +941,8 @@ fn shell_supervised_claude_is_live_for_both_team_start_spellings() {
     raw["teams"]["fixture"]["agents"]["one"] = json!({
         "provider":"claude", "status":"running", "pane_id":fields[0], "pane_pid":pid, "window":"one"
     });
+    // c8639440: bind the observed, test-owned shell to its real birth identity.
+    crate::lifecycle::carrier::record(&mut raw["teams"]["fixture"]["agents"]["one"], Some(pid));
     std::fs::write(&state, serde_json::to_vec(&raw).unwrap()).unwrap();
     let before = std::fs::read(&state).unwrap();
     let selected = resolve_active_team_readonly(root.path(), Some("fixture"), SelectorMode::RuntimeOnly).unwrap();

@@ -1580,6 +1580,10 @@ fn bootstrap(
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+#[path = "../../tests/support/proc_guard.rs"]
+mod carrier_fixture;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1702,18 +1706,15 @@ mod tests {
             state: json!({"agents":{"reviewer":{"status":"stopped"}}}),
         };
         assert_eq!(carrier_birth(&selected, &id).unwrap(), Value::Null);
-        // Reap our own child, rather than guessing a host PID or touching a worker.
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--list")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
+        // c8639440: record real owned carriers while alive, then prove the gone/live boundary.
+        use std::io::Write;
+        let mut child = carrier_fixture::FixtureGroup::presence(temp.path(), std::time::Duration::from_secs(30));
+        super::super::carrier::record(&mut selected.state["agents"]["reviewer"], Some(child.id()));
+        child.stdin.as_mut().unwrap().write_all(b"exit\n").unwrap();
         assert!(child.wait().unwrap().success());
-        selected.state["agents"]["reviewer"]["pane_pid"] = json!(pid);
         assert_eq!(carrier_birth(&selected, &id).unwrap(), Value::Null);
-        selected.state["agents"]["reviewer"]["pane_pid"] = json!(std::process::id());
+        let live = carrier_fixture::FixtureGroup::presence(temp.path(), std::time::Duration::from_secs(30));
+        super::super::carrier::record(&mut selected.state["agents"]["reviewer"], Some(live.id()));
         assert!(!carrier_birth(&selected, &id).unwrap().is_null());
     }
 

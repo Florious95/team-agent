@@ -206,9 +206,8 @@ fn d8_launch_session_name_fallback_derives_from_team_name() {
         .expect("launch should spawn the worker without an explicit session_name");
     let spawn = transport.single_spawn();
     assert_eq!(
-        spawn.session, "team-d8team",
-        "D8: session_name fallback must derive `team-{{team.name}}` (Python launch/core.py:56), \
-not a constant; argv={:?}",
+        spawn.session, team_agent::compiler::default_session_name(&ws, "d8team"),
+        "5e1315ee: session_name fallback must derive from this workspace and team, not a constant; argv={:?}",
         spawn.argv
     );
 }

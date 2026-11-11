@@ -2847,7 +2847,8 @@ fn quick_start_unbound_state_producer_seeds_spec_path_workspace_leader() {
     );
     assert_eq!(state["workspace"], json!(workspace.to_string_lossy()));
     assert_eq!(state["team_dir"], json!(team.to_string_lossy()));
-    assert_eq!(state["session_name"], json!("team-quickteam"));
+    // 5e1315ee: session names are namespaced by the actual run workspace.
+    assert_eq!(state["session_name"], json!(crate::compiler::default_session_name(&workspace, "quickteam")));
     assert_eq!(
         state["leader"]["id"],
         json!("leader"),
