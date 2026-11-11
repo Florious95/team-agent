@@ -176,7 +176,8 @@ exec '{tmux}' "$@"
             self.role(team, seat);
         }
         let dir_s = dir.to_string_lossy().to_string();
-        let run = self.ta(&["quick-start", &dir_s, "--name", team, "--yes"]);
+        // 1d2d4d5a: `--name` is refused by unified start; the team name comes from TEAM.md `name:`.
+        let run = self.ta(&["quick-start", &dir_s, "--yes"]);
         assert!(run.ok(), "FIXTURE: quick-start of `{team}` must succeed: {}", run.describe());
         self.remember_sockets(&run.json);
         self.teams.push(team.to_string());

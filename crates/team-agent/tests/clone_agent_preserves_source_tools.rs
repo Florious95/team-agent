@@ -123,8 +123,7 @@ impl Case {
             self.ws(),
             "--workspace",
             self.ws(),
-            "--name",
-            TEAM_NAME,
+            // 1d2d4d5a: `--name` is refused by unified start; TEAM.md `name:` names the team.
             "--yes",
             "--json",
         ]);
