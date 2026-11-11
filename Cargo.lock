@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "team-agent"
-version = "0.5.129"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",

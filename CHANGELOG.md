@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.6.0]
+
+- **Architecture cleanup:** retire the legacy SQLite/transport seams, coordinator tick engine, pre-unified lifecycles, and unused kernel prototypes across the three excision stages.
+- **Messaging and terminal safety:** add guarded `send --bare`, preserve cross-socket ownership boundaries, and retain accurate sender roles and origins without unnecessary pane probes.
+- **Startup and recovery:** reuse Cursor startup discovery, retain timeout evidence, and recover durable team authority and native sessions after host reboots or workspace relocation.
+- **Process ownership:** fence recovery and shutdown against PID reuse, preserve carrier topology, and avoid terminating unrelated or unverified processes.
+- **Test isolation:** bound fixture process lifetimes and reap owned tmux roots, including the shutdown and lifecycle regression suites.
+- **Release packaging:** align the installer and all three platform packages at 0.6.0. Stop legacy callers before switching a live workspace to the new runtime.
 - **Explicit-stop persistence:** team start preserves explicitly stopped seats instead of resurrecting them. Use `team-agent start <agent>` to wake an individual stopped seat.
 
 ## [0.5.129]
