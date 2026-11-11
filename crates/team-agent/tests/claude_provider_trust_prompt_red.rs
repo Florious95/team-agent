@@ -54,12 +54,13 @@ fn claude_trust_recognizer_public_shape_exists_and_is_provider_specific() {
         startup.contains("classify_claude_startup_screen"),
         "Claude trust must have a pure recognizer entrypoint; implementation should not hide it inside Codex-specific logic"
     );
+    // 1db4e8fa (D2): the recognizer no longer requires the "Quick safety check" title or the
+    // "Enter to confirm" footer, so it no longer needs them as source markers. Those two markers
+    // are checked against the real Claude capture below instead.
     for needle in [
-        "Quick safety check",
         "Is this a project you created or one you trust?",
         "Yes, I trust this folder",
         "No, exit",
-        "Enter to confirm",
         "claude_workspace_trust",
     ] {
         assert!(
@@ -70,6 +71,17 @@ fn claude_trust_recognizer_public_shape_exists_and_is_provider_specific() {
     assert!(
         startup.contains("StartupScreenDecision::AnswerWorkspaceTrust"),
         "active Claude trust with selector on Yes must classify to AnswerWorkspaceTrust"
+    );
+    for marker in ["Quick safety check", "Enter to confirm"] {
+        assert!(
+            CLAUDE_TRUST_YES_ACTIVE.contains(marker),
+            "fixture must stay the real Claude capture carrying {marker:?}"
+        );
+    }
+    assert_eq!(
+        team_agent::provider::classify_claude_startup_screen(CLAUDE_TRUST_YES_ACTIVE),
+        team_agent::provider::StartupScreenDecision::AnswerWorkspaceTrust,
+        "the real Claude `Quick safety check` capture with the selector on Yes must classify to AnswerWorkspaceTrust"
     );
 }
 
