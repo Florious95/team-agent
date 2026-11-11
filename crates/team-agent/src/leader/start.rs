@@ -1351,6 +1351,7 @@ fn apply_clear_to_leader_receiver(
         recv.insert("status".to_string(), serde_json::json!("exited"));
         recv.remove("pane_id");
         recv.remove("pane");
+        crate::lifecycle::carrier::record(recv, None);
         changed = true;
     }
     changed
@@ -3114,6 +3115,8 @@ mod tests {
                         "status": "attached",
                         "pane_id": "%42",
                         "pane": "%42",
+                        "pane_pid": std::process::id(),
+                        "pane_birth_identity": crate::lifecycle::carrier::birth_identity(std::process::id()),
                         "tmux_socket": crate::tmux_backend::socket_path_for_workspace(&workspace).unwrap()
                     },
                     "team_owner": { "pane_id": "%42" }
@@ -3133,6 +3136,8 @@ mod tests {
             recv.get("pane_id").is_none(),
             "dangling pane_id must be gone: {recv}"
         );
+        assert!(recv.get("pane_pid").is_none(), "dangling pane PID must be gone: {recv}");
+        assert!(recv.get("pane_birth_identity").is_none(), "dangling birth identity must be gone: {recv}");
         assert!(
             loaded["teams"]["current"]["team_owner"]
                 .get("pane_id")
