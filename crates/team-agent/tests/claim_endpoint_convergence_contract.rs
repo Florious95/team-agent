@@ -43,6 +43,9 @@ const LEADER_SESSION: &str = "team-agent-leader-0515-restart-context-red";
 const LIVE_LEADER_PID: u32 = 14663;
 const STALE_OWNER_PID: u32 = 47641;
 const OLD_LIVE_PID: u32 = 22441;
+/// R-CEC10 B2: the pane a restart physically spawns for TEAM_SESSION on NEW_SOCKET. Never
+/// listed before the spawn, and never one of the caller/stale/old panes (%0, %9, %8).
+const RESPAWN_PANE: &str = "%15";
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_team-agent")
@@ -239,6 +242,7 @@ fn red_b_restart_spawns_on_converged_endpoint_and_records_spawn_metadata() {
         &case,
         "RED B: restart must not create or probe the team session on the old endpoint after claim convergence",
     );
+    assert_physical_restart_spawn(&case, "RED B");
 }
 
 #[test]
@@ -258,6 +262,7 @@ fn red_c_restart_transport_and_attach_share_selected_state_endpoint() {
         &restart_json,
         "RED C: restart attach command endpoint must share the same selected endpoint as transport",
     );
+    assert_physical_restart_spawn(&case, "RED C");
 }
 
 #[test]
@@ -284,6 +289,7 @@ fn red_d_legacy_per_team_snapshot_endpoint_is_ignored_by_restart() {
         &case,
         "RED D: legacy per-team snapshot endpoint=OLD must not affect restart transport endpoint",
     );
+    assert_physical_restart_spawn(&case, "RED D");
 }
 
 fn converged_dead_old_endpoint_case(tag: &str) -> EndpointCase {
@@ -563,6 +569,57 @@ fn assert_tmux_session_ops_use_only_new_endpoint(case: &EndpointCase, message: &
     );
 }
 
+/// R-CEC10 B4 (7cba7b44, reboot_0531 R4): the restart went through the physical spawn path,
+/// never the fake no-spawn harness, and bound the freshly spawned pane.
+fn assert_physical_restart_spawn(case: &EndpointCase, label: &str) {
+    let log = case.tmux_log();
+    let spawn_ops = log
+        .lines()
+        .filter(|line| {
+            line.contains(TEAM_SESSION)
+                && (line.contains(" new-session ") || line.contains(" new-window "))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !spawn_ops.is_empty()
+            && spawn_ops
+                .iter()
+                .all(|line| line.starts_with(&format!("{NEW_SOCKET}\t"))),
+        "{label}: restart must physically spawn TEAM_SESSION={TEAM_SESSION}, only on NEW_SOCKET={NEW_SOCKET}; spawn_ops={spawn_ops:?}; full_log={log:?}"
+    );
+    let events = restart_spawn_events(case);
+    let spawn_event = events
+        .iter()
+        .find(|event| event.get("agent_id").and_then(Value::as_str) == Some(WORKER))
+        .unwrap_or_else(|| panic!("{label}: missing {WORKER} restart spawn event; events={events:?}"));
+    assert!(
+        spawn_event
+            .get("argv")
+            .and_then(Value::as_array)
+            .is_some_and(|argv| !argv.is_empty()),
+        "{label}: physical restart spawn event must carry non-empty provider argv; event={spawn_event}"
+    );
+    assert_ne!(
+        spawn_event.get("tmux_start_mode").and_then(Value::as_str),
+        Some("fake_harness"),
+        "{label}: restart must not take the fake no-spawn harness; event={spawn_event}"
+    );
+    let selected = team_agent::state::projection::select_runtime_state(&case.workspace, Some(TEAM))
+        .expect("selected state after restart");
+    let pane = selected
+        .pointer(&format!("/agents/{WORKER}/pane_id"))
+        .and_then(Value::as_str);
+    assert_eq!(
+        pane,
+        Some(RESPAWN_PANE),
+        "{label}: restart must bind the freshly spawned pane; state={selected}"
+    );
+    assert!(
+        !pane.is_some_and(|pane| pane.starts_with("__team_agent_fake_harness_")),
+        "{label}: a harness sentinel must never be recorded as the worker pane; state={selected}"
+    );
+}
+
 fn tmux_session_ops(log: &str) -> Vec<&str> {
     log.lines()
         .filter(|line| {
@@ -620,18 +677,26 @@ enum OldEndpoint {
 struct EndpointCase {
     workspace: PathBuf,
     fake_bin: PathBuf,
+    /// R-CEC10 B3: the respawned pane's carrier is a live, test-owned child (own process
+    /// group, <=60s lifeline, killed and reaped on drop), so restart records a real OS birth.
+    _respawn_carrier: hermetic_guard::proc_guard::FixtureGroup,
 }
 
 impl EndpointCase {
     fn new(tag: &str, receiver_shape: ReceiverShape, old_endpoint: OldEndpoint) -> Self {
         let workspace = tmp_dir(tag);
         std::fs::create_dir_all(workspace.join("home")).expect("create isolated home");
-        let fake_bin = fake_tmux_bin(&workspace, old_endpoint);
+        let respawn_carrier = hermetic_guard::proc_guard::FixtureGroup::presence(
+            &workspace,
+            std::time::Duration::from_secs(60),
+        );
+        let fake_bin = fake_tmux_bin(&workspace, old_endpoint, respawn_carrier.id());
         seed_split_state(&workspace, receiver_shape);
         write_minimal_team_spec(&workspace);
         Self {
             workspace,
             fake_bin,
+            _respawn_carrier: respawn_carrier,
         }
     }
 
@@ -667,10 +732,6 @@ impl EndpointCase {
             .args(args)
             .current_dir(&self.workspace)
             .env(
-                "TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK",
-                "1",
-            )
-            .env(
                 "PATH",
                 format!(
                     "{}:{}",
@@ -695,6 +756,8 @@ impl EndpointCase {
             "TEAM_AGENT_TEAM_ID",
             "TEAM_AGENT_WORKSPACE",
             "TEAM_AGENT_OWNER_TEAM_ID",
+            // R-CEC10 B1: no fake no-spawn harness gate; restart takes the physical spawn path.
+            "TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK",
         ] {
             command.env_remove(key);
         }
@@ -892,6 +955,19 @@ tasks: []
         session = TEAM_SESSION,
         workspace = workspace.display()
     );
+    // Without the harness spec fallback, restart compiles the runtime spec from the role
+    // definitions (TEAM.md + agents/*.md); session_name stays the state override.
+    std::fs::write(
+        workspace.join("TEAM.md"),
+        format!("---\nname: {TEAM}\nobjective: claim endpoint convergence contract.\nprovider: fake\ndisplay_backend: none\n---\n\nTeam.\n"),
+    )
+    .expect("write TEAM.md");
+    std::fs::create_dir_all(workspace.join("agents")).expect("create agents dir");
+    std::fs::write(
+        workspace.join("agents").join(format!("{WORKER}.md")),
+        format!("---\nname: {WORKER}\nrole: {WORKER}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nfake worker\n"),
+    )
+    .expect("write worker role doc");
     std::fs::write(workspace.join("team.spec.yaml"), &spec).expect("write root team.spec.yaml");
     let runtime_spec_dir = workspace.join(".team/runtime").join(TEAM);
     std::fs::create_dir_all(&runtime_spec_dir).expect("create runtime spec dir");
@@ -899,7 +975,7 @@ tasks: []
         .expect("write runtime team.spec.yaml");
 }
 
-fn fake_tmux_bin(workspace: &Path, old_endpoint: OldEndpoint) -> PathBuf {
+fn fake_tmux_bin(workspace: &Path, old_endpoint: OldEndpoint, respawn_pid: u32) -> PathBuf {
     let bin_dir = workspace.join("fake-bin");
     std::fs::create_dir_all(&bin_dir).expect("create fake bin dir");
     let tmux = bin_dir.join("tmux");
@@ -913,14 +989,20 @@ fn fake_tmux_bin(workspace: &Path, old_endpoint: OldEndpoint) -> PathBuf {
         LIVE_LEADER_PID,
     );
     let old_line = pane_line("%8", TEAM_SESSION, WORKER, "codex", workspace, OLD_LIVE_PID);
+    let respawn_line = pane_line(RESPAWN_PANE, TEAM_SESSION, WORKER, "fake", workspace, respawn_pid);
+    let spawned_marker = workspace.join("fake-tmux-spawned");
     let old_live = matches!(old_endpoint, OldEndpoint::Live);
     let script = format!(
         r#"#!/bin/sh
 endpoint="default"
+target=""
 previous=""
 for arg in "$@"; do
   if [ "$previous" = "-S" ]; then
     endpoint="$arg"
+  fi
+  if [ "$previous" = "-t" ]; then
+    target="$arg"
   fi
   previous="$arg"
 done
@@ -940,9 +1022,28 @@ case "$endpoint" in
     ;;
   *)
     case " $* " in
-      *" list-panes "*) printf '%s' '{new_line}'; exit 0 ;;
+      *" list-panes "*)
+        printf '%s' '{new_line}'
+        if [ -f '{spawned_marker}' ]; then printf '%s' '{respawn_line}'; fi
+        exit 0 ;;
       *" list-sessions "*) printf '%s\n' '{leader_session}: 1 windows'; exit 0 ;;
-      *" display-message "*) printf '%s\n' '{leader_pid}'; exit 0 ;;
+      *" new-session "*"{team_session}"*|*" new-window "*"{team_session}"*)
+        : > '{spawned_marker}'
+        printf '%s\n' '{respawn_pane}'
+        exit 0 ;;
+      *" kill-pane "*"{respawn_pane}"*|*" kill-session "*"{team_session}"*)
+        rm -f '{spawned_marker}'
+        exit 0 ;;
+      *" display-message "*)
+        if [ "$target" = '{respawn_pane}' ]; then
+          if [ ! -f '{spawned_marker}' ]; then echo "can't find pane: $target" >&2; exit 1; fi
+          case " $* " in
+            *pane_pid*) printf '%s\n' '{respawn_pid}' ;;
+            *) printf '%s\n' '{respawn_pane}' ;;
+          esac
+          exit 0
+        fi
+        printf '%s\n' '{leader_pid}'; exit 0 ;;
       *" has-session "*) exit 0 ;;
       *) exit 0 ;;
     esac
@@ -954,6 +1055,10 @@ esac
         old_live = if old_live { "true" } else { "false" },
         old_line = shell_single_quoted_payload(&old_line),
         new_line = shell_single_quoted_payload(&new_line),
+        respawn_line = shell_single_quoted_payload(&respawn_line),
+        spawned_marker = shell_single_quoted_payload(&spawned_marker.to_string_lossy()),
+        respawn_pane = RESPAWN_PANE,
+        respawn_pid = respawn_pid,
         team_session = TEAM_SESSION,
         leader_session = LEADER_SESSION,
         leader_pid = LIVE_LEADER_PID,
