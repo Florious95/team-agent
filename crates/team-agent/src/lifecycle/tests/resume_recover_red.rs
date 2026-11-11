@@ -41,7 +41,7 @@ fn restart_repairs_missing_resume_session_from_events_before_resume_decision() {
         )
         .unwrap();
     let _env = fixture.bounded_provider_home_env(&["sess-from-events"]);
-    let transport = ResumeTransport::new();
+    let transport = ResumeTransport::new(&fixture.team);
 
     let report = restart_with_transport(&fixture.team, false, None, &transport)
         .expect("restart should repair missing session from events and continue to resume");
@@ -110,7 +110,7 @@ fn restart_does_not_resurrect_tombstoned_event_session_and_refuses_without_allow
         .unwrap();
     // The tombstoned session still has copilot backing: only the tombstone may block it.
     let _env = fixture.bounded_provider_home_env(&["sess-tombstoned"]);
-    let transport = ResumeTransport::new();
+    let transport = ResumeTransport::new(&fixture.team);
 
     let report = restart_with_transport(&fixture.team, false, None, &transport)
         .expect("tombstoned event recovery should produce an honest typed refusal, not an error");
@@ -266,12 +266,17 @@ impl Drop for EnvGuard {
 
 #[derive(Default)]
 struct ResumeTransport {
-    spawned: Mutex<bool>,
+    spawned: Mutex<Option<SpawnResult>>,
+    ownership: crate::transport::test_support::OfflineTransport,
 }
 
 impl ResumeTransport {
-    fn new() -> Self {
-        Self::default()
+    fn new(workspace: &Path) -> Self {
+        let state = load_runtime_state(workspace).unwrap();
+        // 9d07405b / 3e3eb288: the fake session carries the fixture's real scope tags.
+        Self { ownership: crate::transport::test_support::OfflineTransport::new().with_session_owner(
+            workspace, crate::state::projection::team_state_key(&state), state["generation"].as_str().unwrap_or("")),
+            ..Self::default() }
     }
 }
 
@@ -288,13 +293,14 @@ impl Transport for ResumeTransport {
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        *self.spawned.lock().unwrap() = true;
-        Ok(SpawnResult {
+        let spawned = SpawnResult {
             pane_id: PaneId::new("%10"),
             session: session.clone(),
             window: window.clone(),
             child_pid: Some(10_010),
-        })
+        };
+        *self.spawned.lock().unwrap() = Some(spawned.clone());
+        Ok(spawned)
     }
 
     fn spawn_into(
@@ -335,26 +341,33 @@ impl Transport for ResumeTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        if !*self.spawned.lock().unwrap() {
-            return Ok(Vec::new());
-        }
+        let spawned = self.spawned.lock().unwrap();
+        let Some(spawned) = spawned.as_ref() else { return Ok(Vec::new()); };
         Ok(vec![PaneInfo {
-            pane_id: PaneId::new("%10"),
-            session: SessionName::new("team-resumeteam"),
+            pane_id: spawned.pane_id.clone(),
+            session: spawned.session.clone(),
             window_index: Some(0),
-            window_name: Some(WindowName::new("worker_a")),
+            window_name: Some(spawned.window.clone()),
             pane_index: Some(0),
             tty: None,
             current_command: Some("copilot".to_string()),
             current_path: None,
             active: true,
-            pane_pid: Some(10_010),
+            pane_pid: spawned.child_pid,
             leader_env: BTreeMap::new(),
         }])
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
         Ok(true)
+    }
+
+    fn session_owner(&self, session: &SessionName) -> Result<Option<crate::transport::SessionOwner>, TransportError> {
+        self.ownership.session_owner(session)
+    }
+
+    fn set_session_owner_with_generation(&self, session: &SessionName, workspace: &Path, team: &str, generation: &str) -> Result<(), TransportError> {
+        self.ownership.set_session_owner_with_generation(session, workspace, team, generation)
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
@@ -372,7 +385,7 @@ impl Transport for ResumeTransport {
 
     fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
         if pane.as_str() == "%10" {
-            *self.spawned.lock().unwrap() = false;
+            *self.spawned.lock().unwrap() = None;
         }
         Ok(())
     }

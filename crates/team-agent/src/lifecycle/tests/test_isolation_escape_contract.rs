@@ -126,7 +126,7 @@ fn r5_restart_auto_attach_registers_isolated_live_leader_entry() {
                 &case.workspace,
                 true,
                 Some(TEAM_KEY),
-                &RestartAutoAttachTransport::new(),
+                &RestartAutoAttachTransport::new(&case.workspace),
                 Some(1_000),
             )
         },
@@ -228,6 +228,13 @@ fn r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary() {
         "R6 setup: CLI contracts that manually isolate HOME/current_dir and scrub TMUX/TEAM_AGENT_* envs should satisfy the equivalent isolation marker"
     );
 
+    let cleared_env = r#"Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .env_clear().env("HOME", "/tmp/isolated-home").current_dir("/tmp/isolated-workspace");"#;
+    assert!(static_guard_offenders([("cleared.rs".into(), cleared_env.into())]).is_empty());
+    for missing in [".env_clear()", ".env(\"HOME\", \"/tmp/isolated-home\")"] {
+        assert_eq!(static_guard_offenders([("incomplete.rs".into(), cleared_env.replace(missing, ""))]).len(), 1,
+            "both env clearing and an isolated HOME are required");
+    }
     let files = dangerous_test_files();
     let offenders = static_guard_offenders(files);
     assert!(
@@ -315,6 +322,10 @@ fn static_guard_offenders(
 }
 
 fn has_manual_cli_env_isolation(source: &str) -> bool {
+    // B16: clearing the entire inherited environment subsumes the explicit scrub list.
+    if [".env_clear()", ".env(\"HOME\"", ".current_dir("].iter().all(|needle| source.contains(needle)) {
+        return true;
+    }
     [
         "CARGO_BIN_EXE_team-agent",
         "TEAM_AGENT_TEST_TMP",
@@ -610,23 +621,30 @@ impl Drop for RestartAutoAttachCase {
 #[derive(Clone, Default)]
 struct RestartAutoAttachTransport {
     pane_seq: Arc<Mutex<u64>>,
+    spawned: Arc<Mutex<Option<SpawnResult>>>,
+    ownership: crate::transport::test_support::OfflineTransport,
 }
 
 impl RestartAutoAttachTransport {
-    fn new() -> Self {
-        Self::default()
+    fn new(workspace: &Path) -> Self {
+        let state = load_runtime_state(workspace).unwrap();
+        // 9d07405b / 3e3eb288: match this fixture's workspace, team and generation.
+        Self { ownership: crate::transport::test_support::OfflineTransport::new().with_session_owner(
+            workspace, TEAM_KEY, state["generation"].as_str().unwrap_or("")), ..Self::default() }
     }
 
     fn spawn_result(&self, session: &SessionName, window: &WindowName) -> SpawnResult {
         let mut pane_seq = self.pane_seq.lock().unwrap();
         let pane = format!("%{}", *pane_seq);
         *pane_seq = pane_seq.saturating_add(1);
-        SpawnResult {
+        let spawned = SpawnResult {
             pane_id: PaneId::new(pane),
             session: session.clone(),
             window: window.clone(),
             child_pid: Some(4242),
-        }
+        };
+        *self.spawned.lock().unwrap() = Some(spawned.clone());
+        spawned
     }
 }
 
@@ -682,11 +700,25 @@ impl Transport for RestartAutoAttachTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(vec![])
+        let spawned = self.spawned.lock().unwrap();
+        Ok(spawned.iter().map(|spawned| PaneInfo {
+            pane_id: spawned.pane_id.clone(), session: spawned.session.clone(),
+            window_name: Some(spawned.window.clone()), pane_pid: spawned.child_pid,
+            window_index: None, pane_index: None, tty: None, current_command: Some("fake".into()),
+            current_path: None, active: true, leader_env: BTreeMap::new(),
+        }).collect())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
         Ok(true)
+    }
+
+    fn session_owner(&self, session: &SessionName) -> Result<Option<crate::transport::SessionOwner>, TransportError> {
+        self.ownership.session_owner(session)
+    }
+
+    fn set_session_owner_with_generation(&self, session: &SessionName, workspace: &Path, team: &str, generation: &str) -> Result<(), TransportError> {
+        self.ownership.set_session_owner_with_generation(session, workspace, team, generation)
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

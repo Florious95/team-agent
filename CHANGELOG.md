@@ -11,6 +11,7 @@
 - **Test isolation:** bound fixture process lifetimes and reap owned tmux roots, including the shutdown and lifecycle regression suites.
 - **Release packaging:** align the installer and all three platform packages at 0.6.0. Stop legacy callers before switching a live workspace to the new runtime.
 - **Explicit-stop persistence:** team start preserves explicitly stopped seats instead of resurrecting them. Use `team-agent start <agent>` to wake an individual stopped seat.
+- **Diagnostics:** doctor no longer runs HTTP profile smoke checks; its foreground L1–L6 probes stay scoped to the selected team.
 
 ## [0.5.129]
 

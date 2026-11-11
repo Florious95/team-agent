@@ -634,31 +634,13 @@ fn a07_leader_new_existing_exec_managed_new_session_and_attach_modes() {
                 assert!(!routed.argv.iter().any(|v| v == "--mode" || v == "rpc"));
             }
             if routed.mode == LeaderStartMode::NewTmuxSession {
-                // Execute the actual encoded shell payload against a recorder,
-                // not tmux or a real provider. This path execs, so exit normally.
-                executable(
-                    &f.env.root().join("pi-real"),
-                    &format!(
-                        "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\nexit 0\n",
-                        f.native_file().display()
-                    ),
-                );
-                let shell = routed.argv.last().unwrap();
-                assert!(shell.starts_with("cd "));
-                assert!(Command::new("/bin/sh")
-                    .args(["-c", shell])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success());
-                let bytes = fs::read(f.native_file()).unwrap();
-                let actual = bytes
-                    .split(|b| *b == 0)
-                    .take(routed.provider_argv.len() - 1)
-                    .map(|v| String::from_utf8(v.to_vec()).unwrap())
-                    .collect::<Vec<_>>();
-                assert_eq!(actual, routed.provider_argv[1..]);
+                // 1d2d4d5a / e0652b62: provider spawn argv and native client attach argv are separate.
+                let target = format!("{}:{}", routed.session_name.as_ref().unwrap().as_str(),
+                    routed.leader_window.as_ref().unwrap().as_str());
+                assert_eq!(routed.argv.first().map(String::as_str), Some("tmux"));
+                assert!(routed.argv.iter().any(|arg| arg == "attach-session"));
+                assert!(routed.argv.windows(2).any(|pair| pair[0] == "-t" && pair[1] == target));
+                assert!(!routed.argv.iter().any(|arg| arg == "--mode" || arg == "rpc"));
             }
             samples.push((base.provider_argv, routed.provider_argv));
         }
@@ -1163,8 +1145,11 @@ fn a10_live_start_noop_is_not_validated_against_bad_route_config() {
     });
     f.raw("invalid JSON");
     f.switch(Some("on"));
+    let state = load_runtime_state(&f.ws).unwrap();
     let t = offline()
         .with_session_present(true)
+        // 9d07405b / 3e3eb288: this live session belongs to the fixture's current incarnation.
+        .with_session_owner(&f.ws, "argvteam", state["generation"].as_str().unwrap())
         .with_targets(vec![live_pane(&f.ws)])
         .with_windows(vec![WindowName::new("worker")])
         .with_liveness("%old", crate::transport::PaneLiveness::Live);

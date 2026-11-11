@@ -314,7 +314,9 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
             .and_then(serde_json::Value::as_str),
         Some(receiver_socket)
     );
+    // 9d07405b / 3e3eb288: every live fake session belongs to its fixture workspace/team.
     let success_transport = OfflineTransport::new()
+        .with_session_owner(&success_team, "dynamic-success", "")
         .with_session_present(true)
         .with_tmux_endpoint(worker_socket);
     crate::lifecycle::add_agent_with_transport(
@@ -383,7 +385,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     let pi_success_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
     let (pi_success_team, pi_success_role_path) =
         dynamic_add_fixture(&dynamic_root, "dynamic-pi-success", pi_success_role);
-    let pi_success_transport = OfflineTransport::new().with_session_present(true);
+    let pi_success_transport = OfflineTransport::new().with_session_present(true)
+        .with_session_owner(&pi_success_team, "dynamic-pi-success", "");
     crate::lifecycle::add_agent_with_transport(
         &pi_success_team,
         &AgentId::new("mate"),
@@ -431,7 +434,8 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
         dynamic_add_fixture(&dynamic_root, "dynamic-rollback", fake_role);
     let events_path = rollback_team.join(".team/logs/events.jsonl");
     std::fs::create_dir_all(&events_path).expect("make the start event write fail after spawn");
-    let rollback_transport = OfflineTransport::new().with_session_present(true);
+    let rollback_transport = OfflineTransport::new().with_session_present(true)
+        .with_session_owner(&rollback_team, "dynamic-rollback", "");
     let rollback = crate::lifecycle::add_agent_with_transport(
         &rollback_team,
         &AgentId::new("mate"),
@@ -455,6 +459,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
     let pi_role = "---\nname: mate\nrole: Pi Dynamic Worker\nprovider: pi\nmodel: team-agent/qwen3.8-27b\nauth_mode: subscription\neffort: max\ntools:\n  - mcp_team\ndangerously_skip_permissions: true\n---\n\ndynamic pi\n";
     let (noop_team, noop_role) = dynamic_add_fixture(&dynamic_root, "dynamic-noop", pi_role);
     let noop_transport = OfflineTransport::new()
+        .with_session_owner(&noop_team, "dynamic-noop", "")
         .with_session_present(true)
         .with_windows(vec![WindowName::new("mate")]);
     let noop = crate::lifecycle::add_agent_with_transport(
@@ -474,6 +479,7 @@ fn pi_leader_and_teammate_body(hermetic: &HermeticTestEnv) {
 
     let (dead_team, dead_role) = dynamic_add_fixture(&dynamic_root, "dynamic-dead", fake_role);
     let dead_transport = OfflineTransport::new()
+        .with_session_owner(&dead_team, "dynamic-dead", "")
         .with_session_present(true)
         .with_spawned_panes_addressable(false);
     let dead = crate::lifecycle::add_agent_with_transport(

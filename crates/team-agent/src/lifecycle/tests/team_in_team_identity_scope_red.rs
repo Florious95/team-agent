@@ -68,35 +68,27 @@ fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
 }
 
 #[test]
+#[cfg(unix)]
+#[serial(env)]
 fn quick_start_workspace_override_is_not_dropped_before_runtime_state_write() {
-    let cli_types =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/types.rs")).unwrap();
-    let quick_start_args = source_section(
-        &cli_types,
-        "pub struct QuickStartArgs",
-        "pub struct SendArgs",
-    );
-    assert!(
-        quick_start_args.contains("pub workspace: PathBuf"),
-        "quick-start TEAMDIR --workspace WS must preserve WS in QuickStartArgs; otherwise runtime state is written to TEAMDIR's parent before lifecycle can honor --workspace. QuickStartArgs={quick_start_args}"
-    );
-
-    let cli_mod =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/mod.rs")).unwrap();
-    let lifecycle_port = source_section(&cli_mod, "pub fn quick_start(", "pub fn start_leader");
-    assert!(
-        !lifecycle_port.contains("let _ = workspace;"),
-        "lifecycle_port::quick_start must not discard --workspace; runtime state must be written to the explicit WS. source={lifecycle_port}"
-    );
-
-    let emit =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs")).unwrap();
-    let quick_start_args_fn = source_section(&emit, "fn quick_start_args", "fn resolve_cli_path");
-    assert!(
-        quick_start_args_fn.contains("workspace: workspace.clone()")
-            || quick_start_args_fn.contains("workspace,"),
-        "quick_start_args must carry parsed --workspace into QuickStartArgs, not use it only to resolve a relative TEAMDIR. source={quick_start_args_fn}"
-    );
+    // 1d2d4d5a / e0652b62: exercise the public replacement, not removed handler names.
+    let env = hermetic_guard::HermeticTestEnv::enter_with_leader("workspace-override");
+    let source = write_team_dir(&env.workspace("source-root"), "source", "worker");
+    let caller = env.workspace("caller");
+    let workspace = env.workspace("override");
+    let output = env.run_cli(&caller, &["start", "--from", source.to_str().unwrap(),
+        "--workspace", workspace.to_str().unwrap(), "--json"]);
+    assert!(output.status.success(), "start refused: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let state = load_runtime_state(&workspace).unwrap();
+    assert_eq!(state["workspace"], json!(workspace.to_string_lossy()));
+    assert_eq!(state["agents"]["worker"]["spawn_cwd"], json!(workspace.to_string_lossy()));
+    for unintended in [source.as_path(), caller.as_path(), source.parent().unwrap()] {
+        assert!(!crate::state::persist::runtime_state_path(unintended).exists(),
+            "runtime state escaped the requested workspace: {}", unintended.display());
+    }
 }
 
 #[test]
@@ -199,13 +191,6 @@ fn assert_ready(label: &str, report: &QuickStartReport, expected_session: &str) 
         ),
         other => panic!("{label}: expected Ready, got {other:?}"),
     }
-}
-
-fn source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-    let idx = source.find(start).expect("source start marker");
-    let rest = &source[idx..];
-    let end_idx = rest.find(end).unwrap_or(rest.len());
-    &rest[..end_idx]
 }
 
 fn insert_agent_in_state(state: &mut Value, agent_id: &str) {
