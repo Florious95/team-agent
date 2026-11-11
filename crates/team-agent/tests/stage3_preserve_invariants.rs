@@ -694,6 +694,34 @@ fn prop_unified_start_dry_run_policy_matrix_is_typed_and_read_only() {
 fn unified_start_rejects_conflicting_session_flags_without_side_effects() {
     let team = Team::new("flags");
     team.start_team();
+    // Live team: both restart forms replace the live cohort through one `restart_team`
+    // step (ee19919a runtime.rs:919-947). While physical identity is still unverified
+    // right after start, the planner answers with the typed planning refusal; only that
+    // reply may be retried, for at most 5 s.
+    let unverified = |value: &Value| {
+        let error = value["error"].as_str().unwrap_or_default();
+        value["ok"] == false
+            && value["phase"] == "planning_or_selection"
+            && (error.contains("unverified") || error.contains("unknown physical identity"))
+    };
+    for (args, policy) in [
+        (&["team", "restart", "--dry-run", "--json"][..], "auto"),
+        (&["restart", "--dry-run", "--json"][..], "preserve"),
+    ] {
+        let before = snapshot(&team.root);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut code, mut value) = team.json(args);
+        while code == Some(1) && unverified(&value) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(250));
+            (code, value) = team.json(args);
+        }
+        assert!(
+            code == Some(0) && value["session_policy"] == policy && first_step(&value)["action"] == "restart_team",
+            "{args:?}: a live team restart plans restart_team with its {policy} default: {value}"
+        );
+        let changed = snapshot_diff(&before, &snapshot(&team.root));
+        assert!(changed.is_empty(), "{args:?}: dry run wrote {changed:?}");
+    }
     team.stop_and_assert_clean();
     for args in [
         &["start", "w1", "--allow-fresh", "--session", "fresh", "--dry-run", "--json"][..],
@@ -719,16 +747,38 @@ fn unified_start_rejects_conflicting_session_flags_without_side_effects() {
         code == Some(0) && value["session_policy"] == "auto" && first_step(&value)["action"] == "start_agent",
         "agent restart defaults to --session auto and plans a unified agent start: {value}"
     );
-    let (code, value) = team.json(&["team", "restart", "--dry-run", "--json"]);
+    // Shut-down team: since A14 (373efa16) a verified stop persists the shutdown, and
+    // the restart planner then plans one `start_agent` per stopped seat instead of a
+    // `restart_team` (ee19919a runtime.rs:919-947). Both forms keep their defaults.
+    let status = team.status();
     assert!(
-        code == Some(0) && value["session_policy"] == "auto" && first_step(&value)["action"] == "restart_team",
-        "{value}"
+        ["w1", "w2"].iter().all(|agent| status.get(*agent).map(String::as_str) == Some("stopped")),
+        "precondition: team stop leaves w1 and w2 stopped: {status:?}"
     );
-    let (code, value) = team.json(&["restart", "--dry-run", "--json"]);
-    assert!(
-        code == Some(0) && value["session_policy"] == "preserve" && first_step(&value)["action"] == "restart_team",
-        "legacy bare restart keeps its preserve default: {value}"
-    );
+    for (args, policy) in [
+        (&["team", "restart", "--dry-run", "--json"][..], "auto"),
+        (&["restart", "--dry-run", "--json"][..], "preserve"),
+    ] {
+        let before = snapshot(&team.root);
+        let (code, value) = team.json(args);
+        let steps = value["steps"].as_array().cloned().unwrap_or_default();
+        let agents: std::collections::BTreeSet<&str> =
+            steps.iter().filter_map(|step| step["agent"].as_str()).collect();
+        assert!(
+            code == Some(0)
+                && value["session_policy"] == policy
+                && steps.len() == 2
+                && steps.iter().all(|step| step["action"] == "start_agent")
+                && agents == std::collections::BTreeSet::from(["w1", "w2"]),
+            "{args:?}: a shut-down team restart plans one start_agent per stopped seat with its {policy} default: {value}"
+        );
+        assert!(
+            !steps.iter().any(|step| step["action"] == "restart_team"),
+            "{args:?}: a shut-down team has no live cohort to restart: {value}"
+        );
+        let changed = snapshot_diff(&before, &snapshot(&team.root));
+        assert!(changed.is_empty(), "{args:?}: dry run wrote {changed:?}");
+    }
 }
 
 /// `start` never replaces or edits a running seat: an unchanged start is an
