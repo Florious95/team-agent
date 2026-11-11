@@ -94,6 +94,17 @@ impl SeatCase {
         case
     }
 
+    /// Worker session of `team` on this workspace's endpoint. B4 (5e1315ee):
+    /// compiler::default_session_name = team-<workspace short hash>-<slug(team)>;
+    /// slug keeps ASCII alphanumerics and their case, so teamA/teamB are verbatim.
+    fn session_for(&self, team: &str) -> String {
+        assert!(team.chars().all(|c| c.is_ascii_alphanumeric()), "{team}");
+        format!(
+            "team-{}-{team}",
+            team_agent::tmux_backend::workspace_short_hash_pub(&self.workspace)
+        )
+    }
+
     fn workspace_str(&self) -> &str {
         self.workspace.to_str().expect("workspace utf8")
     }
@@ -633,8 +644,8 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
     case.add_second_team_same_workspace("teamB", &["w1"]);
 
     // Distinguish the two same-named w1 windows by pane id on the shared socket.
-    let team_a_w1_before = case.pane_for_window_in_session("team-teamA", "w1");
-    let team_b_w1_before = case.pane_for_window_in_session("team-teamB", "w1");
+    let team_a_w1_before = case.pane_for_window_in_session(&case.session_for("teamA"), "w1");
+    let team_b_w1_before = case.pane_for_window_in_session(&case.session_for("teamB"), "w1");
     assert!(
         team_a_w1_before.is_some() && team_b_w1_before.is_some(),
         "fixture: both teams' w1 must be live on the shared endpoint before force"
@@ -643,7 +654,7 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
         team_a_w1_before, team_b_w1_before,
         "fixture: the two same-named w1 seats must be distinct panes on the shared socket"
     );
-    let peer_before = case.pane_for_window_in_session("team-teamA", "w2");
+    let peer_before = case.pane_for_window_in_session(&case.session_for("teamA"), "w2");
 
     // Kill teamA/w1's pane → zombie, then force-recreate it.
     case.kill_pane("w1"); // teamA is the case's own team
@@ -668,13 +679,13 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
         "Z5: add-agent --force on a zombie must exit 0 AND ok=true: {force}"
     );
     assert!(
-        case.pane_for_window_in_session("team-teamA", "w1")
+        case.pane_for_window_in_session(&case.session_for("teamA"), "w1")
             .is_some(),
-        "Z5: the zombie seat must be revived (live pane in team-teamA)"
+        "Z5: the zombie seat must be revived (live pane in teamA's session)"
     );
 
     // Positive isolation: same-team peer w2's pane is untouched.
-    let peer_after = case.pane_for_window_in_session("team-teamA", "w2");
+    let peer_after = case.pane_for_window_in_session(&case.session_for("teamA"), "w2");
     assert_eq!(
         peer_before, peer_after,
         "Z5: force-recreate must not disturb the same-team peer w2 (single-seat scope)"
@@ -682,7 +693,7 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
     // Negative (teeth-bearing on the SHARED endpoint): teamB's same-named w1
     // pane is byte-identical — a window-only resolver would have killed or
     // re-bound it because the window name `w1` collides on this socket.
-    let team_b_w1_after = case.pane_for_window_in_session("team-teamB", "w1");
+    let team_b_w1_after = case.pane_for_window_in_session(&case.session_for("teamB"), "w1");
     assert_eq!(
         team_b_w1_before, team_b_w1_after,
         "Z5 negative: force-recreate of teamA/w1 on a SHARED tmux endpoint must never touch \
