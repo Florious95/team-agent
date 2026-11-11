@@ -762,6 +762,118 @@
       "covered": false,
       "owner": "runtime-owner:public-cli",
       "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent agent clone <source> --as <new>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent agent fork <source> --as <new>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent agent remove <agent> --workspace . --confirm",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent agent reset <agent> --discard-session",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from .",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from ./roles --team alpha",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from .team/alpha",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from .team/current",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from <dir>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start --from <plain-text-team-dir>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start <agent>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start <agent> --role-file <file>",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start <agent_id> --workspace .",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start coder --workspace .",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent start reviewer --role-file .team/current/agents/reviewer.md --workspace .",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
+    },
+    {
+      "command": "team-agent stop --workspace .",
+      "bucket": "declared_gap",
+      "covered": false,
+      "owner": "runtime-owner:public-cli",
+      "plan": "Bind this exact documented argv to an isolated HermeticTestEnv result and an assertion/negative-twin pair before promotion. For lifecycle use an authorized owned team and verify scope, identity, outcome and cleanup; help or readonly plans alone do not establish lifecycle coverage."
     }
   ]
 }

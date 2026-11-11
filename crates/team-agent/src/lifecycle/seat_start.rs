@@ -92,9 +92,10 @@ pub fn resolve(
     };
     let mut original = source
         .as_ref()
-        .map(std::fs::read_to_string)
-        .transpose()
-        .map_err(rejected)?
+        .map(|path| std::fs::read_to_string(path).map_err(|error| {
+            rejected(format!("cannot read role file `{}`: {error}", path.display()))
+        }))
+        .transpose()?
         .unwrap_or_default();
     let (mut meta, body) = role_config::role_parts(&original)?;
     let declaration_paused = role_config::declaration_paused(&original)?;
@@ -301,12 +302,12 @@ pub(crate) fn unverified_start_guidance(
     let detail = super::carrier::pane_pid(row)
         .map(|pid| super::carrier::observe(row, pid).detail)
         .unwrap_or_else(|| "recorded carrier PID is missing or invalid".into());
-    let (action, command) = if observation == super::seat_observation::SeatObservation::NativeReconcile {
-        ("stop the scoped seat with", scoped_seat_command(request, "stop"))
+    let (action, command, before) = if observation == super::seat_observation::SeatObservation::NativeReconcile {
+        ("stop the scoped seat with", scoped_seat_command(request, "stop"), "applying changes or starting fresh")
     } else {
-        ("inspect with", status_command(request))
+        ("inspect with", status_command(request), "retrying")
     };
-    format!("agent ownership/liveness is unverified: {detail}; no unique live pane/carrier ownership match; {action} `{command}` before retrying")
+    format!("agent ownership/liveness is unverified: {detail}; no unique live pane/carrier ownership match; {action} `{command}` before {before}")
 }
 
 fn scoped_seat_command(request: &StartRequest, action: &str) -> String {
