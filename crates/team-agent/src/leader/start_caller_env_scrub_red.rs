@@ -440,9 +440,9 @@ fn physical_leader(tag: &str, provider: Provider, seed: &[(&str, &str)]) -> (Own
     let guard = OwnedTmux { root: root.clone(), socket: socket.clone() };
     let mut seed_cmd = Command::new("tmux");
     seed_cmd
-        .args(["-u", "-S"])
+        .args(["-S"])
         .arg(&socket)
-        .args(["-f", "/dev/null", "new-session", "-d", "-s", "seed", "-c"])
+        .args(["-u", "-f", "/dev/null", "new-session", "-d", "-s", "seed", "-c"])
         .arg(&workspace)
         .arg("exec sleep 300")
         .env_clear()

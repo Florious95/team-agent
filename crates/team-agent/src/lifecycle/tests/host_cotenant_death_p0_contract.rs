@@ -374,7 +374,12 @@ fn restart_all_carriers_gone_bad_spawn_identity_fails_closed() {
     let mut state = load_runtime_state(&workspace).unwrap();
     state["agents"]["developer"]["pane_pid"] = json!(pid);
     state["agents"]["developer"]["pane_birth_identity"] = json!(birth);
-    save_runtime_state(&workspace, &state).unwrap();
+    // Fixture provisioning, not a runtime PID replacement: keep the production save fence intact.
+    let row = state["agents"]["developer"].clone();
+    if let Some(team) = state.get_mut("teams").and_then(|teams| teams.get_mut(TEAM)) {
+        team["agents"]["developer"] = row;
+    }
+    fs::write(crate::state::persist::runtime_state_path(&workspace), serde_json::to_vec(&state).unwrap()).unwrap();
     assert!(crate::lifecycle::carrier::observe(&state["agents"]["developer"], pid).state.gone());
     let transport = CohortTransport::with_old_panes(&["developer"]).with_bad_spawn_identity();
     transport.kill_pane(&PaneId::new("%old-developer")).unwrap();
@@ -814,8 +819,13 @@ impl Transport for CohortTransport {
     }
 
 
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
-        self.state.lock().unwrap().session_kills += 1;
+    fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
+        // c8639440: the no-live-carrier path tears down first; model that physical effect.
+        let mut state = self.state.lock().unwrap();
+        state.session_kills += 1;
+        let killed = state.panes.iter().filter(|pane| &pane.session == session)
+            .map(|pane| pane.pane_id.as_str().to_string()).collect::<Vec<_>>();
+        state.killed.extend(killed);
         Ok(())
     }
 

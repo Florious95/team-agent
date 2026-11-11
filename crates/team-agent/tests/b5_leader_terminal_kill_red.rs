@@ -198,11 +198,11 @@ fn green_pure_worker_socket_server_still_torn_down() {
     let worker_session = SessionName::new("team-x");
     let keepalive = ws.join("worker.keepalive");
     std::fs::write(&keepalive, "worker\n").unwrap();
-    spawn_session(&backend, &worker_session, "w1", &keepalive, &ws);
+    let worker_pid = spawn_session(&backend, &worker_session, "w1", &keepalive, &ws);
     backend
         .set_session_owner_with_generation(&worker_session, &ws, "team-x", "team-x")
         .expect("mark worker session ownership");
-    let worker_pid = wait_pid_for_cmdline(&keepalive);
+    let worker_pid = wait_pid_for_cmdline(&keepalive, worker_pid);
     let server_pid = parent_pid(worker_pid).expect("worker pane must have a tmux server parent");
     write_team_state(&ws, worker_pid);
 
@@ -255,13 +255,13 @@ impl SocketFixture {
         std::fs::write(&leader_keepalive, "leader\n").unwrap();
         std::fs::write(&worker_keepalive, "worker\n").unwrap();
 
-        spawn_session(&backend, &leader_session, "leader", &leader_keepalive, ws);
-        spawn_session(&backend, &worker_session, "w1", &worker_keepalive, ws);
+        let leader_pid = spawn_session(&backend, &leader_session, "leader", &leader_keepalive, ws);
+        let worker_pid = spawn_session(&backend, &worker_session, "w1", &worker_keepalive, ws);
         backend
             .set_session_owner_with_generation(&worker_session, ws, "team-x", "team-x")
             .expect("mark worker session ownership");
-        let leader_pid = wait_pid_for_cmdline(&leader_keepalive);
-        let worker_pid = wait_pid_for_cmdline(&worker_keepalive);
+        let leader_pid = wait_pid_for_cmdline(&leader_keepalive, leader_pid);
+        let worker_pid = wait_pid_for_cmdline(&worker_keepalive, worker_pid);
         assert!(
             backend.has_session(&leader_session).unwrap_or(false)
                 && backend.has_session(&worker_session).unwrap_or(false),
@@ -291,13 +291,13 @@ fn spawn_session(
     window: &str,
     keepalive: &Path,
     cwd: &Path,
-) {
+) -> u32 {
     let argv = vec![
         "tail".to_string(),
         "-f".to_string(),
         keepalive.to_string_lossy().to_string(),
     ];
-    backend
+    let spawned = backend
         .spawn_first(
             session,
             &WindowName::new(window),
@@ -318,22 +318,22 @@ fn spawn_session(
             eprintln!("B5 pane {} pid {pid}: {}", pane.pane_id.as_str(), String::from_utf8_lossy(&output.stdout));
         }
     }
+    spawned.child_pid.expect("spawned tmux pane must report its PID")
 }
 
 /// Bounded wait for the keepalive process to be visible in the process table
 /// (tmux returns right after creating the pane; the pane shell exec is near-instant
 /// but not synchronous). Not a race in the assertion path — purely fixture readiness.
-fn wait_pid_for_cmdline(unique_path: &Path) -> u32 {
+fn wait_pid_for_cmdline(unique_path: &Path, pid: u32) -> u32 {
     let pattern = unique_path.to_string_lossy().to_string();
     for _ in 0..100 {
-        let out = Command::new("pgrep")
-            .args(["-n", "-f", &pattern])
+        // macOS pgrep depends on sysmond; inspect only the exact PID returned by our pane spawn.
+        let out = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
             .output()
-            .expect("run pgrep");
-        if out.status.success() {
-            if let Ok(pid) = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>() {
-                return pid;
-            }
+            .expect("inspect owned pane process");
+        if out.status.success() && String::from_utf8_lossy(&out.stdout).contains(&pattern) {
+            return pid;
         }
         std::thread::sleep(std::time::Duration::from_millis(30));
     }
@@ -351,7 +351,7 @@ fn pid_alive(pid: u32) -> bool {
 /// State fixture mirroring the real-machine `.team/runtime/state.json` shape
 /// (top-level + teams projection; agent row carries window/pane_pid/spawn_cwd).
 fn write_team_state(ws: &Path, worker_pid: u32) {
-    let agent_row = json!({
+    let mut agent_row = json!({
         "status": "running",
         "provider": "codex",
         "agent_id": "w1",
@@ -359,6 +359,9 @@ fn write_team_state(ws: &Path, worker_pid: u32) {
         "pane_pid": worker_pid,
         "spawn_cwd": ws.to_string_lossy(),
     });
+    // c8639440: recorded native birth identity is required before shutdown may signal the worker.
+    #[cfg(unix)]
+    { agent_row["pane_birth_identity"] = json!(team_agent_contract::host::process::process_birth_identity(worker_pid).unwrap()); }
     let state = json!({
         "session_name": "team-x",
         "team_key": "team-x",

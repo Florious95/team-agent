@@ -59,6 +59,8 @@ fn perf6_shutdown_ps_fork_budget_le_4() {
 residual-verification re-fetch + coordinator discover + headroom); got {forks} forks. \
 Python 0.2.11 shutdown forks ZERO ps; the RS scan machinery must bound its own cost."
     );
+    drop(_path_guard);
+    assert_shutdown_signals(&ws, &_children.iter().map(|child| child.id()).collect::<Vec<_>>());
 }
 
 /// Leader's loose regression bound (verdict `wallclock_low_load_under_5s`): on an idle
@@ -81,6 +83,7 @@ fn perf6_shutdown_wallclock_low_load_under_5s() {
 batched TERM->grace->KILL rework must remove the serial per-root sleep chain \
 (C-②: union TERM -> shared >=150ms grace -> union KILL -> single wait)"
     );
+    assert_shutdown_signals(&ws, &_children.iter().map(|child| child.id()).collect::<Vec<_>>());
 }
 
 /// C-①-3/4 + `single_snapshot_consumers_dont_call_ps_independently` (static): the
@@ -172,6 +175,7 @@ fn perf6_grace_window_slow_cleanup_not_killed() {
         "C-②-6: the TERM handler (100ms graceful exit) must complete inside the \
 >=150ms grace window without being preempted by SIGKILL; marker file missing"
     );
+    assert_shutdown_signals(&ws, &[pid]);
 }
 
 /// C-②-8 (GREEN lock `mixed_fast_slow_pid_get_correct_kill`): a fast-exiting pid and
@@ -216,6 +220,7 @@ fn perf6_mixed_fast_slow_kill_semantics() {
         "C-②-8 mixed kill semantics failed:\n{}",
         failures.join("\n")
     );
+    assert_shutdown_signals(&ws, &[fast, stubborn]);
 }
 
 /// Swallow batch 1 family contract: when the `ps` probe itself FAILS, shutdown must
@@ -278,6 +283,22 @@ fn seed_reapable_state(ws: &Path) -> Vec<FixtureGroup> {
     children
 }
 
+#[cfg(unix)]
+fn assert_shutdown_signals(ws: &Path, pids: &[u32]) {
+    let log = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap();
+    let signals = log.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["event"] == "transport.pre_kill_audit" && event["action"] == "signal-pid")
+        .collect::<Vec<_>>();
+    for pid in pids {
+        assert!(signals.iter().any(|event| event["targets"].as_array()
+            .is_some_and(|targets| targets.contains(&json!(pid.to_string())))),
+            "owned PID {pid} was not a shutdown signal target: {signals:?}");
+        assert!(!pid_alive(*pid), "owned PID {pid} survived before the fixture guard dropped");
+    }
+    eprintln!("PERF6 signal audit for {pids:?}: {signals:?}");
+}
+
+#[cfg(unix)]
 fn seed_state_with_pids(ws: &Path, pids: &[u32]) {
     let mut agents = serde_json::Map::new();
     for (index, pid) in pids.iter().enumerate() {
@@ -292,6 +313,8 @@ fn seed_state_with_pids(ws: &Path, pids: &[u32]) {
                 "agent_id": id,
                 "window": id,
                 "pane_pid": pid,
+                // c8639440: only the recorded birth identity authorizes signalling this carrier.
+                "pane_birth_identity": team_agent_contract::host::process::process_birth_identity(*pid).unwrap(),
                 "spawn_cwd": ws.to_string_lossy(),
                 // A captured session keeps shutdown's refresh_provider_sessions from
                 // scanning the provider home (the unbounded P2 read would eat the

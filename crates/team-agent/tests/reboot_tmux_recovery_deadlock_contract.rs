@@ -113,6 +113,27 @@ fn endpoint_convergence_refuses_old_endpoint_with_live_team_tuple() {
 
 #[test]
 #[serial(env)]
+fn claim_live_absolute_endpoint_converges_running_worker_bindings() {
+    // 0afe88c5: an explicitly observed absolute caller endpoint is the admission precondition.
+    let mut case = RecoveryCase::new("claim-live-absolute").with_old_server_live(false);
+    case.tmux_env_socket = case.workspace.join("live-caller.sock").to_string_lossy().into_owned();
+    case.seed_split_state(TEAM, TEAM_SESSION, OLD_SOCKET, OLD_SOCKET, true);
+    case.write_minimal_team_spec(TEAM, TEAM_SESSION);
+    let output = case.run_ta(&["claim-leader", "--workspace", case.workspace_str(),
+        "--team", TEAM, "--confirm", "--json", "--detail"]);
+    let result = json_output(&output, "live absolute claim");
+    assert!(output.status.success() && result["ok"] == true,
+        "claim must converge a dead-endpoint running worker without SaveConflict: {result}; {}", case.tmux_log());
+    assert_eq!(result.pointer("/topology_convergence/new_tmux_endpoint").and_then(Value::as_str),
+        Some(case.tmux_env_socket.as_str()));
+    let state = case.read_state();
+    assert_eq!(state["tmux_endpoint"], case.tmux_env_socket);
+    assert!(state["agents"][WORKER].get("pane_id").is_none());
+    assert_eq!(state["agents"][WORKER]["pane_pid"], OLD_WORKER_PID);
+}
+
+#[test]
+#[serial(env)]
 fn claim_uses_observed_target_endpoint_not_state_or_tmux_env() {
     let case = RecoveryCase::new("claim-observed-endpoint")
         .with_old_server_live(false)
