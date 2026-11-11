@@ -2169,6 +2169,7 @@ fn restart_spawn_loop_keeps_failure_isolation_guard() {
 fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
     use crate::transport::*;
     use std::collections::BTreeMap;
+    use std::path::Path;
     // 7cba7b44: pass the initial spawn-identity snapshot, then lose addressability.
     // Otherwise the earlier ownership refusal never exercises the N38 timeout oracle.
     struct MissingAfterSpawn(OfflineTransport);
