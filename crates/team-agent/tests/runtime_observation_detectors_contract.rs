@@ -53,6 +53,11 @@ fn observe_marks_codex_session_drift_without_vetoing_physical_send() {
     // Since M3 retired the observing coordinator, `status` is the lifecycle status (M4 send authority
     // admits only `running`); the drift marker lives in `session_drift`, which must not veto a send.
     state["agents"]["w1"]["status"] = json!("running");
+    // 4e8ff838: a bare snapshot is never routing authority for a native leaf
+    // (`codex` selects codex_tui), so this raw-snapshot receiver is a legacy,
+    // non-native provider row. The persisted drift marker is unchanged.
+    state["agents"]["w1"]["provider"] = json!("claude");
+    assert!(!team_agent::contract_runtime::registry::recognizes("claude"));
     state["teams"]["current"]["agents"]["w1"] = state["agents"]["w1"].clone();
     std::fs::write(
         team_agent::state::persist::runtime_state_path(&fixture.workspace),
@@ -69,8 +74,29 @@ fn observe_marks_codex_session_drift_without_vetoing_physical_send() {
     let value = serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null);
     assert!(out.status.success(), "physical send failed: {stdout} {stderr}");
     assert_eq!(value["delivery"], "physical");
-    receiver.received("Team Agent message from leader:\n\nhello");
-    assert_eq!(std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.workspace)).unwrap(), before);
+    // a68f07e4: an unbound CLI caller is labelled `operator`.
+    receiver.received("Team Agent message from operator:\n\nhello");
+    // cfd9eb90: physical delivery stamps the recipient's first interaction
+    // (`first_send_at`) and the state writer normalizes the document (top-level
+    // mirror, explicit nulls). Compare the team entry as msg_sendpath c1 does:
+    // the drift marker, session id, pane, socket and status stay unchanged.
+    let before: Value = serde_json::from_slice(&before).unwrap();
+    let after: Value = serde_json::from_slice(
+        &std::fs::read(team_agent::state::persist::runtime_state_path(&fixture.workspace)).unwrap()).unwrap();
+    let (observed, mut expected) = (&after["teams"]["current"], before["teams"]["current"].clone());
+    let stamp = observed["agents"]["w1"]["first_send_at"].as_str()
+        .expect("physical delivery stamps its recipient's first interaction");
+    assert!(chrono::DateTime::parse_from_rfc3339(stamp).is_ok(), "{stamp}");
+    expected["agents"]["w1"]["first_send_at"] = json!(stamp);
+    for (key, value) in observed.as_object().unwrap() {
+        match expected.get(key) {
+            Some(old) => assert_eq!(old, value, "send must not change {key}"),
+            None => assert!(value.is_null() || key == "active_team_key", "send added {key}: {value}"),
+        }
+    }
+    for key in expected.as_object().unwrap().keys() {
+        assert!(observed.get(key).is_some(), "send removed {key}");
+    }
     let _ = load_runtime_state(&fixture.workspace).expect("state stays readable");
 }
 

@@ -34,6 +34,10 @@ use team_agent::model::enums::ResultStatus;
 use team_agent::model::ids::{AgentId, TeamKey};
 
 const DEAD_PANE: &str = "%999";
+/// 4e8ff838: a bare snapshot is never routing authority for a native leaf
+/// (`codex` selects codex_tui), so raw-snapshot receivers in these oracles are
+/// legacy, non-native provider rows. Pi has Codex's no-floor dialect.
+const RAW_SNAPSHOT_PROVIDER: &str = "pi";
 const QUIET: Duration = Duration::from_millis(1500);
 
 // ───────────────────────────── fixture ─────────────────────────────
@@ -464,7 +468,7 @@ fn red_m1_r2_cli_fanout_one_dead_recipient_does_not_abort_the_rest() {
     let leader = s.receiver("leader");
     s.write_state(&snapshot(
         &s,
-        &[("alpha", team(&s, "alpha", Some(&leader), &[("dead", None, "pi"), ("live", Some(&live), "codex")]))],
+        &[("alpha", team(&s, "alpha", Some(&leader), &[("dead", None, "pi"), ("live", Some(&live), RAW_SNAPSHOT_PROVIDER)]))],
     ));
     let output = s.cli(&["send", "--to", "dead,live", "fan-out via cli", "--team", "alpha"], &[]);
     s.wait_received("live", b"fan-out via cli");
@@ -485,7 +489,7 @@ fn red_m1_r3_mcp_fanout_one_dead_recipient_does_not_abort_the_rest() {
         &[("alpha", team(&s, "alpha", Some(&leader), &[
             ("worker", Some(&leader), "pi"),
             ("dead", None, "pi"),
-            ("live", Some(&live), "codex"),
+            ("live", Some(&live), RAW_SNAPSHOT_PROVIDER),
         ]))],
     ));
     let result = s.tools("worker", "alpha").send_message_with_presentation(
@@ -511,7 +515,7 @@ fn red_m1_r4_stale_pane_id_after_server_restart_receives_zero_bytes() {
     let mut s = Station::new("r4");
     let first = s.receiver("first");
     let leader_alive = first.id.clone();
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&first), &[("worker", Some(&first), "codex")]))]));
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&first), &[("worker", Some(&first), RAW_SNAPSHOT_PROVIDER)]))]));
     let ok = s.cli(&["send", "worker", "before restart", "--team", "alpha"], &[]);
     assert!(ok.status.success(), "positive control: {}", String::from_utf8_lossy(&ok.stdout));
     s.wait_received("first", b"before restart");
@@ -726,7 +730,7 @@ fn red_m1_r6_cli_send_with_escape_bytes_is_delivered_neutralized() {
     let mut s = Station::new("r6");
     let worker = s.receiver("worker");
     let leader = s.receiver("leader");
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "codex")]))]));
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), RAW_SNAPSHOT_PROVIDER)]))]));
     let output = s.cli(&["send", "worker", "colored \u{1b}[31mred\u{1b}[0m text", "--team", "alpha"], &[]);
     assert!(output.status.success(), "ESC must not be refused: {}", String::from_utf8_lossy(&output.stdout));
     s.wait_received("worker", "colored \u{241b}[31mred\u{241b}[0m text".as_bytes());
@@ -742,7 +746,10 @@ fn red_m1_r6_cli_send_with_escape_bytes_is_delivered_neutralized() {
 fn red_m1_r6b_report_result_with_ansi_summary_is_reported_live() {
     let mut s = Station::new("r6b");
     let leader = s.receiver("leader");
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&leader), "pi")]))]));
+    // c28a675f: a pane registered as both leader and active worker is a
+    // collision that is never delivered to; the worker has its own pane.
+    let worker = s.receiver("worker");
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "pi")]))]));
     let value = report(&s.tools("worker", "alpha"), "build \u{1b}[32mOK\u{1b}[0m", None);
     assert_eq!(value["status"], "reported", "{value}");
     s.wait_received("leader", "build \u{241b}[32mOK".as_bytes());
@@ -757,7 +764,7 @@ fn red_m1_r7_oversized_message_is_truncated_live_and_stored_in_full() {
     let mut s = Station::new("r7");
     let worker = s.receiver("worker");
     let leader = s.receiver("leader");
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "codex")]))]));
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), RAW_SNAPSHOT_PROVIDER)]))]));
     let big = format!("{}END-OF-BIG-MESSAGE", "a".repeat(70_000));
     let output = s.cli(&["send", "worker", &big, "--team", "alpha"], &[]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -917,7 +924,7 @@ fn red_m1_r12_report_result_is_attributed_to_the_last_submitted_task() {
     let mut s = Station::new("r12");
     let worker = s.receiver("worker");
     let leader = s.receiver("leader");
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "codex")]))]));
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), RAW_SNAPSHOT_PROVIDER)]))]));
     let sent = s.cli(&["send", "worker", "please do T-42", "--task", "T-42", "--team", "alpha"], &[]);
     assert!(sent.status.success(), "{}", String::from_utf8_lossy(&sent.stdout));
     s.wait_received("worker", b"please do T-42");
@@ -1073,13 +1080,14 @@ fn guard_m1_g1_stopped_coordinator_and_locked_database_do_not_block_messaging() 
     let mut s = Station::new("g1");
     let worker = s.receiver("worker");
     let leader = s.receiver("leader");
-    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), "codex")]))]));
+    s.write_state(&snapshot(&s, &[("alpha", team(&s, "alpha", Some(&leader), &[("worker", Some(&worker), RAW_SNAPSHOT_PROVIDER)]))]));
     let db_path = s.root.join(".team/runtime/team.db");
     let db = rusqlite::Connection::open(&db_path).unwrap();
     db.execute_batch("create table messages(id text); begin exclusive; insert into messages values('held');")
         .unwrap();
     let before = fs::read(&db_path).unwrap();
-    let mut stopped = Command::new("sleep").arg("600").spawn().unwrap();
+    // Bounded (<=120s) even if this test panics before the explicit kill.
+    let mut stopped = Command::new("sleep").arg("110").spawn().unwrap();
     let pid = stopped.id().to_string();
     assert!(Command::new("kill").args(["-STOP", &pid]).status().unwrap().success());
     fs::write(s.root.join(".team/runtime/coordinator.pid"), &pid).unwrap();
