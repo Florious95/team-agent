@@ -12,8 +12,11 @@
 //! (ConPTY/Windows) or K4 ProviderAdapter methods (Stage 2) are out of scope.
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
+#[cfg(unix)]
+#[path = "support/proc_guard.rs"]
+mod proc_guard;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const MANIFEST: &str = include_str!("fixtures/stage1_excision_manifest.tsv");
 
@@ -523,29 +526,48 @@ fn excise_fifo_result_waiter_is_gone_from_messaging() {
 
 /// `wait --task` is backed by the retired FIFO/SQL waiter. Its refusal must stay
 /// fail-closed and name the real C3 replacement, not internal jargon.
+///
+/// Hermetic child: cleared environment, private HOME/cwd/TMUX_TMPDIR, and its own process
+/// group with a 60s lifeline, so a regressed blocking waiter is killed instead of hanging.
+#[cfg(unix)]
 #[test]
 fn excise_wait_refusal_names_the_public_inbox_replacement() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
     let workspace = std::env::temp_dir().join(format!(
         "stage1-wait-refusal-{}-{}",
         std::process::id(),
         chrono::Utc::now().timestamp_nanos_opt().unwrap()
     ));
     std::fs::create_dir_all(workspace.join("home")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
+    let tmux_root = proc_guard::TmuxRoot::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+    command
         .args(["wait", "--task", "task-1", "--workspace"])
         .arg(&workspace)
         .env_clear()
         .env("HOME", workspace.join("home"))
         .env("PATH", "/usr/bin:/bin")
-        .output()
-        .unwrap();
+        .current_dir(&workspace)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    tmux_root.configure(&mut command);
+    let mut child =
+        proc_guard::FixtureGroup::spawn(&mut command, &workspace, std::time::Duration::from_secs(60));
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    child.stdout.take().unwrap().read_to_end(&mut stdout).unwrap();
+    child.stderr.take().unwrap().read_to_end(&mut stderr).unwrap();
+    let status = child.wait().unwrap();
+    drop(child);
+    drop(tmux_root);
     let text = format!(
         "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
     let _ = std::fs::remove_dir_all(&workspace);
-    assert!(!output.status.success(), "wait must refuse: {text}");
+    assert!(!status.success(), "wait must refuse: {text}");
     assert!(
         text.contains("retired") && text.contains("team-agent inbox"),
         "wait refusal must say it is retired and point to `team-agent inbox`: {text}"

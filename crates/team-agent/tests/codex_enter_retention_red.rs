@@ -10,8 +10,13 @@
 //! The receiver is a fake Codex composer: python3, raw mode, bracketed paste enabled. It
 //! applies the rule measured on codex-cli 0.166.0. Enter while the draft's last token
 //! starts with `@`/`$` is consumed by the popup; otherwise Enter submits the draft as one turn.
-//! Everything runs on a private tmux server (`-S <tempdir>/tmux.sock -f /dev/null`).
+//! Everything runs on a private tmux server (`-S <TmuxRoot>/t.sock -f /dev/null`) whose
+//! socket root has a stdin-lifeline reaper (<=110s); every CLI child starts from a cleared
+//! environment with its own HOME, cwd and TMUX_TMPDIR.
 #![cfg(unix)]
+
+#[path = "support/proc_guard.rs"]
+mod proc_guard;
 
 use std::fs;
 use std::path::PathBuf;
@@ -78,6 +83,8 @@ struct CodexPane {
     root: PathBuf,
     socket: String,
     pane: String,
+    /// Dropped after `Drop::drop`: closing its lifeline kills any server left under it.
+    tmux_root: proc_guard::TmuxRoot,
 }
 
 impl CodexPane {
@@ -94,8 +101,13 @@ impl CodexPane {
         fs::create_dir_all(root.join("home")).unwrap();
         let script = root.join("codex_composer.py");
         fs::write(&script, RECEIVER).unwrap();
-        let socket = root.join("t.sock").to_string_lossy().into_owned();
-        let output = Command::new("tmux")
+        let tmux_root = proc_guard::TmuxRoot::new();
+        let socket = tmux_root.path().join("t.sock").to_string_lossy().into_owned();
+        let mut server = Command::new("tmux");
+        tmux_root.configure(&mut server);
+        let output = server
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .args(["-S", &socket, "-f", "/dev/null", "new-session", "-d", "-x", "120", "-y", "40",
                 "-P", "-F", "#{pane_id}", "-s", "codex-enter-red"])
             .arg(format!("python3 -I '{}' '{}'", script.display(), root.display()))
@@ -103,7 +115,7 @@ impl CodexPane {
             .unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let pane = String::from_utf8(output.stdout).unwrap().trim().to_string();
-        let fixture = Self { root, socket, pane };
+        let fixture = Self { root, socket, pane, tmux_root };
         fixture.wait(Duration::from_secs(5), || fixture.root.join("ready").exists());
         fixture
     }
@@ -140,11 +152,13 @@ impl CodexPane {
     fn cli(&self, args: &[&str]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command.args(args).args(["--workspace", self.root.to_str().unwrap(), "--json"]);
-        // Never run the real binary against the developer's real HOME.
-        command.env("HOME", self.root.join("home"));
-        for (key, _) in std::env::vars() {
-            if key.starts_with("TEAM_AGENT_") || key == "TMUX" || key == "TMUX_PANE" {
-                command.env_remove(key);
+        // Hermetic child: no caller TMUX/TEAM_AGENT_* identity, HOME, TMUX_TMPDIR or cwd is
+        // inherited from the developer or the test. Only tool lookup and locale cross over.
+        command.env_clear().env("HOME", self.root.join("home")).current_dir(&self.root);
+        self.tmux_root.configure(&mut command);
+        for key in ["PATH", "LANG", "LC_ALL", "LC_CTYPE"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
             }
         }
         command.output().unwrap()
