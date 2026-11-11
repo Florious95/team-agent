@@ -808,7 +808,8 @@ impl Transport for CohortTransport {
         }
         let state = self.state.lock().unwrap();
         Ok(state.panes.iter().filter(|pane| {
-            !self.hide_new_from_list_targets || !pane.pane_id.as_str().starts_with("%new-")
+            !state.killed.contains(pane.pane_id.as_str())
+                && (!self.hide_new_from_list_targets || !pane.pane_id.as_str().starts_with("%new-"))
         }).cloned().collect())
     }
 

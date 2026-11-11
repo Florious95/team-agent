@@ -41,7 +41,6 @@ const TEAM_SESSION: &str = "team-0529-current";
 const RETAINED_SESSION: &str = "team-0529-research";
 const LEADER_SESSION: &str = "leader-0529-recovery";
 const LIVE_LEADER_PID: u32 = 52_900;
-const OLD_WORKER_PID: u32 = 52_908;
 
 #[test]
 #[serial(env)]
@@ -105,7 +104,7 @@ fn endpoint_convergence_refuses_old_endpoint_with_live_team_tuple() {
             EndpointConvergenceDecision::RefuseLiveOldEndpoint { .. }
         ) && (debug.contains("old_team_tuple_live")
             || debug.contains(OLD_WORKER_PANE)
-            || debug.contains(&OLD_WORKER_PID.to_string())),
+            || debug.contains(&case.old_worker.id().to_string())),
         "RED3 guard: even if has-session is false, a live endpoint/session/window/pane/pid tuple for this team must still refuse convergence; no server-wide blanket allow. decision={debug} log={}",
         case.tmux_log()
     );
@@ -129,7 +128,7 @@ fn claim_live_absolute_endpoint_converges_running_worker_bindings() {
     let state = case.read_state();
     assert_eq!(state["tmux_endpoint"], case.tmux_env_socket);
     assert!(state["agents"][WORKER].get("pane_id").is_none());
-    assert_eq!(state["agents"][WORKER]["pane_pid"], OLD_WORKER_PID);
+    assert_eq!(state["agents"][WORKER]["pane_pid"], case.old_worker.id());
 }
 
 #[test]
@@ -339,6 +338,8 @@ fn status_summary_counts_ignore_stale_running() {
 }
 
 struct RecoveryCase {
+    old_worker: hermetic_guard::proc_guard::FixtureGroup,
+    old_worker_birth: String,
     env: hermetic_guard::HermeticTestEnv,
     workspace: PathBuf,
     fake_bin: PathBuf,
@@ -357,7 +358,13 @@ impl RecoveryCase {
         fs::create_dir_all(workspace.join(".team/runtime")).expect("create runtime dir");
         let fake_bin = workspace.join("fake-bin");
         fs::create_dir_all(&fake_bin).expect("create fake-bin");
+        // c8639440: stale workers must be owned carriers, never arbitrary host PID constants.
+        let old_worker = hermetic_guard::spawn_owned_coordinator(&workspace);
+        let old_worker_birth = team_agent_contract::host::process::process_birth_identity(old_worker.id())
+            .expect("live fixture carrier birth identity");
         Self {
+            old_worker,
+            old_worker_birth,
             env,
             workspace,
             fake_bin,
@@ -371,6 +378,13 @@ impl RecoveryCase {
 
     fn with_old_server_live(mut self, live: bool) -> Self {
         self.old_server_live = live;
+        if !live {
+            self.old_worker.kill().unwrap();
+            self.old_worker.wait().unwrap();
+            assert_ne!(team_agent_contract::host::process::process_birth_identity(self.old_worker.id()),
+                Some(self.old_worker_birth.clone()));
+            eprintln!("expired fixture carrier pid={} birth={}", self.old_worker.id(), self.old_worker_birth);
+        }
         self
     }
 
@@ -411,7 +425,7 @@ impl RecoveryCase {
                 WORKER,
                 "codex",
                 &self.workspace,
-                OLD_WORKER_PID,
+                self.old_worker.id(),
             )
         } else {
             String::new()
@@ -530,7 +544,7 @@ esac
             "tmux_endpoint": OLD_SOCKET,
             "tmux_socket": self.new_socket(),
             "agents": {
-                WORKER: running_worker()
+                WORKER: running_worker(self)
             },
             "teams": {
                 TEAM: {
@@ -540,7 +554,7 @@ esac
                     "tmux_endpoint": OLD_SOCKET,
                     "tmux_socket": self.new_socket(),
                     "agents": {
-                        WORKER: running_worker()
+                        WORKER: running_worker(self)
                     }
                 }
             }
@@ -587,7 +601,7 @@ esac
             "tmux_socket": root_socket,
             "tmux_socket_source": "stale_state",
             "agents": {
-                WORKER: running_worker()
+                WORKER: running_worker(self)
             },
             "teams": {
                 team: {
@@ -599,7 +613,7 @@ esac
                     "tmux_socket": root_socket,
                     "tmux_socket_source": "stale_state",
                     "agents": {
-                        WORKER: running_worker()
+                        WORKER: running_worker(self)
                     }
                 }
             }
@@ -755,7 +769,7 @@ tasks: []
     }
 }
 
-fn running_worker() -> Value {
+fn running_worker(case: &RecoveryCase) -> Value {
     json!({
         "id": WORKER,
         "name": WORKER,
@@ -764,8 +778,9 @@ fn running_worker() -> Value {
         "status": "running",
         "worker_state": "PROBABLY_IDLE",
         "pane_id": OLD_WORKER_PANE,
-        "pane_pid": OLD_WORKER_PID,
-        "pid": OLD_WORKER_PID,
+        "pane_pid": case.old_worker.id(),
+        "pid": case.old_worker.id(),
+        "pane_birth_identity": case.old_worker_birth,
         "process_started": true
     })
 }

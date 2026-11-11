@@ -275,10 +275,13 @@ clean fake-green; result={result_text}"
 /// State with two bounded, pipe-bound test-owned children registered as pane pids.
 #[cfg(unix)]
 fn seed_reapable_state(ws: &Path) -> Vec<FixtureGroup> {
-    let children = vec![
-        FixtureGroup::presence(ws, std::time::Duration::from_secs(30)),
-        FixtureGroup::presence(ws, std::time::Duration::from_secs(30)),
-    ];
+    // c8639440: birth identity and real argv ownership must both authorize the measured kills.
+    let children: Vec<_> = (0..2).map(|_| {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "read _; exit 0", "fixture-worker", "--workspace"])
+            .arg(ws).current_dir(ws);
+        FixtureGroup::spawn(&mut command, ws, std::time::Duration::from_secs(30))
+    }).collect();
     seed_state_with_pids(ws, &[children[0].id(), children[1].id()]);
     children
 }
