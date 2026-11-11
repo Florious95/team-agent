@@ -97,6 +97,29 @@ fn unscoped_doctor_refuses_multiple_alive_teams_without_following_active_pointer
 }
 
 #[test]
+fn invalid_workspace_refuses_without_creation_guidance_or_filesystem_changes() {
+    let scratch = Scratch::new();
+    let missing = scratch.0.join("nonexistent-workspace");
+    let file = scratch.0.join("not-a-directory");
+    fs::write(&file, "fixture").unwrap();
+    for workspace in [&missing, &file] {
+        let result = run(&args(workspace.clone()));
+        assert_eq!(result.exit, super::super::ExitCode::Error);
+        let text = output(result);
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["links"][0]["status"], "FAIL");
+        let message = value["links"][0]["message"].as_str().unwrap();
+        assert!(message.contains("invalid workspace") && message.contains(workspace.to_str().unwrap()), "{text}");
+        assert!(!text.contains("create it with") && !text.contains("team-agent start") && !text.contains("team-agent status"), "{text}");
+        assert!(value["next_action"]["argv"].as_array().unwrap().is_empty());
+        assert!(value["next_action"]["context"].as_str().unwrap().contains("--workspace"));
+    }
+    assert!(!missing.exists());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "fixture");
+    assert_eq!(fs::read_dir(&scratch.0).unwrap().count(), 1);
+}
+
+#[test]
 fn missing_named_team_advises_creation_without_writing_files() {
     let scratch = Scratch::new();
     let mut request = args(scratch.0.clone());

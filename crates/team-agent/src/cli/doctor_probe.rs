@@ -573,7 +573,10 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let caller = caller();
     let ambiguity = args.team.is_none().then(|| crate::direct_delivery::directory_with_reason(&args.workspace, None).err())
         .flatten().filter(|error| error.code == "name_ambiguous");
-    let selected = if let Some(error) = ambiguity {
+    let valid_workspace = args.workspace.is_dir();
+    let selected = if !valid_workspace {
+        Err(crate::state::StateError::TeamSelect(format!("invalid workspace: {}", args.workspace.display())))
+    } else if let Some(error) = ambiguity {
         Err(crate::state::StateError::TeamSelect(format!("ambiguous team selection: {}", error.message)))
     } else { crate::state::selector::resolve_active_team_readonly(
         &args.workspace,
@@ -650,12 +653,12 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
             let caller_scope = (args.team.is_none() && !ambiguous).then(|| caller_team(&raw, &caller)).flatten();
             let team = args.team.clone().or_else(|| caller_scope.clone())
                 .unwrap_or_else(|| if ambiguous { "<unselected>" } else { "current" }.into());
-            let missing_runtime = [".team/runtime/state.json", ".team/state.json"].iter().all(|path| {
+            let missing_runtime = valid_workspace && [".team/runtime/state.json", ".team/state.json"].iter().all(|path| {
                 fs::metadata(args.workspace.join(path)).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             });
-            let missing_team = missing_runtime || args.team.as_deref().is_some_and(|team| {
+            let missing_team = valid_workspace && (missing_runtime || args.team.as_deref().is_some_and(|team| {
                 error.starts_with(&format!("team '{team}' not found."))
-            });
+            }));
             let error = if missing_runtime {
                 format!("team '{team}' has no runtime state in this workspace")
             } else {
@@ -668,7 +671,8 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                         n,
                         if n == 1 { "FAIL" } else { "BLOCKED" },
                         if n == 1 {
-                            if missing_team { format!("{}; create it with `{create}`", short(&error)) } else { short(&error) }
+                            if missing_team { format!("{}; create it with `{create}`", short(&error)) }
+                            else if !valid_workspace { error.clone() } else { short(&error) }
                         } else {
                             "requires L1".into()
                         },
@@ -681,7 +685,8 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
                 &team,
                 caller,
                 (0, 0),
-                Some(if ambiguous { Action::manual(format!("select a team explicitly: team-agent doctor --workspace {} --team <NAME> --json", super::shell_quote(&args.workspace.to_string_lossy()))) }
+                Some(if !valid_workspace { Action::manual("correct --workspace to an existing directory".into()) }
+                else if ambiguous { Action::manual(format!("select a team explicitly: team-agent doctor --workspace {} --team <NAME> --json", super::shell_quote(&args.workspace.to_string_lossy()))) }
                 else if missing_team { Action::manual(create) } else { action(
                     if caller_scope.is_some() { "doctor" } else { "status" },
                     &args.workspace,
