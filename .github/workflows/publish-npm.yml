@@ -86,16 +86,22 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure tmux and Python for tests
+      - &test-prerequisites
+        name: Ensure tmux and Python for tests
         run: |
           if ! command -v tmux >/dev/null || ! command -v python3 >/dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y tmux python3
+            if [ "$RUNNER_OS" = Linux ]; then
+              sudo apt-get update
+              sudo apt-get install -y tmux python3
+            else
+              brew install tmux python
+            fi
           fi
           tmux -V
           python3 --version
 
-      - name: Prepare isolated serial test environment
+      - &test-environment
+        name: Prepare isolated serial test environment
         run: |
           set -euo pipefail
           test_root="$(mktemp -d /tmp/ta-ci.XXXXXXXX)"
@@ -110,12 +116,17 @@ jobs:
           {
             echo "RUST_TEST_THREADS=1"
             echo "TERM=xterm-256color"
-            # Match native tmux's default root; fixtures isolate their own sockets.
-            echo "TMPDIR=/tmp"
+            # Match native tmux on Linux; retain the native macOS temporary root.
+            if [ "$RUNNER_OS" = Linux ]; then
+              echo "TMPDIR=/tmp"
+            else
+              echo "TMPDIR=${TMPDIR:-/tmp}"
+            fi
           } >> "$GITHUB_ENV"
           printf 'Public Python: %s\nTest root: %s\n' "$python" "$test_root"
 
-      - name: Record test environment
+      - &test-diagnostics
+        name: Record test environment
         run: |
           uname -a
           python3 - <<'PY'
@@ -128,14 +139,19 @@ jobs:
               print(name + ":", os.environ[name])
           PY
 
-      - name: Compile Rust tests while the VM ages
+      - &compile-tests
+        name: Compile Rust tests while the VM ages
         run: cargo test --workspace --locked --no-run
 
-      - name: Require real same-boot history for PID reuse fixtures
+      - &test-boot-age
+        name: Require real same-boot history for PID reuse fixtures
         run: |
           python3 - <<'PY'
-          import pathlib, time
+          import pathlib, re, subprocess, sys, time
           def uptime():
+              if sys.platform == "darwin":
+                  boot = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True)
+                  return time.time() - int(re.search(r"\bsec = (\d+)", boot).group(1))
               return float(pathlib.Path("/proc/uptime").read_text().split()[0])
           # Frozen fixtures require >1920s; never fake kernel timestamps or skip them.
           remaining = max(0, 1925 - uptime())
@@ -182,7 +198,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
             package_dir: cli-darwin-arm64
             package_name: "@team-agent/cli-darwin-arm64"
@@ -222,11 +238,11 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Ensure tmux on macOS
-        if: runner.os == 'macOS'
-        run: |
-          command -v tmux >/dev/null || brew install tmux
-          tmux -V
+      - *test-prerequisites
+      - *test-environment
+      - *test-diagnostics
+      - *compile-tests
+      - *test-boot-age
 
       - name: Run native Rust tests
         run: cargo test --workspace --locked --no-fail-fast
