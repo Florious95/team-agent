@@ -675,12 +675,17 @@ fn execute_plan(
     let mut refusal_hint = None;
     let steps = plan.steps.clone();
     for step in &steps {
-        if let Err(error) = recheck(&plan, step, stop_succeeded) {
-            ok = false;
-            known_no_effect = false;
-            results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"recheck","error":crate::redaction::redact_external_text(&error.to_string())}));
-            break;
-        }
+        // Resolve the bounded write set before the handler can change its row.
+        let started_files = match recheck(&plan, step, stop_succeeded)
+            .and_then(|_| runtime::started_file_indices(&plan, step)) {
+            Ok(files) => files,
+            Err(error) => {
+                ok = false;
+                known_no_effect = false;
+                results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"recheck","error":crate::redaction::redact_external_text(&error.to_string())}));
+                break;
+            }
+        };
         let result = execute(step);
         let (success, receipt) = match result {
             Ok(result) => (
@@ -753,6 +758,18 @@ fn execute_plan(
             }
         }
         if success {
+            let refreshed = started_files.into_iter().map(|index|
+                std::fs::read(&plan.files[index].0).map(|bytes| (index, bytes)))
+                .collect::<Result<Vec<_>, _>>();
+            match refreshed {
+                Ok(files) => for (index, bytes) in files { plan.files[index].1 = bytes; },
+                Err(error) => {
+                    ok = false;
+                    known_no_effect = false;
+                    results.push(json!({"action":step.name(),"agent":step.agent(),"ok":false,"phase":"file_refresh","error":crate::redaction::redact_external_text(&error.to_string())}));
+                    break;
+                }
+            }
             if let Err(error) = runtime::advance_topology(&mut plan, step, &receipt) {
                 ok = false;
                 known_no_effect = false;

@@ -1110,6 +1110,22 @@ pub(super) fn advance_topology(plan: &mut Plan, step: &Step, receipt: &Value) ->
     Ok(())
 }
 
+pub(super) fn started_file_indices(plan: &Plan, step: &Step) -> Result<Vec<usize>, CliError> {
+    let id = match step {
+        Step::StartAgent(args) => AgentId::new(&args.agent),
+        Step::UnifiedStart { request, .. } => request.agent.clone(),
+        _ => return Ok(Vec::new()),
+    };
+    if plan.files.is_empty() || plan.topology.is_none() { return Ok(Vec::new()); }
+    let selected = resolve_active_team_readonly(&plan.scope.workspace, plan.scope.team.as_deref(), SelectorMode::RuntimeOnly)?;
+    let role = crate::lifecycle::launch::role_source::role_source_path(
+        &selected.run_workspace, &selected.team_dir, &selected.state, &id);
+    let spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
+    let team = selected.team_dir.join("TEAM.md");
+    Ok(plan.files.iter().enumerate().filter_map(|(index, (path, _))|
+        (path != &team && (path == &role || path == &spec)).then_some(index)).collect())
+}
+
 pub(super) fn recheck(plan: &Plan, step: &Step, after_stop: bool) -> Result<(), CliError> {
     // Preview evidence is rechecked here; StartRequest repeats physical admission
     // and its incarnation/carrier check under the lower-layer seat lock.

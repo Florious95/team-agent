@@ -437,7 +437,10 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             && matches!(crate::host::process::sample_process(&target.process),
                 ProcessState::Exited | ProcessState::Replaced)
         {
-            let absent = if crate::host::tmux::shared_server_absent(&self.settings.tmux, &target.endpoint,
+            let absent = if crate::host::tmux::shared_endpoint_replaced(&target.endpoint,
+                (target.socket_device, target.socket_inode)).map_err(host_error)? {
+                Some("receipt_close_replaced_shared_endpoint")
+            } else if crate::host::tmux::shared_server_absent(&self.settings.tmux, &target.endpoint,
                 &mut RealCommandRunner::default(), deadline.saturating_sub(self.clock.now()),
                 self.settings.limits.command_output).map_err(host_error)? {
                 Some("receipt_close_absent_shared_endpoint")

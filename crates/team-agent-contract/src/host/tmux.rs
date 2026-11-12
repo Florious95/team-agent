@@ -322,6 +322,39 @@ pub fn shared_server_absent(
     Err(command_error(&receipt, "shared server observation"))
 }
 
+/// A different owned socket at the same path is not the recorded shared server.
+/// Metadata only: this never connects to, probes, or acts on the replacement.
+pub(crate) fn shared_endpoint_replaced(endpoint: &std::path::Path, recorded: (u64, u64)) -> Result<bool, HostError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (endpoint, recorded);
+        Err(HostError::new("shared socket identity", HostErrorKind::Unsupported))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        crate::contract::types::require_absolute(endpoint, "workspace tmux endpoint")
+            .map_err(|_| HostError::new("workspace tmux endpoint", HostErrorKind::Invalid))?;
+        let metadata = match std::fs::symlink_metadata(endpoint) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(HostError::io("shared socket identity", error)),
+            Ok(metadata) => metadata,
+        };
+        if !metadata.file_type().is_socket() || metadata.uid() != nix::unistd::geteuid().as_raw() {
+            return Err(HostError::new("shared socket owner", HostErrorKind::Ownership));
+        }
+        let parent = endpoint.parent().ok_or_else(|| HostError::new("workspace socket parent", HostErrorKind::Invalid))?;
+        if parent.canonicalize().map_err(|e| HostError::io("workspace socket parent", e))? != parent {
+            return Err(HostError::new("workspace socket parent changed", HostErrorKind::Ownership));
+        }
+        let directory = std::fs::symlink_metadata(parent).map_err(|e| HostError::io("workspace socket parent", e))?;
+        if !directory.is_dir() || directory.uid() != nix::unistd::geteuid().as_raw() || directory.mode() & 0o777 != 0o700 {
+            return Err(HostError::new("workspace socket parent ownership", HostErrorKind::Ownership));
+        }
+        Ok((metadata.dev(), metadata.ino()) != recorded)
+    }
+}
+
 /// After a close may have executed, observe only: reparenting/exit races do not
 /// grant authority for another action, nor prove exit. Keep the original budget.
 pub(crate) fn observe_native_exit(
