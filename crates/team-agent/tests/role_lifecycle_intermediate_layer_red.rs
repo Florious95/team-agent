@@ -273,7 +273,8 @@ fn add_local_role_is_in_place_and_external_template_is_imported_then_reloaded_lo
 
 #[test]
 fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomically() {
-    let (ws, shims) = ws_seed("rolelife-arbitration", "copilot", "gpt-6-luna", None);
+    // Each item seeds its own workspace (own TestWorkspace, TmuxRoot and 110 s
+    // private tmux watchdog): one shared seed outlived its watchdog mid-matrix.
     // 34d41fc7 / 1d2d4d5a (SKILL:122): an explicit CLI field overrides the role
     // file's value instead of being refused as a conflict. The compiled spec and
     // the canonical agents/<id>.md carry the CLI value; the external source file
@@ -287,6 +288,7 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
         ("conf-effort", vec!["--effort", "xhigh"]),
         ("conf-prompt", vec!["--prompt", "Different body."]),
     ] {
+        let (ws, shims) = ws_seed("rolelife-arbitration", "copilot", "gpt-6-luna", None);
         let source = ws.path().join(format!("{id}-source.md"));
         let source_bytes = role(id, "copilot", "gpt-5.6-luna", Some("high"), false, "Body.");
         fs::write(&source, &source_bytes).unwrap();
@@ -316,6 +318,7 @@ fn add_file_cli_arbitration_accepts_equal_and_rejects_conflicting_values_atomica
             _ => {}
         }
     }
+    let (ws, shims) = ws_seed("rolelife-arbitration", "copilot", "gpt-6-luna", None);
     let source = ws.path().join("file-only.md"); fs::write(&source, role("file-only", "copilot", "gpt-5.6-luna", None, false, "File only.")).unwrap();
     let r = run(&ws, &shims, &cli(&ws, "add-agent", "file-only", &["--role-file", source.to_str().unwrap()]));
     assert!(r.is_success(), "traditional file-only definition: {} {}", r.stdout, r.stderr);
