@@ -907,7 +907,7 @@ fn team_entry(
                 "owner_epoch": owner_epoch,
                 "claimed_at": "2026-06-06T00:00:00Z",
                 "claimed_via": "claim-leader",
-                "os_user": "alauda"
+                "os_user": "runner"
             },
             "agents": Value::Object(agent_map),
             "tasks": [],
@@ -937,7 +937,7 @@ fn owner(pane_id: &str, uuid: &str, owner_epoch: u64) -> Value {
         "owner_epoch": owner_epoch,
         "claimed_at": "2026-06-06T00:00:00Z",
         "claimed_via": "claim-leader",
-        "os_user": "alauda"
+        "os_user": "runner"
     })
 }
 

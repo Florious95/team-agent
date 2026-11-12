@@ -8,7 +8,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 ROOT_ID=$(printf '%s' "$ROOT" | cksum | awk '{print $1}')
-TARGET_DIR=${CARGO_TARGET_DIR:-/Volumes/nvme/tmp/team-agent-gate-suite-$ROOT_ID}
+TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/team-agent-gate-suite-$ROOT_ID}
 FAILURES=0
 LINE_COUNT_BASELINE=86
 
@@ -94,7 +94,7 @@ cargo_test() {
     PATH="$PATH" \
     USER="${USER:-}" \
     LANG="${LANG:-en_US.UTF-8}" \
-    TEAM_AGENT_TEST_TMP=/Volumes/nvme/tmp \
+    TEAM_AGENT_TEST_TMP="${TEAM_AGENT_TEST_TMP:-/tmp}" \
     CARGO_TARGET_DIR="$TARGET_DIR" \
     cargo test -p team-agent "$@"
 }

@@ -49,7 +49,7 @@ fn seed_official_api_profile(ws: &std::path::Path) {
 //   human dict output preserves return insertion order.
 //
 // Golden probe:
-//   PYTHONPATH=/Users/alauda/Documents/code/team-agent-public/src \
+//   PYTHONPATH=./src \
 //     python3 /tmp/probe_profile_cli.py
 //   profile init codex_sub --auth-mode subscription --json rc=0 and creates:
 //   codex_sub.env = "AUTH_MODE=subscription\nPROFILE_NAME=codex_sub\nPROXY_MODE=inherit\n" (mode 0600),

@@ -11,7 +11,7 @@
 
   多方审查关(用户硬流程:架构改动必须多方审 + 准则把关)。架构师已出方案,请你按 CONSTITUTION 审。
 
-  读:/Users/alauda/Documents/code/team-agent-public/.team/artifacts/architect-selftest-and-idle-accuracy-plan.md(只读,不改 src)。
+  读:/Users/runner/Documents/code/team-agent-public/.team/artifacts/architect-selftest-and-idle-accuracy-plan.md(只读,不改 src)。
 
   方案概要:A=新增 team-agent doctor --comms 自检(① pane 绑定 ② leader→worker ③ worker→leader,worker→leader 用一次性 tmux 捕获 pane 证明真注入且不污染 live leader);B=保持 Gap 32 provider-file takeover 不变,只修 status/agent_health 的
   live-pane-activity 判定,避免 raw running 默认 IDLE(治 bug-071)。
@@ -27,7 +27,7 @@
   Q3 WORKING vs RUNNING 的展示语义怎么定(用户要的是'在干活=工作、真空闲=空闲')?
   Q4 首轮是否不引入 CPU 采样(按 MUST-13 先上最薄信号)?
 
-  注意:你给的每条 constraint 都是新契约 → 会交 te 编码成验收测试,所以请把 constraint 写成可测的行为句。verdict 写到 /Users/alauda/Documents/code/team-agent-public/.team/artifacts/cr-verdict-selftest-and-idle.md,report_result 回短摘要
+  注意:你给的每条 constraint 都是新契约 → 会交 te 编码成验收测试,所以请把 constraint 写成可测的行为句。verdict 写到 /Users/runner/Documents/code/team-agent-public/.team/artifacts/cr-verdict-selftest-and-idle.md,report_result 回短摘要
   + 路径 + 4 问的明确结论。
 
   [team-agent-token:msg_85c13831d264]

@@ -20,10 +20,10 @@
 set -u
 
 NODE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-SRC_BIN="${TEAM_AGENT_BIN:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}"
+SRC_BIN="${TEAM_AGENT_BIN:-$(command -v team-agent || true)}"
 REAL_TMUX="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
 NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
-TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/Volumes/nvme/tmp}"
+TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/tmp}"
 [ -d "$TMP_ROOT" ] || TMP_ROOT=/tmp
 RUN="$TMP_ROOT/ta-d126-busy-$$"
 TEAM_ID="d126b$$"

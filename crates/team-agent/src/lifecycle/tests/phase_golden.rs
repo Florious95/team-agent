@@ -412,7 +412,7 @@ fn normalize_team_agent_binary_path(text: &str) -> String {
     // 0.5.0 hermetic 教训「环境路径类 token 化」的直接延伸
     // (leader msg_6ee04cf5aee8):归一化改为结构判据,不绑路径前缀。
     // 用户 CARGO_TARGET_DIR 可以指到任意目录(默认 `<repo>/target`,
-    // 全局改道时是 `/Volumes/nvme/cargo-target`,CI 时可能是别的)。
+    // 全局改道时是 `/var/tmp/custom-cargo-target`,CI 时可能是别的)。
     // 结构判据:任意绝对路径下的 `/deps/team_agent-<hex>`(可选 `.exe`)
     // → `<TEAM_AGENT_BIN>`。同时保留旧 marker 兼容(处理旧固定字符串
     // 出现在 output 里,以及 `debug/team-agent` / `release/team-agent`
@@ -624,12 +624,12 @@ fn key_is_id(key: &str, text: &str) -> bool {
 fn phase_golden_normalizer_maps_custom_cargo_target_deps_binary_before_tmp_aliasing() {
     let ctx = NormalizeCtx {
         workspace_aliases: Vec::new(),
-        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        temp_aliases: vec!["/var/tmp/fixture-volume".to_string()],
         pane_ids: BTreeMap::new(),
     };
     let input = concat!(
         "mcp_servers.team_orchestrator.command=\"",
-        "/Volumes/nvme/tmp/ta-0517-target/debug/deps/team_agent-c924abc123",
+        "/var/tmp/fixture-volume/ta-0517-target/debug/deps/team_agent-c924abc123",
         "\""
     );
 
@@ -644,7 +644,7 @@ fn phase_golden_normalizer_maps_custom_cargo_target_deps_binary_before_tmp_alias
 fn phase_golden_normalizer_maps_current_test_binary_to_team_agent_marker() {
     let ctx = NormalizeCtx {
         workspace_aliases: Vec::new(),
-        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        temp_aliases: vec!["/var/tmp/fixture-volume".to_string()],
         pane_ids: BTreeMap::new(),
     };
     let input = format!(
@@ -665,12 +665,12 @@ fn phase_golden_normalizer_maps_current_test_binary_to_team_agent_marker() {
 fn phase_golden_normalizer_does_not_treat_cargo_target_dir_as_socket_token() {
     let ctx = NormalizeCtx {
         workspace_aliases: Vec::new(),
-        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        temp_aliases: vec!["/var/tmp/fixture-volume".to_string()],
         pane_ids: BTreeMap::new(),
     };
 
     assert_eq!(
-        normalize_path_string("/Volumes/nvme/tmp/ta-0517-target/build.log", &ctx),
+        normalize_path_string("/var/tmp/fixture-volume/ta-0517-target/build.log", &ctx),
         "<TMP>/ta-0517-target/build.log",
         "ta-* directory names outside tmux socket context must not be rewritten as ta-<SOCKET>"
     );

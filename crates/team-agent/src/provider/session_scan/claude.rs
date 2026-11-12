@@ -372,12 +372,12 @@ mod tests {
     #[test]
     fn encode_claude_projects_dir_parity_with_real_claude_naming() {
         assert_eq!(
-            encode_projects_dir("/Users/alauda/code"),
-            "-Users-alauda-code"
+            encode_projects_dir("/Users/runner/code"),
+            "-Users-runner-code"
         );
         assert_eq!(
-            encode_projects_dir("/Users/alauda/Documents/code/agent前沿探索/多agent协作"),
-            "-Users-alauda-Documents-code-agent------agent--"
+            encode_projects_dir("/private/tmp/ws/agent前沿探索/多agent协作"),
+            "-private-tmp-ws-agent------agent--"
         );
         assert_eq!(
             encode_projects_dir("/Users/foo bar.baz/v1.2"),

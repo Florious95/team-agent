@@ -32,7 +32,7 @@ const WORKER: &str = "helper";
 const TEAM_SESSION: &str = "team-current";
 const WORKER_PANE: &str = "%541";
 const LEADER_PANE: &str = "%0";
-const TMUX_ENDPOINT: &str = "/Volumes/nvme/tmp/ta-0541-fault-invisibility.sock";
+const TMUX_ENDPOINT: &str = "/private/tmp/ta-0541-fault-invisibility.sock";
 
 fn brief_node<'a>(status: &'a Value, name: &str) -> Option<&'a Value> {
     status

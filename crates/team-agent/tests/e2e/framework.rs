@@ -733,7 +733,7 @@ fn test_tmp_roots() -> Vec<PathBuf> {
 }
 
 fn is_installed_team_agent_binary(binary: &str) -> bool {
-    binary == "/Users/alauda/.local/bin/team-agent" || binary.contains("/.team-agent/runtime/")
+    binary.ends_with("/.local/bin/team-agent") || binary.contains("/.team-agent/runtime/")
 }
 
 pub(crate) fn pid_is_running(pid: u32) -> bool {

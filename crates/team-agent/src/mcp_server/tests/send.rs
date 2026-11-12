@@ -117,7 +117,7 @@ fn send_message_worker_recipient_ignores_dead_coordinator() {
     let tools = TeamOrchestratorTools::with_identity(
         &fixture.root, Some(AgentId::new("leader")), Some(TeamKey::new("current")),
     );
-    // e0652b62: establish the legitimate first-send timestamp before the no-repair oracle.
+    // cfd9eb90: establish the legitimate first-send timestamp before the no-repair oracle.
     let primed = tools.send_message_with_presentation(
         &MessageTarget::Single("worker-1".into()), "establish first send", None, None, None, None, None).unwrap().to_value();
     assert_eq!(primed["delivery"], "physical");

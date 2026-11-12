@@ -32,7 +32,7 @@
 set -u
 
 NODE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-SRC_BIN="${TEAM_AGENT_BIN:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}"
+SRC_BIN="${TEAM_AGENT_BIN:-$(command -v team-agent || true)}"
 EXPECT_MD5="${REPRO_GAUGE_MD5:-b81c70816ff504d44f1d4a041373c84f}"
 REAL_TMUX="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
 TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/private/tmp}"

@@ -114,9 +114,15 @@ fn qualified_addresses_use_their_own_scope_without_a_caller_snapshot() {
         Some("beta"),
         OPERATOR,
     );
-    let ambiguous = ambiguous.unwrap_or_else(|error| json!({"ok": false, "status": "refused", "error": error}));
-    assert_eq!(ambiguous["ok"], false, "{ambiguous}");
-    assert_eq!(ambiguous["status"], "refused", "{ambiguous}");
+    let ambiguous = match ambiguous {
+        Ok(value) => {
+            assert_eq!(value["ok"], false, "{value}");
+            assert_eq!(value["status"], "refused", "{value}");
+            value.to_string()
+        }
+        Err(error) => error,
+    };
+    assert!(ambiguous.contains("name_ambiguous"), "{ambiguous}");
     assert_eq!(
         team_agent::inbox_store::read(&target, "w1", 10, Some("alpha")).unwrap()["messages"],
         json!([]),

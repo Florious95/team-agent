@@ -30,7 +30,7 @@ use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStag
 
 const TEAM: &str = "current";
 const TEAM_SESSION: &str = "team-current";
-const TMUX_ENDPOINT: &str = "/Volumes/nvme/tmp/ta-0540-build-before-destroy.sock";
+const TMUX_ENDPOINT: &str = "/private/tmp/ta-0540-build-before-destroy.sock";
 
 #[test]
 #[serial(env)]

@@ -29,7 +29,7 @@
 set -u
 
 NODE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-TA="${TEAM_AGENT_BIN:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}"
+TA="${TEAM_AGENT_BIN:-$(command -v team-agent || true)}"
 TMUX_BIN="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
 TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/private/tmp}"
 [ -d "$TMP_ROOT" ] || TMP_ROOT=/tmp

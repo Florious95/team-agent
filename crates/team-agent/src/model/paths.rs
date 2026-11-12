@@ -170,10 +170,10 @@ mod tests {
         assert_eq!(runtime_dir(ws), PathBuf::from("/ws/proj/.team/runtime"));
         assert_eq!(logs_dir(ws), PathBuf::from("/ws/proj/.team/logs"));
 
-        let ws2 = Path::new("/Users/alauda/x");
+        let ws2 = Path::new("/Users/runner/x");
         assert_eq!(
             runtime_dir(ws2),
-            PathBuf::from("/Users/alauda/x/.team/runtime")
+            PathBuf::from("/Users/runner/x/.team/runtime")
         );
     }
 

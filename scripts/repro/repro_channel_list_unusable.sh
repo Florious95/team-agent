@@ -9,7 +9,7 @@
 
 set -u
 
-GAUGE="${TEAM_AGENT_BIN:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}"
+GAUGE="${TEAM_AGENT_BIN:-$(command -v team-agent || true)}"
 EXPECT_MD5="${TEAM_AGENT_MD5:-2b7cf51937ea2d50897eeba75fae3b6b}"
 
 say() { printf '%s\n' "$*"; }

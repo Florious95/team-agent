@@ -1,4 +1,4 @@
-> You are in /Users/alauda/team-agent-test/workspaces/smokeA-20260525T073435Z-smoke-e2e
+> You are in /Users/runner/team-agent-test/workspaces/smokeA-20260525T073435Z-smoke-e2e
 
   Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.
 

@@ -2331,7 +2331,7 @@ mod e36_transcript_backing_tests {
         // Live T1 public session.captured (events-before.jsonl / events-after-t1.jsonl):
         // rollout_path was already assigned before shutdown; resume must not
         // invent a different file or drop the captured path.
-        let captured = "/Volumes/nvme/tmp/team-agent-live-0578-r2-3087abc5/.team/runtime/pi/claim-live-0578-r2/echo/sessions/2026-09-09T15-53-03-460Z_0dac7250-aa88-45be-aa3e-03a6833f9552.jsonl";
+        let captured = "/private/tmp/team-agent-live-0578-r2-3087abc5/.team/runtime/pi/claim-live-0578-r2/echo/sessions/2026-09-09T15-53-03-460Z_0dac7250-aa88-45be-aa3e-03a6833f9552.jsonl";
         let agent = serde_json::json!({
             "session_id": "0dac7250-aa88-45be-aa3e-03a6833f9552",
             "rollout_path": captured,
@@ -2396,7 +2396,7 @@ mod e36_transcript_backing_tests {
     fn claude_project_transcript_is_recognized_without_rollout_or_capture_event() {
         let scratch = ScratchDir::new("recognized");
         let projects_root = scratch.path().join("projects");
-        let slug_dir = projects_root.join("-Users-alauda-Documents-code---rust---9");
+        let slug_dir = projects_root.join("-Users-runner-Documents-code---rust---9");
         std::fs::create_dir_all(&slug_dir).expect("mkdir slug");
         let session_id = "87742d3f-0b4e-4fc1-ad35-447ac2340b65";
         std::fs::write(slug_dir.join(format!("{session_id}.jsonl")), b"{}\n").expect("transcript");

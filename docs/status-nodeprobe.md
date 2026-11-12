@@ -44,14 +44,14 @@ The existing CI build receipt remains the provenance input. For example, the
 accepted arm64 artifact receipt is:
 
 ```text
-/Volumes/nvme/tmp/nodeprobe-rollout-ff316dc/artifact/nodeprobe-build-receipt.txt
+<receipt-root>/nodeprobe-rollout-ff316dc/artifact/nodeprobe-build-receipt.txt
 ```
 
 It records the source commit/tree, target, and `binary_sha256`; the downloaded
 artifact was recorded separately at:
 
 ```text
-/Volumes/nvme/tmp/nodeprobe-rollout-ff316dc/artifact/nodeprobe
+<receipt-root>/nodeprobe-rollout-ff316dc/artifact/nodeprobe
 ```
 
 These are evidence paths from one verified rollout, not Team Agent defaults and

@@ -325,12 +325,12 @@ mod tests {
     fn leaders_human_is_a_status_table_and_stale_has_no_send() {
         let rows = vec![
             row(
-                "/Volumes/nvme/Projects/讨论team-agent",
+                "/private/tmp/Projects/讨论team-agent",
                 "wiki-team",
                 "LIVE",
                 "send-live",
             ),
-            row("/Users/alauda/stale", "old-team", "STALE", "-"),
+            row("/Users/runner/stale", "old-team", "STALE", "-"),
         ];
         let out = format_leaders_human(&rows, LeadersView::All);
         let lines: Vec<_> = out.lines().collect();
@@ -344,7 +344,7 @@ mod tests {
             &[
                 "leader",
                 "LIVE",
-                "/Volumes/nvme/Projects/讨论team-agent",
+                "/private/tmp/Projects/讨论team-agent",
                 "wiki-team"
             ]
         );
@@ -356,7 +356,7 @@ mod tests {
                 "leader",
                 "Complete the task and reply to the leader.",
                 "--workspace",
-                "/Volumes/nvme/Projects/讨论team-agent",
+                "/private/tmp/Projects/讨论team-agent",
                 "--team",
                 "wiki-team"
             ]
@@ -364,7 +364,7 @@ mod tests {
         let stale: Vec<_> = lines[2].split('\t').collect();
         assert_eq!(
             &stale[..4],
-            &["leader", "STALE", "/Users/alauda/stale", "old-team"]
+            &["leader", "STALE", "/Users/runner/stale", "old-team"]
         );
         assert_eq!(stale[4], "-", "stale rows must never suggest a send: {out}");
     }
@@ -389,12 +389,12 @@ mod tests {
     fn search_matches_selected_fields_case_insensitively() {
         let rows = vec![
             row(
-                "/Volumes/nvme/Projects/讨论team-agent",
+                "/private/tmp/Projects/讨论team-agent",
                 "Wiki-Team",
                 "LIVE",
                 "send",
             ),
-            row("/Users/alauda/stale", "old-team", "STALE", "-"),
+            row("/Users/runner/stale", "old-team", "STALE", "-"),
         ];
         let rows = filter_rows(rows, LeadersView::All, Some("WIKI-"));
         assert_eq!(rows.len(), 1);

@@ -53,7 +53,7 @@ use team_agent::transport::{ BackendKind, CaptureRange, CapturedText, InjectStag
 
 const TEAM: &str = "current";
 const TEAM_SESSION: &str = "team-current";
-const TMUX_ENDPOINT: &str = "/Volumes/nvme/tmp/ta-0538-startup-latency.sock";
+const TMUX_ENDPOINT: &str = "/private/tmp/ta-0538-startup-latency.sock";
 const WRONG_INDEX_INJECTION: &str = "TEAM_AGENT_TEST_INJECT_WRONG_OUTCOME_INDEX";
 const FAILURE_SNAPSHOT: &str = "TEAM_AGENT_STARTUP_FAILURE_SNAPSHOT";
 

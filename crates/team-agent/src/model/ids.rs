@@ -120,10 +120,10 @@ mod tests {
             "709e80c88487a2411e1ee4dfb9f22a86"
         );
         assert_eq!(
-            LeaderSessionUuid::derive("m", "/Users/alauda/x", "root", "default")
+            LeaderSessionUuid::derive("m", "/Users/runner/x", "root", "default")
                 .unwrap()
                 .as_str(),
-            "92c5e32dc5710ea095f956bfb594bc6b"
+            "3842fba0fa416a3798a5b8f6c3b85dca"
         );
     }
 

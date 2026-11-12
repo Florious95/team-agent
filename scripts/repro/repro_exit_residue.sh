@@ -13,7 +13,7 @@
 
 set -u
 
-DEFAULT_GAUGE="/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent"
+DEFAULT_GAUGE="$(command -v team-agent || true)"
 DEFAULT_MD5="2b7cf51937ea2d50897eeba75fae3b6b"
 GAUGE="${REPRO_GAUGE:-$DEFAULT_GAUGE}"
 EXPECT_MD5="${REPRO_GAUGE_MD5:-}"
@@ -23,7 +23,6 @@ fi
 FIRST_WAIT="${REPRO_FIRST_WAIT:-75}"
 RETRY_WAIT="${REPRO_RETRY_WAIT:-25}"
 PROTECTED=" ta-a9fd5b7defbd ta-a0afa5f9c7f6 ta-b7cc1c640ccf "
-export PATH="/Users/alauda/ta-tmux-shim/bin:/opt/homebrew/bin:/Users/alauda/.local/bin:/usr/bin:/bin:${PATH:-}"
 unset TMUX TMUX_PANE
 
 TMUX_BIN="$(command -v tmux || true)"

@@ -178,7 +178,7 @@ typed 失败事实共同 SSOT：[[typed 状态事实目录与强制穿透]]。
 | 项 | 值 |
 |---|---|
 | **状态** | **已实现，未合并** |
-| **分支** | `feature/orch-admission-g01-g02-g09-d15`（产品仓 `/Users/alauda/Documents/code/team-agent-public`） |
+| **分支** | `feature/orch-admission-g01-g02-g09-d15`（产品仓 `team-agent-public`） |
 | **与 main 关系** | 领先 `main` **287** commit，落后 **0**（`git rev-list --left-right --count main...<branch>` = `0 287`） |
 | **main 现状** | **无**。`git grep -c result_route main -- crates/` 空。已发布的 **0.5.60 不含本能力** |
 | **关键 commit** | `206e65f`（移除 `presentation` 第二写者，改为 task route 唯一权威） |

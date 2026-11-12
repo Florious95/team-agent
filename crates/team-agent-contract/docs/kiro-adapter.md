@@ -6,7 +6,7 @@
 
 ## 本轮物证（替代早期全命令 timeout 的结论）
 
-原始目录：`/Volumes/nvme/tmp/kiro-native-receipts/`；子命令目录 `chat-subcommands/`。由 runner-luna 采集，本开发席未执行 Kiro/登录。
+原始目录：`<receipt-root>/kiro-native-receipts/`；子命令目录 `chat-subcommands/`。由 runner-luna 采集，本开发席未执行 Kiro/登录。
 
 - dispatcher `/opt/homebrew/bin/kiro-cli` 指向 app bundle 的 `kiro-cli`。版本 `2.28.0`、根 help 成功。
 - dispatcher `chat --help` 报 `failed to launch .../.local/bin/kiro-cli-chat`。给 PATH 加 bundle 前缀仍失败；不把 PATH 当修复。

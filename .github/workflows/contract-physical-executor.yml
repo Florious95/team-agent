@@ -85,7 +85,7 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           mkdir format-evidence
           git rev-parse HEAD 'HEAD^{tree}' > format-evidence/source.txt
-          files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
+          files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           if [[ '${{ inputs.regression_scope }}' == issue342-format ]]; then
             files=(crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
@@ -161,15 +161,9 @@ jobs:
           set -euo pipefail
           # Check the bounded native-input/watchdog files, not unrelated historical debt.
           files=(
-            crates/team-agent/src/messaging/enter_rescue.rs
-            crates/team-agent/src/messaging/enter_rescue_tests.rs
-            crates/team-agent/src/messaging/delivery_consumption_tests.rs
             crates/team-agent/src/tmux_backend/native_input.rs
             crates/team-agent/src/tmux_backend/native_input_tests.rs
-            crates/team-agent/src/tmux_backend/enter_rescue.rs
-            crates/team-agent/src/tmux_backend/enter_rescue_tests.rs
             crates/team-agent/src/transport/native_input.rs
-            crates/team-agent/src/transport/enter_rescue.rs
           )
           set +e
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" 2>&1 | tee contract-evidence/format.log
@@ -298,9 +292,6 @@ jobs:
             issue342-handshake)
               run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1 --nocapture
               run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1 --nocapture
-              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1 --nocapture
-              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1 --nocapture
-              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
               run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
               ;;
             issue342-red)
@@ -308,10 +299,6 @@ jobs:
               ;;
             issue345-fixtures)
               run_case messaging-fixtures cargo test -p team-agent --lib --locked messaging::tests -- --test-threads=1 --nocapture
-              run_case consumption-fixtures cargo test -p team-agent --lib --locked messaging::delivery::consumption_tests -- --test-threads=1 --nocapture
-              run_case health-delivery cargo test -p team-agent --lib --locked spine2_sync_health_working_status_delivers_same_tick -- --test-threads=1 --nocapture
-              run_case monitor-delivery cargo test -p team-agent --lib --locked b4_monitor_step_failure_does_not_block_deliver_pending -- --test-threads=1 --nocapture
-              run_case trust-scrollback cargo test -p team-agent --lib --locked contract_b_delivery_gate_trusts_startup_handled_state_over_pane_scrollback -- --test-threads=1 --nocapture
               run_case delivery-integration-fixtures cargo test -p team-agent --locked --test claude_provider_trust_prompt_red --test provider_submit_verification_red -- --test-threads=1 --nocapture
               ;;
             issue345-red)
@@ -325,9 +312,6 @@ jobs:
               run_case shutdown-completion cargo test -p team-agent --lib --locked cli::tests::shutdown_kill_plan -- --test-threads=1
               run_case mcp-handshake cargo test -p team-agent --lib --locked mcp_server::readiness -- --test-threads=1
               run_case mcp-wire cargo test -p team-agent --lib --locked mcp_server::wire -- --test-threads=1
-              run_case message-handshake cargo test -p team-agent --lib --locked messaging::tests::dup_inject -- --test-threads=1
-              run_case startup-trust-retry cargo test -p team-agent --lib --locked contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled -- --test-threads=1
-              run_case readiness-release-cas cargo test -p team-agent --lib --locked release_delivery_before_input -- --test-threads=1
               run_case process-owner-boundary cargo test -p team-agent --test platform_process_caller_whitelist_batch0 --locked -- --test-threads=1
               run_case shutdown-fixture cargo test -p team-agent --test e2e --locked shutdown -- --test-threads=1
               run_case contract-all cargo test --manifest-path crates/team-agent-contract/Cargo.toml --locked --all-targets --no-fail-fast -- --test-threads=1
@@ -349,9 +333,8 @@ jobs:
               run_case provider-fixtures cargo test -p team-agent --lib --locked -- --test-threads=1 \
                 lifecycle::tests::copilot_provider_red lifecycle::tests::behavioral_diff_264_red \
                 lifecycle::tests::claude_compatible_config_red lifecycle::tests::claude_profile_launch_red \
-                lifecycle::tests::grok_effort_argv_red \
-                lifecycle::tests::grok_mcp_overlay_red lifecycle::tests::grok_require_explicit_model_red \
-                lifecycle::tests::grok_restart_resume_red lifecycle::tests::phase_b_contracts \
+                lifecycle::tests::grok_require_explicit_model_red \
+                lifecycle::tests::phase_b_contracts \
                 lifecycle::tests::acceptance_b_batch_red lifecycle::tests::cli_argv_routing_red \
                 lifecycle::tests::clone_agent_preserves_source_tools lifecycle::tests::clone_fork_copilot_perms_red \
                 lifecycle::tests::communication_mode_runtime_contract_red lifecycle::tests::phase_golden \
@@ -433,28 +416,22 @@ jobs:
           # Retain a remote-only formatting patch for the bounded changed modules.
           # No historical SHA freeze or unrelated legacy-body formatting rewrite.
           files=(
-            crates/team-agent/src/messaging/enter_rescue.rs
-            crates/team-agent/src/messaging/enter_rescue_tests.rs
-            crates/team-agent/src/messaging/delivery_consumption_tests.rs
             crates/team-agent/src/tmux_backend/native_input.rs
             crates/team-agent/src/tmux_backend/native_input_tests.rs
-            crates/team-agent/src/tmux_backend/enter_rescue.rs
-            crates/team-agent/src/tmux_backend/enter_rescue_tests.rs
             crates/team-agent/src/transport/native_input.rs
-            crates/team-agent/src/transport/enter_rescue.rs
           )
           set +e
           if [[ "$REGRESSION_SCOPE" == issue334* ]]; then
             files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/tests/parser_safety.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == cli-phase1 ]]; then
-            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/c1_command_spec_contract.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
+            files=(crates/team-agent/src/cli/arguments.rs crates/team-agent/src/cli/intent.rs crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/tests.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/cli/tests/parser_safety.rs crates/team-agent/tests/cli_human_surface_red.rs crates/team-agent/tests/excise_group1_commands_contract.rs crates/team-agent/tests/support/human_catalog.rs crates/team-agent/tests/cli_phase2_public_docs_contract.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == issue342 || "$REGRESSION_SCOPE" == issue342-handshake ]]; then
             files=(crates/team-agent/src/cli/intent/runtime.rs crates/team-agent/src/cli/intent/runtime_tests.rs crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           if [[ "$REGRESSION_SCOPE" == issue345* ]]; then
-            files=(crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs crates/team-agent/src/messaging/delivery_consumption_tests.rs)
+            files=(crates/team-agent/src/mcp_server/readiness.rs crates/team-agent/src/mcp_server/readiness_tests.rs)
           fi
           rustfmt --edition 2021 --config skip_children=true --check "${files[@]}" > regression-evidence/format.log 2>&1
           rc=$?

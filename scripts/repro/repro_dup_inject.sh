@@ -29,7 +29,7 @@
 set -u
 
 NODE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-SRC_BIN="${TEAM_AGENT_BIN:-${REPRO_GAUGE:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}}"
+SRC_BIN="${TEAM_AGENT_BIN:-${REPRO_GAUGE:-$(command -v team-agent || true)}}"
 EXPECT_MD5_PREFIX="${TEAM_AGENT_BIN_MD5_PREFIX:-}"
 REAL_TMUX="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
 TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/private/tmp}"
@@ -436,7 +436,6 @@ run_once() {
 
 # ---------- begin ----------
 clear_identity_env
-export PATH="/opt/homebrew/bin:/Users/alauda/.local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 need_cmd python3
 need_cmd sqlite3
 need_cmd md5

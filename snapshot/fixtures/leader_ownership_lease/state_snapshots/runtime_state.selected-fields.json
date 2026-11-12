@@ -1,5 +1,5 @@
 {
-  "source_path": "/Users/alauda/Documents/code/agent前沿探索/多agent协作/.team/runtime/state.json",
+  "source_path": "/Users/runner/Documents/code/agent前沿探索/多agent协作/.team/runtime/state.json",
   "captured_at_utc": "2026-05-27T07:37:54Z",
   "team_owner": {
     "pane_id": "%1827",
@@ -25,7 +25,7 @@
     "discovery": "explicit_pane",
     "requested_provider": "codex",
     "pane_active": "0",
-    "pane_current_path": "/Users/alauda/Documents/code/agent前沿探索/多agent协作",
+    "pane_current_path": "/Users/runner/Documents/code/agent前沿探索/多agent协作",
     "session_attached": "1",
     "pane_in_mode": "0",
     "leader_session_uuid": "46b92d5b629cad4930cde96be938475e"

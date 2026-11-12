@@ -31,15 +31,15 @@ use crate::provider::Provider;
 use crate::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use crate::transport::{SessionName, WindowName};
 
-/// Exact values observed in the incident launcher env (pid 57477).
+/// Synthetic, incident-shaped values for inherited launcher state.
 const STALE_CALLER_PROVIDER: &str = "claude";
 const STALE_CALLER_PANE: &str = "%46";
 const STALE_CALLER_ENDPOINT: &str = "/private/tmp/tmux-501/ta-a9fd5b7defbd";
 const STALE_WORKER_ID: &str = "recovery-haiku";
 const STALE_OWNER_TEAM: &str = "codex-effort-fix";
-/// Incident bytes: UTF-8 path re-encoded Latin-1 -> UTF-8 by the osascript hand-off.
+/// Synthetic, incident-shaped UTF-8 path re-encoded Latin-1 -> UTF-8 by the hand-off.
 const DOUBLE_ENCODED_WORKSPACE: &str =
-    "/Users/alauda/Documents/code/agent\u{e5}\u{89}\u{8d}\u{e6}\u{b2}\u{bf}\u{e6}\u{8e}\u{a2}\u{e7}\u{b4}\u{a2}/\u{e5}\u{a4}\u{9a}agent\u{e5}\u{8d}\u{8f}\u{e4}\u{bd}\u{9c}";
+    "/private/tmp/rce-incident/\u{e8}\u{a7}\u{86}\u{e9}\u{a2}\u{91}\u{e5}\u{88}\u{b6}\u{e4}\u{bd}\u{9c}";
 const NON_ASCII_WORKSPACE_NAME: &str = "视频制作";
 
 /// Keys a Leader process must never inherit: the caller triple (decisive for the
@@ -278,7 +278,7 @@ fn rt1_leader_spawn_argv_unsets_caller_tuple_and_worker_identity_for_every_provi
 
 #[test]
 fn rt2_incident_pi_leader_first_spawn_scrubs_before_identity_and_never_reexports_stale_tuple() {
-    let workspace = PathBuf::from("/Volumes/nvme/Projects").join(NON_ASCII_WORKSPACE_NAME);
+    let workspace = PathBuf::from("/private/tmp/rce-rt2").join(NON_ASCII_WORKSPACE_NAME);
     let identity = identity_for(&workspace);
     let mut leader_env = super::leader_env_for_identity(Provider::Pi, &identity);
     let clean_leader_env_has_caller = leader_env.keys().any(|k| MUST_SCRUB.contains(&k.as_str()));
@@ -575,6 +575,13 @@ fn rt5_guard_incident_caller_tuple_remains_invalid_never_downgraded() {
 
 #[test]
 fn rt8_guard_non_ascii_workspace_survives_leader_launch_and_clean_tuple_is_absent() {
+    let incident_bytes = DOUBLE_ENCODED_WORKSPACE.chars()
+        .map(|c| u8::try_from(c as u32).unwrap()).collect();
+    assert_eq!(
+        String::from_utf8(incident_bytes).unwrap(),
+        format!("/private/tmp/rce-incident/{NON_ASCII_WORKSPACE_NAME}"),
+        "the synthetic fixture must preserve the incident's Latin-1/UTF-8 corruption",
+    );
     // (a) A clean caller context in a non-ASCII workspace is Absent, never Invalid.
     let endpoint = "/private/tmp/tmux-501/ta-9cdfefa9385e";
     let clean = caller_provider_resolution_from_values(

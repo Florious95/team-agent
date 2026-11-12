@@ -2,7 +2,7 @@
 
 Captured for Slice 0.2.4-1 S0 from the real workspace:
 
-`/Users/alauda/Documents/code/agent前沿探索/多agent协作`
+`/Users/runner/Documents/code/agent前沿探索/多agent协作`
 
 No acceptance tests are included in this fixture-only slice.
 
@@ -67,4 +67,4 @@ No profile env files or secrets were read.
 ## Worktree Note
 
 The worktree was created from local `main` at `149d4e6`.
-`git pull --ff-only` from `/Users/alauda/Documents/code/team-agent-public` failed because the SSH connection closed before the remote could be read.
+`git pull --ff-only` from `/Users/runner/Documents/code/team-agent-public` failed because the SSH connection closed before the remote could be read.

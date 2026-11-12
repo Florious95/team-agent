@@ -52,7 +52,7 @@ const TEAM_SESSION: &str = "team-current";
 const LEADER_SESSION: &str = "team-agent-leader-claude_code-ws-nonce";
 const LEADER_PANE: &str = "%42";
 const OTHER_PANE: &str = "%77";
-const TMUX_SOCKET: &str = "/Volumes/nvme/tmp/ta-0535-managed-reentry.sock";
+const TMUX_SOCKET: &str = "/private/tmp/ta-0535-managed-reentry.sock";
 const OWNER_EPOCH: u64 = 7;
 
 static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);

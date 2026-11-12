@@ -32,7 +32,7 @@
 set -u
 
 NODE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-SRC_BIN="${TEAM_AGENT_BIN:-/Users/alauda/.team-agent/runtime/0.5.66/bin/team-agent}"
+SRC_BIN="${TEAM_AGENT_BIN:-$(command -v team-agent || true)}"
 EXPECT_MD5="b81c70816ff504d44f1d4a041373c84f"
 REAL_TMUX="${TMUX_BIN:-/opt/homebrew/bin/tmux}"
 TMP_ROOT="${TEAM_AGENT_TEST_TMP:-/private/tmp}"
@@ -659,7 +659,7 @@ fi
 echo "gauge_md5_selfcheck expected=$EXPECT_MD5 got=$BIN_MD5 src=$SRC_BIN copy=$TA"
 
 install_tmux_wrapper
-SAFE_PATH="$RUN/bin:/Users/alauda/.grok/proxy/bin:/Users/alauda/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin"
+SAFE_PATH="$RUN/bin:$PATH"
 export PATH="$SAFE_PATH"
 
 NCPU=$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 0)

@@ -117,14 +117,14 @@ mod framework_tests {
         );
 
         let local =
-            format!("/Users/alauda/.local/bin/team-agent coordinator --workspace {workspace}");
+            format!("/Users/runner/.local/bin/team-agent coordinator --workspace {workspace}");
         assert!(
             !ws.command_is_owned_coordinator(&local),
             "installed local binary must never be owned by the E2E cleanup"
         );
 
         let runtime = format!(
-            "/Users/alauda/.team-agent/runtime/0.4.8/bin/team-agent coordinator --workspace {workspace}"
+            "/Users/runner/.team-agent/runtime/0.4.8/bin/team-agent coordinator --workspace {workspace}"
         );
         assert!(
             !ws.command_is_owned_coordinator(&runtime),
@@ -132,7 +132,7 @@ mod framework_tests {
         );
 
         let real_workspace = format!(
-            "{} coordinator --workspace /Users/alauda/Documents/code/team-agent-public",
+            "{} coordinator --workspace /Users/runner/Documents/code/team-agent-public",
             bin.display()
         );
         assert!(

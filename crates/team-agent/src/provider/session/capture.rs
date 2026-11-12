@@ -1995,7 +1995,7 @@ mod u1_tests {
             "release_engineer".to_string(),
             vec![leader_like_candidate(
                 "ea059b82-c53e-4654-9590-9f3e6d46f0ca",
-                "/Users/alauda/.claude/projects/-Users-alauda-team/ea059b82.jsonl",
+                "/Users/runner/.claude/projects/-Users-runner-team/ea059b82.jsonl",
             )],
         );
         let canned_for_adapter = canned.clone();
@@ -2041,11 +2041,11 @@ mod u1_tests {
         let candidates = vec![
             leader_like_candidate(
                 "019f3327-c35a-7023-b3cd-1bea93a7a157",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-frontend-poison.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-frontend-poison.jsonl",
             ),
             leader_like_candidate(
                 "019f3327-d6d7-7c80-846a-0db4821714fb",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-poison.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-ios-poison.jsonl",
             ),
         ];
         let mut canned = BTreeMap::new();
@@ -2094,7 +2094,7 @@ mod u1_tests {
             "subgreeter".to_string(),
             vec![leader_like_candidate(
                 "sess-sub-captured",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-sub.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-sub.jsonl",
             )],
         );
         let canned_for_adapter = canned.clone();
@@ -2134,7 +2134,7 @@ mod u1_tests {
         });
         let candidate = leader_like_candidate(
             "019f3327-shared",
-            "/Users/alauda/.codex/sessions/2026/07/06/rollout-shared.jsonl",
+            "/Users/runner/.codex/sessions/2026/07/06/rollout-shared.jsonl",
         );
         let mut canned = BTreeMap::new();
         canned.insert("parent-peer".to_string(), vec![candidate.clone()]);
@@ -2176,7 +2176,7 @@ mod u1_tests {
             positive_agent_id_match: true,
             ..leader_like_candidate(
                 "019f3327-frontend",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-frontend.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-frontend.jsonl",
             )
         };
         let ios = CapturedSessionCandidate {
@@ -2184,7 +2184,7 @@ mod u1_tests {
             positive_agent_id_match: true,
             ..leader_like_candidate(
                 "019f3327-ios-dev",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
             )
         };
         let mut canned = BTreeMap::new();
@@ -2232,7 +2232,7 @@ mod u1_tests {
             positive_agent_id_match: true,
             ..leader_like_candidate(
                 "019f3327-c35a-7023-b3cd-1bea93a7a157",
-                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
+                "/Users/runner/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
             )
         };
         let mut canned = BTreeMap::new();
@@ -2278,7 +2278,7 @@ mod u1_tests {
             "release_engineer".to_string(),
             vec![worker_owned_candidate(
                 "abc12345-worker-owned",
-                "/Users/alauda/.claude/projects/-Users-alauda-team/abc12345.jsonl",
+                "/Users/runner/.claude/projects/-Users-runner-team/abc12345.jsonl",
             )],
         );
         let canned_for_adapter = canned.clone();
@@ -2315,7 +2315,7 @@ mod u1_tests {
                 "teamA": {
                     "leader_receiver": {
                         "session_id": "leader-session-id-zzz",
-                        "rollout_path": "/Users/alauda/.claude/projects/-Users-alauda-team/zzz.jsonl"
+                        "rollout_path": "/Users/runner/.claude/projects/-Users-runner-team/zzz.jsonl"
                     }
                 }
             }
@@ -2325,7 +2325,7 @@ mod u1_tests {
             "release_engineer".to_string(),
             vec![worker_owned_candidate(
                 "leader-session-id-zzz",
-                "/Users/alauda/.claude/projects/-Users-alauda-team/zzz.jsonl",
+                "/Users/runner/.claude/projects/-Users-runner-team/zzz.jsonl",
             )],
         );
         let canned_for_adapter = canned.clone();
