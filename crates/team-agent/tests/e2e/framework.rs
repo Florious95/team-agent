@@ -2256,6 +2256,57 @@ pub fn worker_session_name(ws: &TestWorkspace, team_id: &str) -> String {
     )
 }
 
+/// Teardown before `seed_crashed_workers_for_restart`. The fixture's
+/// `remain-on-exit` leaves a dead pane with an empty `pane_current_path` once
+/// shutdown kills the fake worker, and shutdown cannot prove ownership of such
+/// a session (aa7e043f spares it and keeps its rows running). Park every pane of
+/// the exact team session in place on a live `sleep 60` in the workspace (pane
+/// ids and the shared socket survive), then run the caller's shutdown argv and
+/// require a verified close.
+pub fn park_team_panes_and_shutdown(ws: &TestWorkspace, team_id: &str, shutdown_args: &[&str]) {
+    let socket = ws.read_state()["tmux_socket"]
+        .as_str()
+        .filter(|socket| !socket.is_empty())
+        .expect("crash fixture needs state.tmux_socket")
+        .to_string();
+    let session = worker_session_name(ws, team_id);
+    let workspace = ws.path().canonicalize().unwrap_or_else(|_| ws.path().to_path_buf());
+    let panes = Command::new("tmux")
+        .args(["-S", &socket, "list-panes", "-s", "-t", &format!("={session}"), "-F", "#{pane_id}"])
+        .output()
+        .expect("list crash fixture panes");
+    let pane_ids: Vec<String> = String::from_utf8_lossy(&panes.stdout).lines().map(str::to_owned).collect();
+    assert!(
+        panes.status.success() && !pane_ids.is_empty(),
+        "list panes of {session}@{socket}: status={} stderr={}",
+        panes.status,
+        String::from_utf8_lossy(&panes.stderr)
+    );
+    for pane in &pane_ids {
+        let parked = Command::new("tmux")
+            .args(["-S", &socket, "respawn-pane", "-k", "-c"])
+            .arg(&workspace)
+            .args(["-t", pane, "sleep", "60"])
+            .output()
+            .expect("park crash fixture pane");
+        assert!(
+            parked.status.success(),
+            "park {pane} of {session}@{socket}: status={} stderr={}",
+            parked.status,
+            String::from_utf8_lossy(&parked.stderr)
+        );
+    }
+    let out = run_ta(ws, shutdown_args);
+    let receipt = out.json();
+    assert!(
+        receipt["ok"] == true && receipt["session_closed"] == true,
+        "crash fixture shutdown must close {session} verified: exit={} stdout={} stderr={}",
+        out.exit_code,
+        out.stdout,
+        out.stderr
+    );
+}
+
 /// Read `tmux_socket` from state.json (full path) and check whether a session
 /// exists on that specific socket. Returns `false` if state.json doesn't yet
 /// have a socket entry — callers should treat that as "no live tmux yet".

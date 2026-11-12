@@ -21,8 +21,9 @@ fn rest_012_restart_mixed_never_captured_auto_fresh_partial_resume() {
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
     let ws_path = ws.path().to_str().unwrap();
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
 

@@ -245,8 +245,9 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
     let _guard = TmuxSocketGuard::new(vec![state_socket(&ws)]);
 
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
     ws.seed_crashed_workers_for_restart(team_id, &["a"]);
@@ -289,8 +290,9 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
         let qs = quick_start_fake(&ws, &team_id);
         assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
         let _guard = TmuxSocketGuard::new(vec![state_socket(&ws)]);
-        let _ = run_ta(
+        park_team_panes_and_shutdown(
             &ws,
+            &team_id,
             &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
         );
         ws.seed_crashed_workers_for_restart(&team_id, &["a"]);

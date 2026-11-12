@@ -16,8 +16,9 @@ fn rest_013_restart_allow_fresh_succeeds_for_fake_team() {
 
     let ws_path = ws.path().to_str().unwrap();
     // Tear down the live fixture before explicitly seeding crash recovery.
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
 

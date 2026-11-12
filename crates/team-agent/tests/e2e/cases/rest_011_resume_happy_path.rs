@@ -30,8 +30,9 @@ fn rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume() {
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
 

@@ -35,8 +35,9 @@ fn rest_002_restart_auto_fresh_never_captured_fake_team_partial_resume() {
     );
 
     // Shutdown the live worker so restart deals only with state.
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &[
             "shutdown",
             "--workspace",

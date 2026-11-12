@@ -10,8 +10,9 @@ fn dirty_004_stale_session_id_missing_backing_refuses_restart() {
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_workers_available(&qs), "quick-start: {}", qs.stdout);
 
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &[
             "shutdown",
             "--workspace",

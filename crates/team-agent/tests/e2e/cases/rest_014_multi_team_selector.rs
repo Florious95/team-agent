@@ -25,8 +25,9 @@ fn rest_014_restart_team_selector_targets_named_team() {
     assert!(quick_start_workers_available(&qs_b), "qs b: {}", qs_b.stdout);
 
     // Tear down both, then make only the selected team eligible for recovery.
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_a,
         &[
             "shutdown",
             "--workspace",
@@ -37,8 +38,9 @@ fn rest_014_restart_team_selector_targets_named_team() {
             "--json",
         ],
     );
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_b,
         &[
             "shutdown",
             "--workspace",

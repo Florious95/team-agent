@@ -54,8 +54,9 @@ fn every_command_reminder_is_free_of_collect() {
     assert!(status.is_success(), "status: {}", status.stderr);
     let status_json = status.json();
 
-    let _ = run_ta(
+    park_team_panes_and_shutdown(
         &ws,
+        team_id,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
     ws.seed_crashed_workers_for_restart(team_id, &["a"]);
