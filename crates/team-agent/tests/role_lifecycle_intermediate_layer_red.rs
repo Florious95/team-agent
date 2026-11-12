@@ -167,6 +167,30 @@ fn reject(r: &framework::TaResult, why: &str) {
 fn pair(argv: &[String], key: &str, value: &str) -> bool { argv.windows(2).any(|w| w[0] == key && w[1] == value) }
 
 #[test]
+fn s6_minimal_two_seat_team_resumes_in_one_start_call() {
+    let ws = TestWorkspace::new("s6-minimal-batch").with_owned_caller();
+    fs::write(ws.path().join("TEAM.md"), "---\nname: rolelife\n---\n").unwrap();
+    fs::create_dir_all(ws.path().join("agents")).unwrap();
+    for id in ["one", "two"] { fs::write(role_path(&ws, id), "---\nprovider: claude\n---\nMinimal role.\n").unwrap(); }
+    let shims = Shims::install(&ws);
+    let path = root(&ws);
+    let created = run_ta_env(&ws, &["start", "--from", &path, "--workspace", &path, "--team", "rolelife", "--no-display", "--json"], &shims.env());
+    assert!(quick_start_workers_available(&created), "{} {}", created.stdout, created.stderr);
+    if let Some(socket) = ws.read_state().get("tmux_socket").and_then(Json::as_str) { ws.register_owned_tmux_socket(Path::new(socket)); }
+    for id in ["one", "two"] { assert!(!fs::read_to_string(role_path(&ws, id)).unwrap().contains("dangerously_skip_permissions")); }
+    let stopped = run_ta_env(&ws, &["stop", "--workspace", &path, "--team", "rolelife", "--json"], &shims.env());
+    assert!(stopped.is_success(), "{} {}", stopped.stdout, stopped.stderr);
+    let started = run_ta_env(&ws, &["start", "--workspace", &path, "--team", "rolelife", "--json"], &shims.env());
+    assert!(started.is_success(), "{} {}", started.stdout, started.stderr);
+    let state = ws.read_state();
+    for id in ["one", "two"] {
+        assert_eq!(state["agents"][id]["status"], "running", "{state}");
+        assert!(fs::read_to_string(role_path(&ws, id)).unwrap().contains("dangerously_skip_permissions: false"));
+        assert!(!shims.capture(id).is_empty());
+    }
+}
+
+#[test]
 fn traditional_quick_start_and_add_role_file_without_cli_provider_or_bypass_regressions() {
     // A plain-text role (no front matter) now selects the default Pi contract
     // leaf, which needs a declared model; its legacy launch half was retired

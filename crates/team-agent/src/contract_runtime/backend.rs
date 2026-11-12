@@ -2121,6 +2121,83 @@ mod tests {
     impl Drop for RoleFixture { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.root); } }
 
     #[test]
+    #[serial_test::serial(env)]
+    fn s6_replaced_shared_endpoint_stop_commits_and_preserves_codex_resume() {
+        use std::os::unix::{fs::{MetadataExt, PermissionsExt}, net::UnixListener};
+        use team_agent_contract::host::{files::ScopedDirectory, process::{capture_process, sample_process, ProcessState}};
+        use team_agent_contract::contract::session::{ResumeBinding, NativeSessionId, SessionStorage, CaptureOrigin};
+        struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for RestoreEnv { fn drop(&mut self) { for (key, value) in &self.0 { match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) } } } }
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+        let _env = RestoreEnv(["TMPDIR", "HOME", "PATH"].into_iter().map(|key| (key, std::env::var_os(key))).collect());
+        std::env::set_var("TMPDIR", "/tmp");
+        let mut fixture = RoleFixture::new();
+        fixture.role.provider = ProviderId::new("codex_tui").unwrap();
+        let wrappers = fixture.root.join("wrappers");
+        let engines = fixture.root.join("engines");
+        let home = fixture.root.join("home");
+        for path in [&wrappers, &engines, &home] { std::fs::create_dir(path).unwrap(); }
+        let codex = wrappers.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\ncase \"$*\" in\n --version) echo 'codex-cli 0.167.2';;\n 'debug models') echo '{\"models\":[{\"slug\":\"first-model\",\"visibility\":\"list\",\"supported_reasoning_levels\":[]}]}' ;;\n *) exit 99;;\nesac\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = PathBuf::from("/bin/sleep").canonicalize().unwrap();
+        std::os::unix::fs::symlink(&executable, engines.join("codex")).unwrap();
+        std::env::set_var("PATH", format!("{}:{}:{}", wrappers.display(), engines.display(), std::env::var("PATH").unwrap()));
+        std::env::set_var("HOME", &home);
+        let discovered = discovery::discover_runtime(&fixture.role.provider, &fixture.root).unwrap();
+        let mut child = ChildGuard(std::process::Command::new(&executable).arg("110").current_dir(&fixture.root).spawn().unwrap());
+        let process = capture_process(child.0.id(), &executable, discovered.native.executable_sha256, Duration::from_secs(5)).unwrap();
+        child.0.kill().unwrap(); child.0.wait().unwrap();
+        assert_eq!(sample_process(&process), ProcessState::Exited);
+        fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
+        fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(5)).unwrap();
+        fixture.binding.tmux = fixture.root.join("record-tmux");
+        std::fs::write(&fixture.binding.tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/tmux-calls\"\nexit 93\n").unwrap();
+        std::fs::set_permissions(&fixture.binding.tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
+        let mut seat = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();
+        drop(backend);
+        let socket = fixture.root.join("s");
+        let old_listener = UnixListener::bind(&socket).unwrap();
+        let old = std::fs::symlink_metadata(&socket).unwrap();
+        std::fs::remove_file(&socket).unwrap();
+        let new_listener = UnixListener::bind(&socket).unwrap();
+        let new = std::fs::symlink_metadata(&socket).unwrap();
+        assert_ne!((old.dev(), old.ino()), (new.dev(), new.ino()));
+        let directory = ScopedDirectory::create(&fixture.root.join("native"), seat.identity.clone()).unwrap();
+        let owner = directory.receipt();
+        let signature = team_agent_contract::host::digest_hex(digest(format!("{}:{}:{}:{}:{}:{}", owner.owner.scope.as_str(), owner.owner.seat.as_str(), owner.owner.instance.as_str(), owner.owner.generation.0, owner.device, owner.inode).as_bytes()));
+        seat.binding_key = team_agent_contract::host::digest_hex(digest(format!("shared-v1:{signature}:{}:{}:false:{}", old.dev(), old.ino(), socket.display()).as_bytes()));
+        seat.native = discovered.native;
+        seat.evidence_kind = EvidenceKind::Native;
+        seat.process = Some(process.identity.clone());
+        seat.endpoint = socket.to_string_lossy().into_owned();
+        seat.session = Some(ResumeBinding { provider: seat.provider.clone(), native_session: NativeSessionId::new("01a13e52-77d5-7580-81cc-2f5d4749aba1").unwrap(),
+            storage: SessionStorage::Local, cwd: seat.cwd.clone(), native: seat.native.clone(), source: seat.identity.clone(),
+            origin: CaptureOrigin::CurrentNativeSession, evidence_kind: EvidenceKind::Native, evidence_sha256: digest(b"s6-native-session"), backing: None });
+        seat.physical = Some(team_agent_contract::host::transport::TargetReceipt {
+            directory: owner.clone(), endpoint: socket.clone(), socket_device: old.dev(), socket_inode: old.ino(), shared_endpoint: true, created_session: false,
+            session: "$1".into(), window: "@1".into(), pane: seat.pane.clone(), columns: 120, rows: 40, binding: seat.binding_key.clone(), process,
+            provider: seat.provider.clone(), cwd: seat.cwd.clone(), native: seat.native.clone(), evidence_kind: seat.evidence_kind,
+            candidate_sha256: fixture.binding.candidate_sha256, native_session: seat.session.as_ref().map(|s| s.native_session.clone()),
+        });
+        fixture.store().fixture_put_seat(&seat).unwrap();
+        write_role(&fixture.binding, &fixture.identity, &fixture.role).unwrap();
+        let stopped = stop(&fixture.root, "test", &fixture.identity.seat).unwrap();
+        assert_eq!(stopped.outcome, Outcome::Committed, "{stopped:?}");
+        assert_eq!(stopped.target.status, SeatStatus::Stopped);
+        assert_eq!(stopped.stop_receipt.as_ref().unwrap().method, "receipt_close_replaced_shared_endpoint");
+        let prepared = prepare_resume(&fixture.root, "test", &fixture.identity.seat, None).unwrap();
+        assert_eq!(prepared.native_launch(), Operation::Resume);
+        assert_eq!(prepared.request.resume.as_ref().unwrap().binding, seat.session.clone().unwrap());
+        assert!(!fixture.root.join("tmux-calls").exists(), "stop/preflight must never probe the replacement server");
+        let after = std::fs::symlink_metadata(&socket).unwrap();
+        assert_eq!((new.dev(), new.ino()), (after.dev(), after.ino()));
+        drop((old_listener, new_listener));
+    }
+
+    #[test]
     fn recovered_stop_intent_never_masks_native_seats_or_creation_receipts() {
         let mut fixture = RoleFixture::new();
         let backend = fixture.canonical(SeatStatus::Ready, Phase::F4Commit, Outcome::Committed, None);
