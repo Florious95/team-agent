@@ -148,6 +148,102 @@ fn shared_renderer_keeps_the_protocol_task_header_and_authoritative_final_token(
     unsafe_content.content = "\x1b[1m".into();
     assert!(PreparedEnvelope::from_logical(&unsafe_content).is_err());
 }
+// Receipt closure uses real process births and Unix sockets, not a provider subscription.
+fn s6_shared_stop_case(case: &str) {
+    use std::os::unix::{fs::{MetadataExt, PermissionsExt}, net::UnixListener};
+    use team_agent_contract::host::{digest, digest_hex, files::ScopedDirectory};
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    let parent = PathBuf::from("/tmp").canonicalize().unwrap().join(format!("ta-s6-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir(&parent).unwrap();
+    let sandbox = Sandbox { root: parent.join("owned"), parent };
+    let mut store = sandbox.store();
+    let mut seat = support::start(&mut store, &mut FakeHost::default(), &mut FakeIo::new("unused"), "worker").target;
+    let executable = PathBuf::from("/bin/sleep").canonicalize().unwrap();
+    let hash = fingerprint_file(&executable, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
+    let mut child = ChildGuard(std::process::Command::new(&executable).arg("110").current_dir(&sandbox.root).spawn().unwrap());
+    let mut process = capture_process(child.0.id(), &executable, hash, Duration::from_secs(5)).unwrap();
+    assert_eq!(sample_process(&process), ProcessState::Alive);
+    let observed = process.clone();
+    if case == "reused" { process.identity.birth_identity.push_str("-old"); }
+    else if case == "unknown" { process.identity.pid = u32::MAX; }
+    else if case != "alive" { child.0.kill().unwrap(); child.0.wait().unwrap(); assert_eq!(sample_process(&process), ProcessState::Exited); }
+    let endpoint = sandbox.root.join("s");
+    let old_listener = UnixListener::bind(&endpoint).unwrap();
+    let old = std::fs::symlink_metadata(&endpoint).unwrap();
+    let mut replacement = None;
+    if case != "same" {
+        std::fs::remove_file(&endpoint).unwrap();
+        match case {
+            "missing" => {},
+            "regular" => std::fs::write(&endpoint, "not a socket").unwrap(),
+            "symlink" => std::os::unix::fs::symlink("missing-target", &endpoint).unwrap(),
+            _ => replacement = Some(UnixListener::bind(&endpoint).unwrap()),
+        }
+    }
+    let directory = ScopedDirectory::create(&sandbox.root.join("native"), seat.identity.clone()).unwrap();
+    let owner = directory.receipt();
+    // Construct the persisted receipt's binding, not an oracle for stop behaviour.
+    let signature = digest_hex(digest(format!("{}:{}:{}:{}:{}:{}", owner.owner.scope.as_str(), owner.owner.seat.as_str(), owner.owner.instance.as_str(), owner.owner.generation.0, owner.device, owner.inode).as_bytes()));
+    let binding = digest_hex(digest(format!("shared-v1:{signature}:{}:{}:false:{}", old.dev(), old.ino(), endpoint.display()).as_bytes()));
+    seat.cwd = resolve_cwd(&sandbox.root).unwrap();
+    seat.endpoint = endpoint.to_string_lossy().into_owned();
+    seat.pane = "%77".into();
+    seat.binding_key = binding.clone();
+    seat.evidence_kind = EvidenceKind::Native;
+    seat.process = Some(process.identity.clone());
+    seat.native.executable_sha256 = hash;
+    seat.physical = Some(TargetReceipt {
+        directory: owner.clone(), endpoint: endpoint.clone(), socket_device: old.dev(), socket_inode: old.ino(),
+        shared_endpoint: true, created_session: false, session: "$1".into(), window: "@1".into(), pane: seat.pane.clone(),
+        columns: 120, rows: 40, binding, process, provider: seat.provider.clone(), cwd: seat.cwd.clone(), native: seat.native.clone(),
+        evidence_kind: EvidenceKind::Native, candidate_sha256: hash, native_session: seat.session.as_ref().map(|s| s.native_session.clone()),
+    });
+    let tmux = sandbox.root.join("record-tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\ncase \"$*\" in\n *list-sessions*) exit 0;;\n *display-message*) printf \"can't find pane: %%77\\n\" >&2; exit 1;;\n *) exit 92;;\nesac\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if case == "parent" { std::fs::set_permissions(&sandbox.root, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+    let before = std::fs::symlink_metadata(&endpoint).ok().map(|m| (m.dev(), m.ino(), m.mode()));
+    let descriptor = support::descriptor();
+    let hooks = support::hooks();
+    let clock = RealClock::new();
+    let mut runtime = PhysicalRuntime::new(Registration { descriptor: &descriptor, hooks: &hooks, controls: &[], startup: None, session_panel: None }, settings(&tmux), OperationId::new("s6-stop").unwrap(), &clock).unwrap();
+    let result = runtime.stop(&seat);
+    let calls = std::fs::read_to_string(sandbox.root.join("calls")).unwrap_or_default();
+    if matches!(case, "alive" | "unknown" | "parent" | "regular" | "symlink") {
+        assert!(result.is_err(), "{case}: {result:?}");
+        assert!(runtime.stop_receipt().is_none(), "{case}");
+    } else {
+        result.unwrap();
+        let receipt = runtime.stop_receipt().unwrap();
+        let method = match case { "missing" => "receipt_close_absent_shared_endpoint", "same" => "receipt_close_absent_shared_pane", _ => "receipt_close_replaced_shared_endpoint" };
+        assert_eq!(receipt.method, method, "{case}");
+        assert!(receipt.owned_process_absent && !receipt.owned_target_replaced);
+    }
+    if case == "same" {
+        assert_eq!(calls.lines().count(), 2, "{calls}");
+        assert!(calls.contains("list-sessions") && calls.contains("display-message"), "{calls}");
+    } else { assert!(calls.is_empty(), "{case} must issue zero tmux commands: {calls}"); }
+    assert_eq!(before, std::fs::symlink_metadata(&endpoint).ok().map(|m| (m.dev(), m.ino(), m.mode())));
+    if matches!(case, "alive" | "reused" | "unknown") { assert_eq!(sample_process(&observed), ProcessState::Alive); }
+    drop((replacement, old_listener));
+}
+
+#[test]
+fn s6_dead_or_reused_process_with_replaced_shared_endpoint_is_metadata_only() {
+    for case in ["dead", "reused"] { s6_shared_stop_case(case); }
+}
+#[test]
+fn s6_replaced_shared_endpoint_keeps_live_unknown_and_ownership_fences() {
+    for case in ["alive", "unknown", "parent", "regular", "symlink"] { s6_shared_stop_case(case); }
+}
+#[test]
+fn s6_missing_or_same_shared_endpoint_keeps_existing_stop_receipts() {
+    for case in ["missing", "same"] { s6_shared_stop_case(case); }
+}
+
 fn limits() -> HostLimits {
     HostLimits {
         command_output: OutputLimits {
