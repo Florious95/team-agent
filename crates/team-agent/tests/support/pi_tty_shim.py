@@ -17,6 +17,29 @@ BEGIN = b"\x1b[200~"
 END = b"\x1b[201~"
 
 
+def mcp_exchange(binary, workspace, agent, call):
+    """One real MCP stdio session on the worker's submit path: initialize,
+    initialized, then `call` as request id 2. Returns (child, id-2 reply)."""
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2024-11-05", "capabilities": {},
+            "clientInfo": {"name": "controlled-pi-tty", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, **call},
+    ]
+    env = os.environ.copy()
+    env["TEAM_AGENT_ID"] = agent
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    child = subprocess.run(
+        [binary, "mcp-server", "--workspace", str(workspace)],
+        input="".join(json.dumps(request) + "\n" for request in requests),
+        capture_output=True, text=True, env=env, timeout=10,
+    )
+    replies = [json.loads(line) for line in child.stdout.splitlines() if line.strip()]
+    return child, next((reply for reply in replies if reply.get("id") == 2), {})
+
+
 def main():
     binary, workspace, agent = sys.argv[1:]
     workspace = Path(workspace)
@@ -53,25 +76,8 @@ def main():
         transcript.extend(payload.split("\n"))
         draft.clear()
         render()
-        requests = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-                "protocolVersion": "2024-11-05", "capabilities": {},
-                "clientInfo": {"name": "controlled-pi-tty", "version": "1"}}},
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                "name": "report_result", "arguments": {"summary": payload, "status": "completed"}}},
-        ]
-        env = os.environ.copy()
-        env["TEAM_AGENT_ID"] = agent
-        env.pop("TMUX", None)
-        env.pop("TMUX_PANE", None)
-        child = subprocess.run(
-            [binary, "mcp-server", "--workspace", str(workspace)],
-            input="".join(json.dumps(request) + "\n" for request in requests),
-            capture_output=True, text=True, env=env, timeout=10,
-        )
-        replies = [json.loads(line) for line in child.stdout.splitlines() if line.strip()]
-        reply = next((reply for reply in replies if reply.get("id") == 2), {})
+        child, reply = mcp_exchange(binary, workspace, agent, {"method": "tools/call", "params": {
+            "name": "report_result", "arguments": {"summary": payload, "status": "completed"}}})
         result = reply.get("result", {})
         record("mcp_result", exit_code=child.returncode, response=reply)
         if child.returncode != 0 or "error" in reply or result.get("isError") or not result:
@@ -80,6 +86,11 @@ def main():
     try:
         tty.setraw(0)
         os.write(1, b"\x1b[?1049h\x1b[?2004h")
+        # Real Pi registers its MCP server at session_start
+        # (pi_mcp_extension.js:95), before its composer is ready. No tty event.
+        child, reply = mcp_exchange(binary, workspace, agent, {"method": "tools/list"})
+        if child.returncode != 0 or "error" in reply or not isinstance(reply.get("result", {}).get("tools"), list):
+            raise RuntimeError(f"controlled MCP session_start failed: {reply!r} {child.stderr}")
         render()
         record("ready")
         while True:
