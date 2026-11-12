@@ -798,8 +798,11 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
         };
         let pid = pane.pane_pid.unwrap_or(0);
         let expected = state.get("pane_pid").and_then(Value::as_u64).unwrap_or(0);
+        let birth = team_agent_contract::host::process::process_birth_identity(pid).ok();
+        let recorded_birth = field(state, "pane_birth_identity");
         if (expected != 0 && expected != u64::from(pid))
-            || team_agent_contract::host::process::process_birth_identity(pid).is_err()
+            || birth.is_none()
+            || (!recorded_birth.is_empty() && birth.as_deref() != Some(recorded_birth))
         {
             failed_seats.insert(agent.clone());
             faults.push(format!("{agent}: ghost/PID identity mismatch"));
