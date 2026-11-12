@@ -2153,7 +2153,7 @@ mod tests {
         fixture.binding.candidate = std::env::current_exe().unwrap().canonicalize().unwrap();
         fixture.binding.candidate_sha256 = fingerprint_file(&fixture.binding.candidate, 1024 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         fixture.binding.tmux = fixture.root.join("record-tmux");
-        std::fs::write(&fixture.binding.tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/tmux-calls\"\nexit 93\n").unwrap();
+        std::fs::write(&fixture.binding.tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/tmux-calls\"\ncase \"$*\" in *list-sessions*) exit 0;; *) exit 93;; esac\n").unwrap();
         std::fs::set_permissions(&fixture.binding.tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
         let backend = fixture.canonical(SeatStatus::Ready, Phase::F5Receipt, Outcome::Committed, None);
         let mut seat = backend.store.seat(&fixture.identity.seat).unwrap().unwrap();

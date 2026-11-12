@@ -173,6 +173,9 @@ fn s6_minimal_two_seat_team_resumes_in_one_start_call() {
     fs::create_dir_all(ws.path().join("agents")).unwrap();
     for id in ["one", "two"] { fs::write(role_path(&ws, id), "---\nprovider: claude\n---\nMinimal role.\n").unwrap(); }
     let shims = Shims::install(&ws);
+    executable(&ws.path().join(".role-lifecycle-shims/claude"), &format!(
+        "#!/bin/sh\nset -eu\n[ -n \"${{TEAM_AGENT_AGENT_ID:-}}\" ] && [ -n \"${{TEAM_AGENT_WORKSPACE:-}}\" ] || exit 0\nprintf '%s\\0' claude \"$@\" > \"$TEAM_AGENT_WORKSPACE/.role-lifecycle-launch/$TEAM_AGENT_AGENT_ID.argv\"\nexec {} fake-worker --workspace \"$TEAM_AGENT_WORKSPACE\" --agent-id \"$TEAM_AGENT_AGENT_ID\"\n",
+        quote(&framework::ta_binary().to_string_lossy())));
     let path = root(&ws);
     let created = run_ta_env(&ws, &["start", "--from", &path, "--workspace", &path, "--team", "rolelife", "--no-display", "--json"], &shims.env());
     assert!(quick_start_workers_available(&created), "{} {}", created.stdout, created.stderr);
