@@ -181,6 +181,68 @@ fn legacy_start_receipt_preserves_the_committed_carrier_across_own_claim() {
     }
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn s6_successful_start_refreshes_only_its_own_planned_writes() {
+    let (root, intent) = fixture(&["one", "two"]);
+    install(root.path(), &[("one", "stopped", false), ("two", "stopped", false)]);
+    let mut plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+    let spec = crate::model::paths::runtime_spec_path(root.path(), "fixture");
+    remember(&mut plan, &spec).unwrap();
+    let original_files = plan.files.len();
+    let mut executed = Vec::new();
+    let result = execute_plan(plan, &mut |step| {
+        let id = step.agent().unwrap();
+        executed.push(id.to_owned());
+        if id == "one" {
+            std::fs::write(root.path().join("agents/one.md"), "owned normalized role\n").unwrap();
+            std::fs::write(&spec, "owned normalized runtime spec\n").unwrap();
+        }
+        Ok(CmdResult::from_json(json!({"ok":true,"status":"started"}), true))
+    }, &mut |plan, step, after_stop| {
+        assert_eq!(plan.files.len(), original_files, "refresh must not add inputs");
+        recheck(plan, step, after_stop)
+    }).unwrap();
+    assert_eq!(executed, ["one", "two"], "{result:?}");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn s6_successful_start_keeps_other_role_and_team_file_fences() {
+    for changed in ["agents/two.md", "TEAM.md"] {
+        let (root, intent) = fixture(&["one", "two"]);
+        install(root.path(), &[("one", "stopped", false), ("two", "stopped", false)]);
+        let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+        let mut executed = Vec::new();
+        let result = execute_plan(plan, &mut |step| {
+            executed.push(step.agent().unwrap().to_owned());
+            std::fs::write(root.path().join("agents/one.md"), "owned normalization\n").unwrap();
+            std::fs::write(root.path().join(changed), "concurrent edit\n").unwrap();
+            Ok(CmdResult::from_json(json!({"ok":true,"status":"started"}), true))
+        }, &mut recheck).unwrap();
+        assert_eq!(executed, ["one"]);
+        let text = crate::cli::emit::emit(&result.output, true).unwrap();
+        assert!(text.contains("role/spec changed since planning") && text.contains(changed), "{text}");
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn s6_failed_start_never_refreshes_its_written_role() {
+    let (root, intent) = fixture(&["one", "two"]);
+    install(root.path(), &[("one", "stopped", false), ("two", "stopped", false)]);
+    let plan = plan_with_observer(intent, |_, _, _| Ok(Observation::StoppedVerified)).unwrap();
+    let mut executed = Vec::new();
+    let result = execute_plan(plan, &mut |step| {
+        executed.push(step.agent().unwrap().to_owned());
+        std::fs::write(root.path().join("agents/one.md"), "failed step write\n").unwrap();
+        Err(CliError::Runtime("injected start failure".into()))
+    }, &mut recheck).unwrap();
+    assert_eq!(executed, ["one"]);
+    let text = crate::cli::emit::emit(&result.output, true).unwrap();
+    assert!(text.contains("injected start failure") && text.contains("role/spec changed since planning") && text.contains("agents/one.md"), "{text}");
+}
+
 fn write_role(root: &Path, id: &str) {
     std::fs::write(root.join("agents").join(format!("{id}.md")),format!("---\nname: {id}\nprovider: pi\nmodel: openai-codex/gpt-6-luna\neffort: max\ndangerously_skip_permissions: true\n---\nFixture\n")).unwrap();
 }
