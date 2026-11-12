@@ -202,7 +202,7 @@ fn s6_shared_stop_case(case: &str) {
         evidence_kind: EvidenceKind::Native, candidate_sha256: hash, native_session: seat.session.as_ref().map(|s| s.native_session.clone()),
     });
     let tmux = sandbox.root.join("record-tmux");
-    std::fs::write(&tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\ncase \"$*\" in\n *list-sessions*) exit 0;;\n *display-message*) printf \"can't find pane: %%77\\n\" >&2; exit 1;;\n *) exit 92;;\nesac\n").unwrap();
+    std::fs::write(&tmux, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\ncase \"$*\" in\n *list-sessions*) exit 0;;\n *display-message*) printf '\\t\\t\\t\\t\\t\\t\\t\\t\\t\\t\\t\\t\\n'; exit 0;;\n *) exit 92;;\nesac\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     if case == "parent" { std::fs::set_permissions(&sandbox.root, std::fs::Permissions::from_mode(0o755)).unwrap(); }
     let before = std::fs::symlink_metadata(&endpoint).ok().map(|m| (m.dev(), m.ino(), m.mode()));
