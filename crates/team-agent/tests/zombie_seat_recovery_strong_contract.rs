@@ -623,8 +623,9 @@ fn z4_one_shot_seat_stop_reports_stopped_true_and_all_sources_clean() {
     case.shutdown();
 }
 
-/// Z5 — the NEW add-agent --force surface after a real pane death: revives the
-/// zombie seat, leaves the same-team peer untouched (positive isolation), and
+/// Z5 — add-agent after a real pane death (D1 rule M: `--force` is retired, the
+/// plain call is the revive surface): revives the zombie seat, leaves the
+/// same-team peer untouched (positive isolation), and
 /// (negative) never touches a same-named seat in ANOTHER team that shares the
 /// SAME tmux endpoint.
 ///
@@ -656,9 +657,9 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
     );
     let peer_before = case.pane_for_window_in_session(&case.session_for("teamA"), "w2");
 
-    // Kill teamA/w1's pane → zombie, then force-recreate it.
+    // Kill teamA/w1's pane → zombie, then revive it with plain add-agent.
     case.kill_pane("w1"); // teamA is the case's own team
-    let (force_ok, force) = case.cli_json(&[
+    let (revive_ok, revive) = case.cli_json(&[
         "add-agent",
         "w1",
         "--role-file",
@@ -671,12 +672,11 @@ fn z5_shared_endpoint_force_recreate_isolates_same_team_peer_and_spares_cross_te
         case.workspace_str(),
         "--team",
         "teamA",
-        "--force",
         "--json",
     ]);
     assert!(
-        force_ok,
-        "Z5: add-agent --force on a zombie must exit 0 AND ok=true: {force}"
+        revive_ok,
+        "Z5: add-agent on a zombie must exit 0 AND ok=true: {revive}"
     );
     assert!(
         case.pane_for_window_in_session(&case.session_for("teamA"), "w1")
