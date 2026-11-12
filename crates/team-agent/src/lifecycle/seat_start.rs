@@ -986,47 +986,115 @@ fn converge(
             &selected.state,
         )?
         .backend;
-        // The canonical resolver owns precedence; the private creation leaf sees
-        // one complete document, not a second set of competing CLI decisions.
-        role_config::atomic_write(&declaration.destination, declaration.text.as_bytes())?;
-        let mut spec = role_config::read_spec(selected)?;
-        if spec
-            .get("agents")
-            .and_then(Yaml::as_list)
-            .is_some_and(|rows| {
-                rows.iter()
-                    .any(|row| row.get("id").and_then(Yaml::as_str) == Some(request.agent.as_str()))
-            })
-        {
-            role_config::replace_spec_agent(
-                &mut spec,
-                &request.agent,
-                &declaration.compiled.agent,
-            )?;
-            crate::model::spec::validate_spec(&spec, &selected.run_workspace).map_err(failed)?;
-            role_config::atomic_write(
-                &crate::model::paths::runtime_spec_path(
-                    &selected.run_workspace,
-                    &selected.team_key,
-                ),
-                yaml::dumps(&spec).as_bytes(),
-            )?;
-        }
-        let report = super::launch::add_agent_with_transport_at_paths_locked(
-            &selected.run_workspace,
-            &selected.team_dir,
-            &request.agent,
-            &declaration.destination,
-            true,
-            Some(&selected.team_key),
-            &transport,
-        )?;
+        let report = create_existing_team_seat(request, selected, &declaration, &transport)?;
         result["role_file"] = json!(report.role_file);
         result["start_mode"] = json!(report.start_mode);
     } else {
         bootstrap(request, &declaration, &mut result)?;
     }
     Ok(result)
+}
+
+struct StagedStartFile {
+    path: PathBuf,
+    prior: Option<Vec<u8>>,
+    written: Option<Vec<u8>>,
+    label: &'static str,
+}
+
+impl StagedStartFile {
+    fn capture(path: &Path, label: &'static str) -> Result<Self, LifecycleError> {
+        let prior = match std::fs::symlink_metadata(path) {
+            Ok(_) => Some(std::fs::read(path).map_err(failed)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(failed(e)),
+        };
+        Ok(Self { path: path.to_path_buf(), prior, written: None, label })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), LifecycleError> {
+        role_config::atomic_write(&self.path, bytes)?;
+        self.written = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+// Only explicit launch errors roll back staged declarations. Successful degraded
+// or unverified receipts keep their existing semantics and no process is touched.
+struct StartWriteSnapshot {
+    role: StagedStartFile,
+    agent_row: Option<Value>,
+}
+
+impl StartWriteSnapshot {
+    fn capture(selected: &SelectedTeam, agent: &AgentId, role: &Path) -> Result<Self, LifecycleError> {
+        Ok(Self {
+            role: StagedStartFile::capture(role, "role file")?,
+            agent_row: selected.state.get("agents").and_then(|rows| rows.get(agent.as_str())).cloned(),
+        })
+    }
+
+    fn complete<T>(self, selected: &SelectedTeam, agent: &AgentId, spec: Option<StagedStartFile>, outcome: Result<T, LifecycleError>) -> Result<T, LifecycleError> {
+        let error = match outcome {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let mut failures = Vec::new();
+        for file in std::iter::once(self.role).chain(spec) {
+            match role_config::restore_if_unchanged(&file.path, file.prior.as_deref(), file.written.as_deref()) {
+                Ok(role_config::FileRestore::Unchanged | role_config::FileRestore::Restored) => {}
+                Ok(role_config::FileRestore::Skipped) => failures.push(format!("rollback incomplete: {} changed concurrently; inspect before retrying", file.label)),
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        // Commit only this seat against latest, with capture backfill disabled for
+        // that seat, so archived/new capture fields cannot leak into the old row.
+        let ids = [agent.as_str()];
+        let restored = StateRepository::new(&selected.run_workspace).commit(
+            StateWriteIntent::RestartTeam {
+                team_key: &selected.team_key,
+                topology_authority_agent_ids: &ids,
+                skip_capture_backfill_agent_ids: &ids,
+            },
+            |state| {
+                if !state.get("agents").is_some_and(Value::is_object) { state["agents"] = json!({}); }
+                if let Some(rows) = state.get_mut("agents").and_then(Value::as_object_mut) {
+                    match self.agent_row {
+                        Some(row) => { rows.insert(agent.to_string(), row); }
+                        None => { rows.remove(agent.as_str()); }
+                    }
+                }
+            },
+        );
+        if let Err(error) = restored { failures.push(error.to_string()); }
+        if !failures.is_empty() {
+            return Err(LifecycleError::StatePersist(format!("{error}; {}", failures.join("; "))));
+        }
+        Err(error)
+    }
+}
+
+fn create_existing_team_seat(
+    request: &StartRequest,
+    selected: &SelectedTeam,
+    declaration: &Declaration,
+    transport: &dyn crate::transport::Transport,
+) -> Result<super::AddAgentReport, LifecycleError> {
+    let mut snapshot = StartWriteSnapshot::capture(selected, &request.agent, &declaration.destination)?;
+    snapshot.role.write(declaration.text.as_bytes())?;
+    // The canonical resolver owns precedence. The inner reservation owns the
+    // only spec write and rollback, including replacement of a declared row.
+    let outcome = super::launch::add_agent_with_transport_at_paths_locked(
+        &selected.run_workspace,
+        &selected.team_dir,
+        &request.agent,
+        &declaration.destination,
+        true,
+        Some(&selected.team_key),
+        transport,
+        &declaration.compiled.agent,
+    );
+    snapshot.complete(selected, &request.agent, None, outcome)
 }
 
 fn start_existing(
@@ -1156,10 +1224,12 @@ fn start_existing(
         }
         archive_session(selected, &request.agent)?;
     }
-    role_config::atomic_write(&declaration.destination, declaration.text.as_bytes())?;
     let spec_path =
         crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
-    role_config::atomic_write(&spec_path, yaml::dumps(&spec).as_bytes())?;
+    let mut snapshot = StartWriteSnapshot::capture(selected, &request.agent, &declaration.destination)?;
+    let mut spec_snapshot = StagedStartFile::capture(&spec_path, "runtime spec")?;
+    snapshot.role.write(declaration.text.as_bytes())?;
+    spec_snapshot.write(yaml::dumps(&spec).as_bytes())?;
     role_config::update_agent_config(
         selected,
         &request.agent,
@@ -1170,19 +1240,19 @@ fn start_existing(
     if native(provider(&declaration.compiled.agent)) {
         let id = team_agent_contract::contract::types::SeatId::new(request.agent.as_str())
             .map_err(failed)?;
-        let projection = crate::contract_runtime::framework::start_configured(
+        let projection = snapshot.complete(selected, &request.agent, Some(spec_snapshot), crate::contract_runtime::framework::start_configured(
             &selected.run_workspace,
             &selected.team_dir,
             &selected.team_key,
             &id,
         )
-        .map_err(failed)?;
+        .map_err(failed))?;
         return Ok(
             json!({"status":"running","runtime":"contract","session_id":projection.get("session_id"),
             "generation":projection.get("generation"),"configuration_committed":true}),
         );
     }
-    let outcome = super::restart::start_agent_at_paths_with_session(
+    let outcome = snapshot.complete(selected, &request.agent, Some(spec_snapshot), super::restart::start_agent_at_paths_with_session(
         &selected.run_workspace,
         spec_path.parent().unwrap_or(&selected.team_dir),
         &request.agent,
@@ -1198,7 +1268,7 @@ fn start_existing(
         },
         Some(&selected.team_key),
         transport,
-    )?;
+    ))?;
     Ok(match outcome {
         StartAgentOutcome::Running {
             start_mode,
@@ -1766,6 +1836,147 @@ mod tests {
         let live = carrier_fixture::FixtureGroup::presence(temp.path(), std::time::Duration::from_secs(30));
         super::super::carrier::record(selected.state["agents"]["reviewer"].as_object_mut().unwrap(), Some(live.id()));
         assert!(!carrier_birth(&selected, &id).unwrap().is_null());
+    }
+
+    fn a16_fixture(existing: bool) -> (crate::lifecycle::tests::TestWorkspace, SelectedTeam, String) {
+        let temp = crate::lifecycle::tests::TestWorkspace::new();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("agents")).unwrap();
+        std::fs::write(root.join("TEAM.md"), "---\nname: current\nprovider: fake\n---\nTeam\n").unwrap();
+        for id in ["seed", "new"] {
+            std::fs::write(root.join(format!("agents/{id}.md")),
+                format!("---\nname: {id}\nprovider: fake\nmodel: fake\n---\nRole\n")).unwrap();
+        }
+        let spec_path = crate::model::paths::runtime_spec_path(&root, "current");
+        // Deliberate extra whitespace proves restoration does not reserialize YAML.
+        let before_spec = format!("{}\n", yaml::dumps(&crate::compiler::compile_team(&root).unwrap()));
+        std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+        std::fs::write(&spec_path, &before_spec).unwrap();
+        if !existing { std::fs::remove_file(root.join("agents/new.md")).unwrap(); }
+        let mut team = json!({"team_key":"current","team_name":"current","workspace":root,"team_dir":root,
+            "session_name":"a16-current","agents":{"seed":{"provider":"fake","status":"stopped","marker":"keep"}}});
+        if existing { team["agents"]["new"] = json!({"provider":"fake","model":"fake","status":"stopped"}); }
+        let mut state = team.clone();
+        state["teams"] = json!({"current":team});
+        StateRepository::new(&root).save(StateWriteIntent::LaunchTeam, &state).unwrap();
+        let selected = SelectedTeam {
+            run_workspace: root.clone(), team_key: "current".into(), team_dir: root,
+            spec_workspace: None, spec_path: Some(spec_path), state: team,
+        };
+        (temp, selected, before_spec)
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a16_creation_launch_error_removes_new_role_and_restores_spec_and_row() {
+        use crate::transport::test_support::OfflineTransport;
+        let (_temp, selected, before_spec) = a16_fixture(false);
+        assert!(super::super::launch::surface_has_runtime_team(&selected.state, "current"));
+        let mut request = request(&selected.run_workspace);
+        request.agent = AgentId::new("new");
+        request.patch.provider = Some("fake".into());
+        request.patch.model = Some("replacement".into());
+        let declaration = resolve(&request, Some(&selected)).unwrap();
+        let role = selected.team_dir.join("agents/new.md");
+        assert_eq!(declaration.destination, role);
+        assert!(!role.exists());
+        let _lock = super::super::lock::acquire_seat_lifecycle_lock(
+            super::super::lock::LifecycleLockRequest { workspace: &selected.run_workspace,
+                operation: "start", team: Some("current"), agent_id: Some(&request.agent) }
+        ).unwrap();
+        let transport = OfflineTransport::new().with_spawn_failure("new", "a16 launch failure");
+        // This is an explicit launch error, not a degraded success.
+        assert!(create_existing_team_seat(&request, &selected, &declaration, &transport).is_err());
+        assert!(!role.exists(), "failed creation left its generated role behind");
+        assert_eq!(std::fs::read_to_string(selected.spec_path.as_ref().unwrap()).unwrap(), before_spec);
+        let after = StateRepository::new(&selected.run_workspace).load_workspace_if_exists_without_migrations().unwrap().unwrap();
+        assert!(after["teams"]["current"]["agents"].get("new").is_none());
+        assert_eq!(after["teams"]["current"]["agents"]["seed"], selected.state["agents"]["seed"]);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn a16_both_rollback_owners_preserve_concurrent_files_and_exact_uncontended_bytes() {
+        use super::super::launch::{prepare_reserved_spec, rollback_add_agent_atomic,
+            with_spec_rollback_warning, write_spec_atomic};
+        for existing in [true, false] {
+            for (fail_launch, spec_conflict, role_conflict) in [
+                (true, false, false), (true, true, false), (true, false, true), (false, false, false)
+            ] {
+                let (_temp, selected, before_spec) = a16_fixture(existing);
+                let mut request = request(&selected.run_workspace);
+                request.agent = AgentId::new("new");
+                request.patch.provider = Some("fake".into());
+                request.patch.model = Some("replacement".into());
+                let declaration = resolve(&request, Some(&selected)).unwrap();
+                let role = &declaration.destination;
+                let before_role = std::fs::read(role).ok();
+                let spec_path = selected.spec_path.as_ref().unwrap();
+                let _lock = super::super::lock::acquire_seat_lifecycle_lock(
+                    super::super::lock::LifecycleLockRequest { workspace: &selected.run_workspace,
+                        operation: "start", team: Some("current"), agent_id: Some(&request.agent) }
+                ).unwrap();
+                let mut snapshot = StartWriteSnapshot::capture(&selected, &request.agent, role).unwrap();
+                snapshot.role.write(declaration.text.as_bytes()).unwrap();
+                let mut spec = role_config::read_spec(&selected).unwrap();
+                if existing {
+                    role_config::replace_spec_agent(&mut spec, &request.agent, &declaration.compiled.agent).unwrap();
+                    crate::model::spec::validate_spec(&spec, &selected.run_workspace).unwrap();
+                } else {
+                    prepare_reserved_spec(&mut spec, &request.agent, declaration.compiled.agent.clone(),
+                        Some(&declaration.compiled.agent), &selected.run_workspace).unwrap();
+                }
+                let count = |spec: &Yaml| spec.get("agents").and_then(Yaml::as_list).unwrap().iter()
+                    .filter(|row| row.get("id").and_then(Yaml::as_str) == Some("new")).count();
+                assert_eq!(count(&spec), 1, "successful reservation must have exactly one id");
+                let written_spec = yaml::dumps(&spec);
+                let spec_snapshot = if existing {
+                    let mut file = StagedStartFile::capture(spec_path, "runtime spec").unwrap();
+                    file.write(written_spec.as_bytes()).unwrap();
+                    Some(file)
+                } else {
+                    write_spec_atomic(spec_path, &spec).unwrap();
+                    None // The creation leaf must never restore the spec a second time.
+                };
+                let repo = StateRepository::new(&selected.run_workspace);
+                repo.commit(StateWriteIntent::StartAgent { team_key: "current", agent_id: "new" },
+                    |state| state["agents"]["new"] = json!({"provider":"fake","status":"starting",
+                        "session_id":"00000000-0000-4000-8000-000000000016"})).unwrap();
+                let concurrent_spec = format!("{written_spec}\n# concurrent seat owns these bytes\n");
+                let concurrent_role = b"concurrent role writer\n";
+                if spec_conflict { std::fs::write(spec_path, &concurrent_spec).unwrap(); }
+                if role_conflict { std::fs::write(role, concurrent_role).unwrap(); }
+                let result = if fail_launch {
+                    let error = refused("a16 injected launch failure");
+                    let error = if existing { error } else {
+                        let skipped = rollback_add_agent_atomic(&selected.run_workspace, spec_path,
+                            Some(&before_spec), Some(&written_spec), None, Some("current"),
+                            &request.agent, "a16_injected_launch_failure");
+                        assert_eq!(skipped, spec_conflict);
+                        with_spec_rollback_warning(error, skipped)
+                    };
+                    snapshot.complete::<()>(&selected, &request.agent, spec_snapshot, Err(error))
+                } else {
+                    snapshot.complete(&selected, &request.agent, spec_snapshot, Ok(()))
+                };
+                if !fail_launch {
+                    result.unwrap();
+                    assert_eq!(std::fs::read(role).unwrap(), declaration.text.as_bytes());
+                    assert_eq!(std::fs::read_to_string(spec_path).unwrap(), written_spec);
+                    assert_eq!(count(&role_config::read_spec(&selected).unwrap()), 1);
+                    continue;
+                }
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("a16 injected launch failure"));
+                assert_eq!(message.contains("rollback incomplete: runtime spec changed concurrently; inspect before retrying"), spec_conflict);
+                assert_eq!(message.contains("rollback incomplete: role file changed concurrently; inspect before retrying"), role_conflict);
+                assert_eq!(std::fs::read_to_string(spec_path).unwrap(), if spec_conflict { concurrent_spec } else { before_spec });
+                assert_eq!(std::fs::read(role).ok(), if role_conflict { Some(concurrent_role.to_vec()) } else { before_role });
+                let after = repo.load_workspace_if_exists_without_migrations().unwrap().unwrap();
+                assert_eq!(after["teams"]["current"]["agents"].get("new"), selected.state["agents"].get("new"));
+                assert_eq!(after["teams"]["current"]["agents"]["seed"], selected.state["agents"]["seed"]);
+            }
+        }
     }
 
     #[test]

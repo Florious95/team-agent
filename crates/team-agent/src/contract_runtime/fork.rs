@@ -113,9 +113,10 @@ fn fork_locked(
         Err(e) => return Err(error(e)),
     };
     write_new(&role_path, role_text.as_bytes()).map_err(error)?;
-    let undo = Undo {
+    let mut undo = Undo {
         workspace: workspace.to_path_buf(), team: team.to_owned(), target: target_id.clone(),
         role_path: role_path.clone(), role_bytes: role_text.into_bytes(), spec_path: spec_path.clone(), pre_spec,
+        written_spec: None,
     };
     let result = (|| -> Result<Value, CliError> {
         let config = framework::team_config(workspace, &selected.team_dir, team, Some(target_id.as_str())).map_err(error)?
@@ -125,7 +126,7 @@ fn fork_locked(
         if role.paused || role.provider != parent.provider {
             return Err(error("forked contract role is paused or changed provider; nothing was started"));
         }
-        register_spec(selected, &role_path, target, &spec_path, undo.pre_spec.as_deref())?;
+        undo.written_spec = Some(register_spec(selected, &role_path, target, &spec_path, undo.pre_spec.as_deref())?);
         let record = native_fork(workspace, team, source_id, role, &config.members).map_err(error)?;
         if record.outcome != Outcome::Committed {
             return Err(error(BackendError::Shutdown {
@@ -245,7 +246,7 @@ fn register_spec(
     target: &str,
     spec_path: &Path,
     pre_spec: Option<&str>,
-) -> Result<(), CliError> {
+) -> Result<String, CliError> {
     let mut spec = crate::compiler::compile_team(&selected.team_dir).map_err(error)?;
     crate::lifecycle::launch::spec_state::override_spec_workspace(&mut spec, &selected.run_workspace);
     let workspace_text = spec.get("team").and_then(|team| team.get("workspace")).and_then(Yaml::as_str)
@@ -260,7 +261,9 @@ fn register_spec(
     }
     let mut latest = pre_spec.and_then(|text| crate::model::yaml::loads(text).ok()).unwrap_or(spec);
     inject_agent_into_spec(&mut latest, compiled.agent, &compiled.id).map_err(error)?;
-    crate::lifecycle::launch::spec_state::write_spec_atomic(spec_path, &latest).map_err(error)
+    let written = crate::model::yaml::dumps(&latest);
+    crate::lifecycle::role_config::atomic_write(spec_path, written.as_bytes()).map_err(error)?;
+    Ok(written)
 }
 
 /// The parent's role document under the target's identity: its own name, the
@@ -302,6 +305,7 @@ struct Undo {
     role_bytes: Vec<u8>,
     spec_path: PathBuf,
     pre_spec: Option<String>,
+    written_spec: Option<String>,
 }
 
 impl Undo {
@@ -317,10 +321,14 @@ impl Undo {
                 ));
             }
         }
-        rollback_add_agent_atomic(
-            &self.workspace, &self.spec_path, self.pre_spec.as_deref(), None,
+        let skipped = rollback_add_agent_atomic(
+            &self.workspace, &self.spec_path, self.pre_spec.as_deref(), self.written_spec.as_deref(), None,
             Some(self.team.as_str()), &AgentId::new(self.target.as_str()), "fork_agent_failed",
         );
+        let failure = if skipped {
+            let message = match failure { CliError::Runtime(message) => message, other => other.to_string() };
+            error(format!("{message}; rollback incomplete: runtime spec changed concurrently; inspect before retrying"))
+        } else { failure };
         let residual = match std::fs::read(&self.role_path) {
             Ok(bytes) if bytes == self.role_bytes => std::fs::remove_file(&self.role_path)
                 .err()
@@ -337,9 +345,65 @@ impl Undo {
 }
 
 #[cfg(test)]
+#[path = "../../tests/support/temp_workspace.rs"]
+mod rollback_workspace;
+
+#[cfg(test)]
 mod tests {
     use super::fork_role_text;
     use crate::model::yaml::Value;
+
+    #[test]
+    fn a16_fork_undo_preserves_file_owners_and_exact_prior_bytes() {
+        use super::{error, Undo};
+        use crate::state::repository::{StateRepository, StateWriteIntent};
+        use team_agent_contract::contract::types::SeatId;
+        const PRIOR: &str = "# prior spec with whitespace\n\n";
+        const WRITTEN: &str = "# our written spec\n";
+        const WINNER: &str = "# concurrent spec winner\n";
+        for (tag, prior, written, current, role_changed, warning) in [
+            ("unwritten", Some(PRIOR), None, Some(PRIOR), false, false),
+            ("already-restored", Some(PRIOR), Some(WRITTEN), Some(PRIOR), false, false),
+            ("restore", Some(PRIOR), Some(WRITTEN), Some(WRITTEN), false, false),
+            ("spec-conflict", Some(PRIOR), Some(WRITTEN), Some(WINNER), false, true),
+            ("both-conflict", Some(PRIOR), Some(WRITTEN), Some(WINNER), true, true),
+            ("delete-new", None, Some(WRITTEN), Some(WRITTEN), false, false),
+            ("unwritten-conflict", Some(PRIOR), None, Some(WINNER), false, true),
+            ("absent-unwritten", None, None, None, false, false),
+        ] {
+            let temp = super::rollback_workspace::TempWorkspace::new("a16-fork", tag);
+            let root = temp.path();
+            let team = serde_json::json!({"team_key":"current","team_name":"current","workspace":root,
+                "session_name":"a16-fork","agents":{}});
+            let mut state = team.clone();
+            state["teams"] = serde_json::json!({"current":team});
+            StateRepository::new(root).save(StateWriteIntent::LaunchTeam, &state).unwrap();
+            let spec_path = crate::model::paths::runtime_spec_path(root, "current");
+            std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+            if let Some(current) = current { std::fs::write(&spec_path, current).unwrap(); }
+            let before_modified = std::fs::metadata(&spec_path).ok().map(|m| m.modified().unwrap());
+            let role_path = root.join("child.md");
+            let role_bytes = b"our role bytes\n".to_vec();
+            let role_winner = b"concurrent role winner\n";
+            std::fs::write(&role_path, if role_changed { role_winner.as_slice() } else { &role_bytes }).unwrap();
+            let undo = Undo {
+                workspace: root.to_path_buf(), team: "current".into(),
+                target: SeatId::new("child").unwrap(), role_path: role_path.clone(), role_bytes,
+                spec_path: spec_path.clone(), pre_spec: prior.map(str::to_owned),
+                written_spec: written.map(str::to_owned),
+            };
+            let message = undo.run(error("a16 fork failure")).to_string();
+            assert!(message.contains("a16 fork failure"), "{tag}: {message}");
+            assert_eq!(message.contains("rollback incomplete: runtime spec changed concurrently; inspect before retrying"), warning, "{tag}: {message}");
+            assert_eq!(message.contains("compensation incomplete"), role_changed, "{tag}: {message}");
+            let expected = if current == prior || (written.is_some() && current == written) { prior } else { current };
+            assert_eq!(std::fs::read_to_string(&spec_path).ok().as_deref(), expected, "{tag}");
+            if written.is_none() && current == prior {
+                assert_eq!(std::fs::metadata(&spec_path).ok().map(|m| m.modified().unwrap()), before_modified, "{tag}: untouched spec was rewritten");
+            }
+            assert_eq!(std::fs::read(&role_path).ok(), if role_changed { Some(role_winner.to_vec()) } else { None }, "{tag}");
+        }
+    }
 
     #[test]
     fn forked_role_keeps_its_body_and_takes_the_target_identity() {

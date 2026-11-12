@@ -269,6 +269,7 @@ pub fn add_agent(
         Some(reservation),
         false,
         None,
+        None,
     )
 }
 
@@ -318,6 +319,7 @@ pub(crate) fn add_agent_with_transport(
         Some(reservation),
         false,
         None,
+        None,
     )
 }
 
@@ -331,6 +333,7 @@ pub(crate) fn add_agent_with_transport_at_paths_locked(
     open_display: bool,
     team: Option<&str>,
     transport: &dyn Transport,
+    resolved_agent: &crate::model::yaml::Value,
 ) -> Result<AddAgentReport, LifecycleError> {
     add_agent_with_transport_at_paths_reserved(
         run_workspace,
@@ -343,6 +346,7 @@ pub(crate) fn add_agent_with_transport_at_paths_locked(
         None,
         true,
         None,
+        Some(resolved_agent),
     )
 }
 
@@ -370,6 +374,7 @@ pub(crate) fn add_forked_agent_locked(
         None,
         true,
         Some(parent),
+        None,
     )
 }
 
@@ -385,6 +390,7 @@ fn add_agent_with_transport_at_paths_reserved(
     reservation: Option<AgentReservation>,
     lifecycle_lock_held: bool,
     fork_parent: Option<&crate::provider::SessionId>,
+    resolved_agent: Option<&crate::model::yaml::Value>,
 ) -> Result<AddAgentReport, LifecycleError> {
     let runtime_state = crate::state::persist::load_runtime_state(run_workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -486,8 +492,9 @@ fn add_agent_with_transport_at_paths_reserved(
         .as_deref()
         .and_then(|text| crate::model::yaml::loads(text).ok())
         .unwrap_or(spec);
-    inject_agent_into_spec(&mut latest_spec, compiled_agent, &compiled.id)?;
+    prepare_reserved_spec(&mut latest_spec, agent_id, compiled_agent, resolved_agent, run_workspace)?;
     write_spec_atomic(&spec_path, &latest_spec)?;
+    let written_spec_text = crate::model::yaml::dumps(&latest_spec);
     drop(reservation_lock);
     #[cfg(unix)]
     if let Some(provider) = contract_provider {
@@ -496,6 +503,7 @@ fn add_agent_with_transport_at_paths_reserved(
             team_dir,
             &spec_path,
             pre_spec_text.as_deref(),
+            Some(&written_spec_text),
             &canonical_team_key,
             agent_id,
             &provider,
@@ -516,16 +524,17 @@ fn add_agent_with_transport_at_paths_reserved(
         role_file_path,
         fork_parent,
     ) {
-        rollback_add_agent_atomic(
+        let skipped = rollback_add_agent_atomic(
             run_workspace,
             &spec_path,
             pre_spec_text.as_deref(),
+            Some(&written_spec_text),
             None,
             Some(&canonical_team_key),
             agent_id,
             "state_upsert_failed",
         );
-        return Err(error);
+        return Err(with_spec_rollback_warning(error, skipped));
     }
     let started = match crate::lifecycle::restart::start_agent_at_paths(
         run_workspace,
@@ -539,16 +548,17 @@ fn add_agent_with_transport_at_paths_reserved(
     ) {
         Ok(started) => started,
         Err(error) => {
-            rollback_add_agent_atomic(
+            let skipped = rollback_add_agent_atomic(
                 run_workspace,
                 &spec_path,
                 pre_spec_text.as_deref(),
+                Some(&written_spec_text),
                 None,
                 Some(&canonical_team_key),
                 agent_id,
                 "start_agent_failed",
             );
-            return Err(error);
+            return Err(with_spec_rollback_warning(error, skipped));
         }
     };
     let (env, start_mode) = match started {
@@ -556,32 +566,34 @@ fn add_agent_with_transport_at_paths_reserved(
             env, start_mode, ..
         } => (env, start_mode),
         StartAgentOutcome::Noop { .. } => {
-            rollback_add_agent_atomic(
+            let skipped = rollback_add_agent_atomic(
                 run_workspace,
                 &spec_path,
                 pre_spec_text.as_deref(),
+                Some(&written_spec_text),
                 None,
                 Some(&canonical_team_key),
                 agent_id,
                 "start_agent_noop",
             );
-            return Err(LifecycleError::RequirementUnmet(format!(
+            return Err(with_spec_rollback_warning(LifecycleError::RequirementUnmet(format!(
                 "start_agent.noop: newly added agent {agent_id} must spawn, not reuse a live window"
-            )));
+            )), skipped));
         }
         StartAgentOutcome::Paused { .. } => {
-            rollback_add_agent_atomic(
+            let skipped = rollback_add_agent_atomic(
                 run_workspace,
                 &spec_path,
                 pre_spec_text.as_deref(),
+                Some(&written_spec_text),
                 None,
                 Some(&canonical_team_key),
                 agent_id,
                 "added_agent_paused",
             );
-            return Err(LifecycleError::RequirementUnmet(format!(
+            return Err(with_spec_rollback_warning(LifecycleError::RequirementUnmet(format!(
                 "added agent {agent_id} is paused"
-            )));
+            )), skipped));
         }
     };
     if let Some(reservation) = reservation {
@@ -597,6 +609,29 @@ fn add_agent_with_transport_at_paths_reserved(
 /// A contract seat starts in the native framework, never the legacy transport:
 /// the seeded row is what the framework's start/publish path projects onto.
 /// Its role must live in `<team_dir>/agents`, where the contract config reads.
+// Canonical start supplies the already-resolved row; legacy callers remain
+// append-only. Validate the complete reservation before its first spec write.
+pub(crate) fn prepare_reserved_spec(
+    spec: &mut Value,
+    agent_id: &AgentId,
+    compiled: Value,
+    resolved: Option<&Value>,
+    workspace: &Path,
+) -> Result<(), LifecycleError> {
+    if let Some(resolved) = resolved {
+        if spec.get("agents").and_then(Value::as_list).is_some_and(|rows|
+            rows.iter().any(|row| row.get("id").and_then(Value::as_str) == Some(agent_id.as_str()))) {
+            crate::lifecycle::role_config::replace_spec_agent(spec, agent_id, resolved)?;
+        }
+    }
+    inject_agent_into_spec(spec, compiled, agent_id.as_str())?;
+    if resolved.is_some() {
+        crate::model::spec::validate_spec(spec, workspace)
+            .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn add_contract_seat(
@@ -604,6 +639,7 @@ fn add_contract_seat(
     team_dir: &Path,
     spec_path: &Path,
     pre_spec_text: Option<&str>,
+    written_spec_text: Option<&str>,
     team_key: &str,
     agent_id: &AgentId,
     provider: &str,
@@ -615,6 +651,7 @@ fn add_contract_seat(
             run_workspace,
             spec_path,
             pre_spec_text,
+            written_spec_text,
             None,
             Some(team_key),
             agent_id,
@@ -626,8 +663,8 @@ fn add_contract_seat(
         "status": "starting", "contract_instance": null, "pane_id": null,
     });
     if let Err(error) = upsert_agent_entry(run_workspace, team_key, agent_id, seed) {
-        rollback("state_upsert_failed");
-        return Err(error);
+        let skipped = rollback("state_upsert_failed");
+        return Err(with_spec_rollback_warning(error, skipped));
     }
     let started = team_agent_contract::contract::types::SeatId::new(agent_id.as_str())
         .map_err(|error| error.to_string())
@@ -641,8 +678,8 @@ fn add_contract_seat(
             .map_err(|error| error.to_string())
         });
     if let Err(error) = started {
-        rollback("start_agent_failed");
-        return Err(LifecycleError::Provider(error));
+        let skipped = rollback("start_agent_failed");
+        return Err(with_spec_rollback_warning(LifecycleError::Provider(error), skipped));
     }
     if let Some(reservation) = reservation {
         reservation.commit();

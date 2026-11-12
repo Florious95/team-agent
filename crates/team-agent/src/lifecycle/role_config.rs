@@ -330,7 +330,7 @@ pub(super) fn apply_agent_config(
     }
 }
 
-pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     if fs::read(path).is_ok_and(|current| current == bytes) { return Ok(()); }
     static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
@@ -366,6 +366,30 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleErr
         let _ = fs::remove_file(&temp);
     }
     result.map_err(persist_error)
+}
+
+pub(super) enum FileRestore { Unchanged, Restored, Skipped }
+
+// optimistic byte-compare guard: a write landing between compare and rename can still be lost; no global spec lock
+pub(super) fn restore_if_unchanged(
+    path: &Path,
+    prior: Option<&[u8]>,
+    written: Option<&[u8]>,
+) -> Result<FileRestore, LifecycleError> {
+    let current = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            && fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => None,
+        Err(_) => return Ok(FileRestore::Skipped),
+    };
+    if current.as_deref() == prior { return Ok(FileRestore::Unchanged); }
+    let Some(written) = written else { return Ok(FileRestore::Skipped); };
+    if current.as_deref() != Some(written) { return Ok(FileRestore::Skipped); }
+    match prior {
+        Some(bytes) => atomic_write(path, bytes)?,
+        None => fs::remove_file(path).map_err(persist_error)?,
+    }
+    Ok(FileRestore::Restored)
 }
 
 fn persist_error(error: std::io::Error) -> LifecycleError {

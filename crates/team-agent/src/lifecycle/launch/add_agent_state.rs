@@ -42,7 +42,7 @@ use super::*;
 ///   pre_spec_text: 写之前的 spec 字节；None 表示原本没有该文件，回滚即删除
 ///   pre_runtime_state: 写之前的 runtime state；None 时改为从当前 state 里摘掉该席位
 ///   reason: 写进回滚事件的原因串
-/// returns: 无返回值；回滚成败如实写进 add_agent.rollback 事件
+/// returns: spec 因字节不匹配或不可读而跳过时返回 true；回滚结果写进 add_agent.rollback 事件
 /// ---
 /// E42 (0.3.24 P0, double-spec deadlock): best-effort atomic rollback for a
 /// failed add-agent. Restores the canonical spec to its pre-write bytes (or
@@ -50,32 +50,31 @@ use super::*;
 /// pre-write JSON (so the half-written `status:starting` row is gone). The
 /// caller propagates the ORIGINAL operation error after rollback; rollback
 /// errors are swallowed (best-effort, no panic).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rollback_add_agent_atomic(
     run_workspace: &Path,
     spec_path: &Path,
     pre_spec_text: Option<&str>,
+    written_spec_text: Option<&str>,
     pre_runtime_state: Option<&serde_json::Value>,
     team_key: Option<&str>,
     agent_id: &AgentId,
     reason: &str,
-) {
+) -> bool {
     let _ = std::fs::remove_dir_all(
         run_workspace
             .join(".team/runtime/copilot-instructions")
             .join(agent_id.as_str()),
     );
-    let spec_restored = if let Some(text) = pre_spec_text {
-        std::fs::write(spec_path, text).is_ok()
-    } else {
-        std::fs::remove_file(spec_path)
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })
-            .is_ok()
+    let (spec_restored, spec_restore) = match crate::lifecycle::role_config::restore_if_unchanged(
+        spec_path,
+        pre_spec_text.map(str::as_bytes),
+        written_spec_text.map(str::as_bytes),
+    ) {
+        Ok(crate::lifecycle::role_config::FileRestore::Unchanged) => (true, "unchanged"),
+        Ok(crate::lifecycle::role_config::FileRestore::Restored) => (true, "restored"),
+        Ok(crate::lifecycle::role_config::FileRestore::Skipped) => (false, "skipped_concurrent_change"),
+        Err(_) => (false, "failed"),
     };
     // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.4):
     // rollback must tombstone the newly-added agent so the persist merge
@@ -137,9 +136,19 @@ pub(crate) fn rollback_add_agent_atomic(
             "reason": reason,
             "rollback_ok": rollback_ok,
             "spec_restored": spec_restored,
+            "spec_restore": spec_restore,
             "state_restored": state_restored,
         }),
     );
+    spec_restore == "skipped_concurrent_change"
+}
+
+pub(crate) fn with_spec_rollback_warning(error: LifecycleError, skipped: bool) -> LifecycleError {
+    if skipped {
+        LifecycleError::StatePersist(format!("{error}; rollback incomplete: runtime spec changed concurrently; inspect before retrying"))
+    } else {
+        error
+    }
 }
 
 /// ---
