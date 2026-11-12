@@ -100,7 +100,7 @@ jobs:
           set -euo pipefail
           test_root="$(mktemp -d /tmp/ta-ci.XXXXXXXX)"
           test_root="$(cd "$test_root" && pwd -P)"
-          mkdir -m 700 "$test_root/bin" "$test_root/tmp" "$test_root/tmux"
+          mkdir -m 700 "$test_root/bin"
           # Keep the public filename and PATH parent after fixture canonicalization.
           # A symlink to Ubuntu's versioned Python would lose that identity.
           python="$(command -v python3)"
@@ -110,8 +110,8 @@ jobs:
           {
             echo "RUST_TEST_THREADS=1"
             echo "TERM=xterm-256color"
-            echo "TMPDIR=$test_root/tmp"
-            echo "TMUX_TMPDIR=$test_root/tmux"
+            # Match native tmux's default root; fixtures isolate their own sockets.
+            echo "TMPDIR=/tmp"
           } >> "$GITHUB_ENV"
           printf 'Public Python: %s\nTest root: %s\n' "$python" "$test_root"
 
@@ -124,7 +124,7 @@ jobs:
           print("python_launcher:", launcher, "canonical:", launcher.resolve())
           print("python_image:", sys.executable, "canonical:", pathlib.Path(sys.executable).resolve())
           print("clock_ticks:", os.sysconf("SC_CLK_TCK"))
-          for name in ("RUST_TEST_THREADS", "TERM", "TMPDIR", "TMUX_TMPDIR"):
+          for name in ("RUST_TEST_THREADS", "TERM", "TMPDIR"):
               print(name + ":", os.environ[name])
           PY
 
