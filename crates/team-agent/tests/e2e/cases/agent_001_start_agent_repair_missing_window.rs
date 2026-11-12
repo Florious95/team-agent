@@ -133,8 +133,10 @@ fn agent_001_force_never_leaves_duplicate_same_role_panes() {
     assert_eq!(after_agent["pane_id"], before_agent["pane_id"]);
     assert_eq!(after_agent["pane_pid"], before_agent["pane_pid"]);
     let error = format!("{}\n{}", out.stdout, out.stderr).to_ascii_lowercase();
-    assert!(error.contains("--force") && error.contains("stop-agent") && error.contains("start-agent"),
-        "safe refusal must explain the supported stop/start flow; error={error}");
+    // README:93 / operator.md:175: `--force` is not a start option; the usage
+    // refusal names the rejected flag and points at the start help.
+    assert!(error.contains("--force") && error.contains("team-agent start --help"),
+        "safe refusal must name --force and point at `team-agent start --help`; error={error}");
 
     let _ = run_ta(
         &ws,
