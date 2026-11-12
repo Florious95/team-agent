@@ -160,6 +160,8 @@ fn wleak_start_agent_rejects_stale_cached_foreign_pane() {
         stop.stderr
     );
     write_agent_pane_tuple(&ws, "a", &pane_b);
+    let state_before = std::fs::read(ws.state_json_path()).expect("read state.json before start");
+    let pane_b_before = pane_for_window(&ws, &session, "b");
 
     let start = run_ta(
         &ws,
@@ -172,23 +174,59 @@ fn wleak_start_agent_rejects_stale_cached_foreign_pane() {
             "--json",
         ],
     );
-    assert!(
-        start.is_success(),
-        "start-agent should succeed before tuple refresh assertion; stdout={} stderr={}",
-        start.stdout,
-        start.stderr
-    );
-    let state = ws.read_state();
-    let agent = state_agent(&state, "a");
-    assert_ne!(
-        agent.get("pane_id").and_then(Value::as_str),
-        Some(pane_b.pane_id.as_str()),
-        "start-agent must not rebind a stale worker to the live peer pane; agent={agent}"
-    );
+    // c8639440 (same two arms as stage3 :723 and role_lifecycle case 7): the
+    // poisoned tuple yields either a fresh pane for a, or the typed pre-spawn
+    // "ownership/liveness is unverified" refusal that changes nothing.
+    if start.is_success() {
+        let state = ws.read_state();
+        let agent = state_agent(&state, "a");
+        assert_ne!(
+            agent.get("pane_id").and_then(Value::as_str),
+            Some(pane_b.pane_id.as_str()),
+            "start-agent must not rebind a stale worker to the live peer pane; agent={agent}"
+        );
+        assert_eq!(
+            agent.get("window").and_then(Value::as_str),
+            Some("a"),
+            "start-agent must preserve the intended worker window after rejecting the stale pane; agent={agent}"
+        );
+    } else {
+        let refusal = start.json();
+        assert!(
+            refusal["ok"] == false
+                && refusal["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("ownership/liveness is unverified")),
+            "a refused start-agent must be the typed unverified refusal; stdout={} stderr={}",
+            start.stdout,
+            start.stderr
+        );
+        assert!(
+            std::fs::read(ws.state_json_path()).expect("read state.json after start") == state_before,
+            "a refused start-agent must leave state.json bytes unchanged; refusal={refusal}"
+        );
+        assert!(
+            !tmux_window_exists_for_workspace(&ws, &session, "a"),
+            "a refused start-agent must not spawn a pane in window a; refusal={refusal}"
+        );
+    }
+    let pane_b_after = pane_for_window(&ws, &session, "b");
     assert_eq!(
-        agent.get("window").and_then(Value::as_str),
-        Some("a"),
-        "start-agent must preserve the intended worker window after rejecting the stale pane; agent={agent}"
+        (pane_b_after.pane_id.as_str(), pane_b_after.pane_pid),
+        (pane_b_before.pane_id.as_str(), pane_b_before.pane_pid),
+        "start-agent must leave b's pane id and PID untouched; stdout={}",
+        start.stdout
+    );
+    let pane_b_dead = Command::new("tmux")
+        .args(["-S", &state_socket(&ws), "display-message", "-p", "-t", &pane_b_after.pane_id, "#{pane_dead}"])
+        .output()
+        .expect("probe b's pane liveness");
+    assert_eq!(
+        String::from_utf8_lossy(&pane_b_dead.stdout).trim(),
+        "0",
+        "b's pane must stay live; status={} stderr={}",
+        pane_b_dead.status,
+        String::from_utf8_lossy(&pane_b_dead.stderr)
     );
 }
 
