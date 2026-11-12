@@ -1897,26 +1897,36 @@ pub fn restart_rebuild_completed(json: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|status| status == "restarted" || status == "ok");
     }
+    // e69e0ac0: restart no longer starts a coordinator (rebuild.rs reports
+    // `not_required` and coordinator_started=false), so it is not a rebuild fact.
     let status = json.get("status").and_then(Value::as_str).unwrap_or("");
     let reason = json.get("reason").and_then(Value::as_str).unwrap_or("");
-    let coordinator = json
-        .get("coordinator_started")
-        .and_then(Value::as_bool)
-        == Some(true);
     let agents = json
         .get("agents")
         .and_then(Value::as_array)
         .is_some_and(|agents| !agents.is_empty());
+    // 8b09d7b4 releases the receiver on a clean shutdown; the c28a675f restart
+    // auto-claim cannot positively attribute the fixture caller pane. Accept that
+    // only as an explicit unbound result that points at claim-leader.
+    let caller_unattributed = reason == "caller_not_leader_shaped"
+        && json.get("leader_bind_ok").and_then(Value::as_bool) == Some(false)
+        && json
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|actions| {
+                actions
+                    .iter()
+                    .any(|action| action.as_str().is_some_and(|text| text.contains("claim-leader")))
+            });
     status == "restarted_binding_incomplete"
-        && coordinator
         && agents
-        && matches!(
+        && (matches!(
             reason,
             "leader_receiver_unbound"
                 | "leader_binding_unknown"
                 | "leader_registry_index_missing"
                 | "leader_not_attached"
-        )
+        ) || caller_unattributed)
 }
 
 /// Some tests want a workspace that has gone through quick-start so state.json
