@@ -774,6 +774,255 @@ fn r11_lost_temporary_authority_guidance_names_the_executable_remedy() {
     assert!(deficits.is_empty(), "guidance on a purged temporary authority:\n{}", deficits.join("\n\n"));
 }
 
+// ---------------------------------------------------------------- D4: pane ids reused after a reboot
+//
+// Field (C01, 2026-11-13): after a reboot the workspace tmux server is new and pane ids restart
+// at %0. A legacy seat started first takes the pane id that the pre-reboot native carrier had
+// recorded, and `team restart --allow-fresh` mistakes the live legacy pane for the old carrier.
+// `team stop` on a lost-authority native seat whose carrier is gone reports "native seats not
+// stopped". Native rows here carry the field shape of `astra` (frozen role snapshot included).
+
+const NATIVE_INSTANCE: &str = "instance-before-reboot";
+
+/// Overwrite the contract row of `NATIVE` (top-level and team-scoped) with `row`.
+fn set_native_row(ws: &TestWorkspace, tag: &str, row: &Value) {
+    ws.mutate_state(|state| {
+        if let Some(agents) = state.pointer_mut(&format!("/teams/{tag}/agents")).and_then(Value::as_object_mut) {
+            agents.insert(NATIVE.into(), row.clone());
+        }
+        let active = state["active_team_key"].as_str() == Some(tag) || state["team_key"].as_str() == Some(tag);
+        if active {
+            if let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) {
+                agents.insert(NATIVE.into(), row.clone());
+            }
+        }
+    });
+}
+
+/// The pre-reboot native seat: committed instance, frozen role snapshot, saved carrier location.
+fn native_row(ws: &TestWorkspace, tag: &str, legacy: &LegacyBinding, endpoint: &str, pane: &str, running: bool) -> Value {
+    let body = format!("{NATIVE} frozen prompt");
+    let snapshot = json!({
+        "id": NATIVE, "provider": "codex_tui", "source": ws.path().join("agents").join(format!("{NATIVE}.md")),
+        "role": NATIVE, "model": "first-model", "effort": null, "bypass": false, "paused": false, "body": body,
+        "prompt": {"text": body, "sha256": Sha256::digest(body.as_bytes()).to_vec(), "sources": []},
+    });
+    let path = legacy.dir.join(format!("role-{NATIVE}-{NATIVE_INSTANCE}.json"));
+    if !path.exists() {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        file.write_all(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        file.sync_all().unwrap();
+    }
+    json!({
+        "agent_id": NATIVE, "provider": "codex_tui", "contract_provider": "codex_tui", "runtime_family": "contract",
+        "status": if running { "running" } else { "stopped" }, "explicit_stop": !running, "paused": false,
+        "contract_scope": legacy.scope, "contract_instance": NATIVE_INSTANCE, "generation": 1,
+        "native_endpoint": endpoint, "native_pane": pane, "tmux_endpoint": endpoint, "pane_id": pane,
+        "model": "first-model", "role": NATIVE, "owner_team_id": tag, "team_key": tag,
+    })
+}
+
+fn tmux_on(socket: &str, args: &[&str]) -> String {
+    let out = std::process::Command::new("tmux").arg("-S").arg(socket).args(args).output().unwrap();
+    assert!(out.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn pane_alive(socket: &str, pane: &str) -> bool {
+    let out = std::process::Command::new("tmux").arg("-S").arg(socket).args(["display-message", "-p", "-t", pane, "#{pane_dead}"]).output().unwrap();
+    out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "0"
+}
+
+/// After the reboot, the legacy worker starts first on the new server. Returns its row.
+fn legacy_started_first(ws: &TestWorkspace, tag: &str) -> Value {
+    let out = ta(ws, &["start", WORKER, "--workspace", &ws_str(ws), "--team", tag, "--json"]);
+    own_sockets(ws);
+    assert_eq!(out.exit_code, 0, "fixture: the legacy worker must start after the reboot\n{}", transcript(&out));
+    let state = ws.read_state();
+    let row = state["teams"][tag]["agents"][WORKER].clone();
+    let row = if row.is_object() { row } else { state["agents"][WORKER].clone() };
+    assert!(row["pane_id"].is_string() && row["pane_pid"].is_u64(), "fixture: the legacy row must record its live pane: {row}");
+    let socket = state["tmux_socket"].as_str().unwrap_or_default().to_string();
+    assert!(pane_alive(&socket, row["pane_id"].as_str().unwrap()), "fixture: the legacy pane must be live");
+    row
+}
+
+fn recover_dry_run(ws: &TestWorkspace, tag: &str) -> TaResult {
+    ta(ws, &["team", "restart", "--allow-fresh", "--dry-run", "--workspace", &ws_str(ws), "--team", tag, "--json"])
+}
+
+/// Control: the saved native pane id does not exist on the new server; recovery planning is admitted.
+#[test]
+fn g8_control_recovery_admits_a_saved_native_pane_absent_from_the_new_server() {
+    let tag = "rbt-g8";
+    let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+    legacy_started_first(&ws, tag);
+    let socket = ws.read_state()["tmux_socket"].as_str().unwrap().to_string();
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, "%999", false));
+    assert_no_authority_error(&recover_dry_run(&ws, tag), "recovery planning with an absent saved native pane");
+}
+
+/// D4: the saved native pane id now belongs to the verified live legacy worker. The old native
+/// carrier is absent; recovery is admitted and the legacy pane is untouched.
+#[test]
+fn r13_allow_fresh_recognizes_a_reused_pane_owned_by_a_verified_live_legacy_seat() {
+    let tag = "rbt-r13";
+    let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+    let worker = legacy_started_first(&ws, tag);
+    let socket = ws.read_state()["tmux_socket"].as_str().unwrap().to_string();
+    let pane = worker["pane_id"].as_str().unwrap().to_string();
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, &pane, false));
+    let dry = recover_dry_run(&ws, tag);
+    assert_no_authority_error(&dry, &format!("recovery planning when the saved native pane {pane} is the live legacy worker's pane"));
+    assert!(pane_alive(&socket, &pane), "recovery planning must not touch the legacy pane {pane}");
+}
+
+/// Guards: a reused pane id whose live owner is not positively verified as a legacy seat, or that
+/// the native row itself claims by live process identity, still forbids recovery (fail closed).
+#[test]
+fn g9_reused_pane_with_an_unverified_or_native_owner_still_blocks_recovery() {
+    for case in ["unknown", "unverified", "native"] {
+        let tag = format!("rbt-g9{}", &case[..1]);
+        let (ws, _temp, legacy) = purged_team(&tag, Purge::Whole);
+        let worker = legacy_started_first(&ws, &tag);
+        let state = ws.read_state();
+        let socket = state["tmux_socket"].as_str().unwrap().to_string();
+        let worker_pane = worker["pane_id"].as_str().unwrap().to_string();
+        let (pane, row) = match case {
+            // A live pane in another session that no legacy row claims.
+            "unknown" => {
+                let pane = tmux_on(&socket, &["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "intruder", "sleep 600"]);
+                (pane.clone(), native_row(&ws, &tag, &legacy, &socket, &pane, false))
+            }
+            // The legacy row claims the pane, but its recorded process identity does not match.
+            "unverified" => {
+                let mut forged = worker.clone();
+                forged["pane_pid"] = json!(1);
+                ws.mutate_state(|state| {
+                    for pointer in [format!("/teams/{tag}/agents/{WORKER}"), format!("/agents/{WORKER}")] {
+                        if let Some(row) = state.pointer_mut(&pointer).filter(|row| row.is_object()) {
+                            *row = forged.clone();
+                        }
+                    }
+                });
+                (worker_pane.clone(), native_row(&ws, &tag, &legacy, &socket, &worker_pane, false))
+            }
+            // The native row itself records the live process in that pane.
+            _ => {
+                let mut row = native_row(&ws, &tag, &legacy, &socket, &worker_pane, false);
+                for key in ["pane_pid", "pane_birth_identity", "pane_birth", "spawned_at"] {
+                    if !worker[key].is_null() {
+                        row[key] = worker[key].clone();
+                    }
+                }
+                (worker_pane.clone(), row)
+            }
+        };
+        set_native_row(&ws, &tag, &row);
+        let before = bindings(&ws, &tag);
+        let dry = recover_dry_run(&ws, &tag);
+        let out = ta(&ws, &["team", "restart", "--allow-fresh", "--workspace", &ws_str(&ws), "--team", &tag, "--json"]);
+        assert!(dry.exit_code != 0 && out.exit_code != 0, "{case}: a live pane {pane} without a verified legacy owner must forbid recovery\n{}\n{}", transcript(&dry), transcript(&out));
+        assert_eq!(bindings(&ws, &tag), before, "{case}: refused recovery must not re-home the authority\n{}", disk_state(&ws, &tag));
+        assert!(pane_alive(&socket, &pane), "{case}: refused recovery must not touch pane {pane}");
+    }
+}
+
+/// Team stop of a lost-authority native seat whose saved carrier is provably absent.
+fn stop_lost_authority_native(tag: &str, seat_scoped: bool) {
+    let (ws, temp, legacy) = purged_team(tag, Purge::Whole);
+    let state = ws.read_state();
+    // The pre-reboot server was killed: its endpoint is gone or a stale socket with no server.
+    let socket = state["tmux_socket"].as_str().unwrap_or_default().to_string();
+    assert!(Path::new(&socket).is_absolute(), "fixture: the saved endpoint must be absolute: {socket}");
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, "%1", true));
+    let before = bindings(&ws, tag);
+    let mut args = vec!["stop"];
+    if seat_scoped {
+        args.push(NATIVE);
+    }
+    args.extend_from_slice(&["--workspace", ws.path().to_str().unwrap(), "--team", tag, "--json"]);
+    let out = ta(&ws, &args);
+    let text = format!("{}{}", out.stdout, out.stderr);
+    assert!(out.exit_code == 0 && !text.contains("native seats not stopped"), "{args:?}: a lost-authority native seat with an absent carrier must stop cleanly\n{}", transcript(&out));
+    let state = ws.read_state();
+    for row in [&state["agents"][NATIVE], &state["teams"][tag]["agents"][NATIVE]] {
+        assert_eq!(row["status"], "stopped", "{args:?}: the native row must be marked stopped: {row}");
+    }
+    let (node, status) = status_node(&ws, tag, NATIVE);
+    assert_eq!(node["runtime_status"].as_str(), Some("stopped"), "{args:?}: status must report stopped: {node}\n{}", transcript(&status));
+    assert_eq!(bindings(&ws, tag), before, "{args:?}: a metadata-only stop must not recreate or re-home the authority\n{}", disk_state(&ws, tag));
+    assert!(!temp.0.exists(), "{args:?}: the purged authority root must not be recreated");
+}
+
+#[test]
+fn r14_stop_marks_a_lost_authority_native_seat_stopped_when_its_carrier_is_absent() {
+    stop_lost_authority_native("rbt-r14t", false);
+    stop_lost_authority_native("rbt-r14s", true);
+}
+
+/// Guard: a lost-authority native seat whose saved pane is live with an unknown owner is never
+/// reported stopped, and its pane is never touched.
+#[test]
+fn g10_lost_authority_native_stop_with_a_live_saved_pane_is_not_claimed() {
+    let tag = "rbt-g10";
+    let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+    let carrier = ws.tmux_root.path().join(format!("ta-{tag}-carrier"));
+    let socket = carrier.to_str().unwrap().to_string();
+    let pane = tmux_on(&socket, &["-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", "carrier", "sleep 600"]);
+    ws.register_owned_tmux_socket(&carrier);
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, &pane, true));
+    let out = ta(&ws, &["stop", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    let state = ws.read_state();
+    let row = &state["teams"][tag]["agents"][NATIVE];
+    assert!(out.exit_code != 0 || row["status"] != "stopped", "a live saved pane must not be reported stopped: {row}\n{}", transcript(&out));
+    assert!(pane_alive(&socket, &pane), "a lost-authority stop must never touch the live pane {pane}");
+}
+
+/// Guard (old worker session fence): a session whose only extra pane is retained dead evidence
+/// does not block recovery; the dead pane is left in place.
+#[test]
+fn g11_old_worker_session_with_only_dead_extra_panes_admits_recovery() {
+    let tag = "rbt-g11";
+    let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+    legacy_started_first(&ws, tag);
+    let state = ws.read_state();
+    let socket = state["tmux_socket"].as_str().unwrap().to_string();
+    let session = state["session_name"].as_str().unwrap().to_string();
+    let pane = tmux_on(&socket, &["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", &format!("{session}:"), "sleep 600"]);
+    tmux_on(&socket, &["set-option", "-w", "-t", &pane, "remain-on-exit", "on"]);
+    let pid = tmux_on(&socket, &["display-message", "-p", "-t", &pane, "#{pane_pid}"]);
+    assert!(std::process::Command::new("kill").args(["-9", &pid]).status().unwrap().success());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tmux_on(&socket, &["display-message", "-p", "-t", &pane, "#{pane_dead}"]) != "1" {
+        assert!(std::time::Instant::now() < deadline, "fixture: pane {pane} never became dead");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, "%999", false));
+    assert_no_authority_error(&recover_dry_run(&ws, tag), "recovery planning with a retained dead pane in the old worker session");
+    assert_eq!(tmux_on(&socket, &["display-message", "-p", "-t", &pane, "#{pane_dead}"]), "1", "the retained dead pane must stay");
+}
+
+/// Guard (old worker session fence): an unrecognized live pane in the old worker session forbids
+/// recovery; nothing is re-homed and the pane is untouched.
+#[test]
+fn g12_old_worker_session_with_an_unrecognized_live_pane_refuses_recovery() {
+    let tag = "rbt-g12";
+    let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+    legacy_started_first(&ws, tag);
+    let state = ws.read_state();
+    let socket = state["tmux_socket"].as_str().unwrap().to_string();
+    let session = state["session_name"].as_str().unwrap().to_string();
+    let pane = tmux_on(&socket, &["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", &format!("{session}:"), "sleep 600"]);
+    set_native_row(&ws, tag, &native_row(&ws, tag, &legacy, &socket, "%999", false));
+    let before = bindings(&ws, tag);
+    let dry = recover_dry_run(&ws, tag);
+    let out = ta(&ws, &["team", "restart", "--allow-fresh", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert!(dry.exit_code != 0 && out.exit_code != 0, "an unrecognized live pane {pane} in the old worker session must forbid recovery\n{}\n{}", transcript(&dry), transcript(&out));
+    assert_eq!(bindings(&ws, tag), before, "refused recovery must not re-home the authority\n{}", disk_state(&ws, tag));
+    assert!(pane_alive(&socket, &pane), "refused recovery must not touch pane {pane}");
+}
+
 // ---------------------------------------------------------------- D1b: copy-forward re-points native seats
 
 /// A real, controlled-terminal native seat (real Lifecycle, real tmux, real process), committed and
