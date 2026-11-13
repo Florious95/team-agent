@@ -535,20 +535,76 @@ fn g1_purged_authority_without_allow_fresh_is_refused_with_guidance() {
     assert!(out.exit_code != 0 && all.contains("--allow-fresh"), "expected a refusal naming --allow-fresh\n{}", transcript(&out));
 }
 
-/// A missing NON-temporary authority is never silently replaced.
+/// An external durable authority root, outside both the OS temp area and the workspace.
+struct ExternalRoot(PathBuf);
+impl ExternalRoot {
+    fn fresh() -> Self {
+        let tmp = Path::new("/tmp").canonicalize().unwrap();
+        let seed = format!("{}-{}-{:?}", std::process::id(), SERIAL.fetch_add(1, Ordering::Relaxed), std::time::SystemTime::now());
+        let path = tmp.join(format!("rbt-external-{}", &hex(&Sha256::digest(seed.as_bytes()))[..24]));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path)
+    }
+}
+impl Drop for ExternalRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// g2' (revised for ISSUE-8, owner-authorized 2026-11-13): a missing durable authority whose
+/// root lies outside both the OS temp area and this workspace is never replaced, even with
+/// --allow-fresh. A deleted in-workspace authority is recoverable instead (r12).
 #[test]
 fn g2_missing_durable_authority_is_not_replaced() {
     let tag = "rbt-g2";
     let ws = team(tag);
     let real = ws.path().canonicalize().unwrap();
-    let probe = write_legacy_binding(&ws, tag, &real, 0, Path::new("/nonexistent"));
-    fs::remove_dir_all(&probe.dir).unwrap();
-    let durable = probe.dir.join("authority");
+    let external = ExternalRoot::fresh();
+    let durable = external.0.join("authority");
+    assert!(!durable.starts_with(&real), "fixture: the external root must lie outside the workspace");
     write_legacy_binding(&ws, tag, &real, 0, &durable);
     reboot(&ws, None, Purge::Whole);
     let out = ta(&ws, &["team", "restart", "--allow-fresh", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
-    assert_ne!(out.exit_code, 0, "a missing durable authority must be refused\n{}", transcript(&out));
+    assert_ne!(out.exit_code, 0, "a missing external durable authority must be refused\n{}", transcript(&out));
     assert!(!durable.exists(), "no replacement authority may be created at {}\n{}", durable.display(), disk_state(&ws, tag));
+    let found = bindings(&ws, tag);
+    assert!(
+        found.len() == 1 && found[0].1["transport_root"].as_str() == durable.to_str(),
+        "the binding must still name the missing external root (no re-home)\n{}",
+        disk_state(&ws, tag)
+    );
+}
+
+/// ISSUE-8: an authority that lived inside this workspace's own scope directory and was deleted
+/// is re-homed by explicit `team restart --allow-fresh`, archiving the old binding first.
+#[test]
+fn r12_allow_fresh_rehomes_a_deleted_in_workspace_authority() {
+    let tag = "rbt-r12";
+    let ws = team(tag);
+    let real = ws.path().canonicalize().unwrap();
+    let probe = write_legacy_binding(&ws, tag, &real, 0, Path::new("/nonexistent"));
+    fs::remove_dir_all(&probe.dir).unwrap();
+    let durable = probe.dir.join("authority");
+    let legacy = write_legacy_binding(&ws, tag, &real, 0, &durable);
+    create_store(&legacy);
+    reboot(&ws, None, Purge::Whole);
+    fs::remove_dir_all(&durable).unwrap();
+    log("r12", format!("deleted in-workspace authority {}", durable.display()));
+    let dry = ta(&ws, &["team", "restart", "--allow-fresh", "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_no_authority_error(&dry, "dry-run of --allow-fresh for a deleted in-workspace authority");
+    let out = ta(&ws, &["team", "restart", "--allow-fresh", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_no_authority_error(&out, "--allow-fresh for a deleted in-workspace authority");
+    assert_authority_inside_workspace(&ws, tag, &durable, "after --allow-fresh re-homed a deleted in-workspace authority");
+    let archived = fs::read_dir(&legacy.dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name() != "framework-binding.json" && e.path().is_file())
+        .any(|e| fs::read_to_string(e.path()).unwrap_or_default().contains(durable.to_str().unwrap()));
+    assert!(archived, "the original binding (naming {}) must be archived, not discarded\n{}", durable.display(), disk_state(&ws, tag));
+    assert_status_healthy(&ws, tag, "after --allow-fresh re-homed a deleted in-workspace authority");
+    let start = ta(&ws, &["start", WORKER, "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_no_authority_error(&start, "legacy start planning after the in-workspace re-home");
 }
 
 /// Contract-family seats keep failing closed while their authority is lost.
