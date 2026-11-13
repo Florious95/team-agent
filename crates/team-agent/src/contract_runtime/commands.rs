@@ -200,6 +200,10 @@ pub fn stop_agent(
         if selected.state.get("agents").and_then(|agents| agents.get(agent)).is_some_and(framework::is_paused_unstarted) {
             return Ok(json!({"ok":true,"agent_id":agent,"stopped":false,"status":"paused","runtime":"contract"}));
         }
+        if super::recovery::stop_if_authority_lost(selected, id)? {
+            return Ok(json!({"ok":true,"agent_id":agent,"status":"stopped","stopped":true,
+                "runtime":"contract","native_authority":"lost","physical_action":"not_attempted"}));
+        }
         let backend = Backend::open_readonly(&selected.run_workspace, &selected.team_key).map_err(error)?;
         let seat = backend.store.seat(id).map_err(error)?;
         let row = &selected.state["agents"][agent];

@@ -2,16 +2,16 @@
 //! a session/ownership receipt, adopts an old process, or deletes the old root.
 use super::{
     backend::{self, BackendError},
-    framework,
+    discovery, framework,
 };
 use crate::{
     cli::{CliError, CmdResult},
-    state::selector::{resolve_active_team_readonly, SelectorMode},
+    state::{repository::{StateRepository, StateWriteIntent}, selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode}},
     transport::{SessionName, Transport},
 };
 use serde_json::json;
 use std::{io::Write, path::Path};
-use team_agent_contract::{host::digest, host::digest_hex, orchestration::store::ProjectionStore};
+use team_agent_contract::{contract::types::SeatId, host::digest, host::digest_hex, orchestration::store::ProjectionStore};
 
 fn error(value: impl std::fmt::Display) -> CliError {
     CliError::Runtime(value.to_string())
@@ -20,6 +20,31 @@ fn error(value: impl std::fmt::Display) -> CliError {
 /// A contract seat may have only a native endpoint/pane receipt, not a legacy
 /// pane PID. Unknown probe failures never count as proof that it is gone.
 pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> Result<(), CliError> {
+    carrier_absent_in_team(id, row, tmux, None)
+}
+
+fn live_legacy_owns_pane(selected: &SelectedTeam, native_id: &str, pane: &crate::transport::PaneInfo) -> bool {
+    let Some(pid) = pane.pane_pid.filter(|pid| *pid > 1) else { return false; };
+    let Some(agents) = selected.state.get("agents").and_then(serde_json::Value::as_object) else { return false; };
+    let mut owners = agents.iter().filter(|(id, row)| id.as_str() != native_id
+        && !framework::is_contract(row)
+        && row.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane.pane_id.as_str())
+        && crate::lifecycle::carrier::pane_pid(row) == Some(pid)
+        && row.get("pane_birth_identity").and_then(serde_json::Value::as_str).is_some_and(|birth| !birth.is_empty()));
+    let Some((id, row)) = owners.next() else { return false; };
+    owners.next().is_none() && crate::lifecycle::seat_observation::observe(selected, id, row)
+        .is_ok_and(|observation| observation == crate::lifecycle::seat_observation::SeatObservation::Live)
+}
+
+pub(super) fn same_saved_carrier(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    ["runtime_family", "contract_scope", "contract_instance", "generation", "native_endpoint", "native_pane",
+        "tmux_endpoint", "pane_id", "pane_pid", "pane_birth_identity", "spawned_at"]
+        .iter().all(|key| left.get(*key) == right.get(*key))
+}
+
+pub(super) fn carrier_absent_in_team(
+    id: &str, row: &serde_json::Value, tmux: &Path, selected: Option<&SelectedTeam>,
+) -> Result<(), CliError> {
     let mut proved = false;
     if row.get("pane_pid").is_some_and(|value| !value.is_null()) {
         let pid = crate::lifecycle::carrier::pane_pid(row).filter(|pid| *pid > 1)
@@ -73,7 +98,9 @@ pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> 
             );
             let targets = transport.list_targets().map_err(error)?;
             if let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane) {
-                if transport.pane_is_dead(&target.pane_id).map_err(error)? != Some(true) {
+                if transport.pane_is_dead(&target.pane_id).map_err(error)? != Some(true)
+                    && !selected.is_some_and(|selected| live_legacy_owns_pane(selected, id, target))
+                {
                     return Err(error(format!(
                         "native recovery refused: saved native pane for {id} still exists"
                     )));
@@ -90,6 +117,64 @@ pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> 
         )));
     }
     Ok(())
+}
+
+/// Read-only admission for the canonical stop planner and its locked mutator.
+/// Native stop does not need an editable declaration to match the saved seat.
+pub(crate) fn preflight_stop_without_authority(selected: &SelectedTeam, id: &str) -> Result<bool, CliError> {
+    if !matches!(backend::authority_check(&selected.run_workspace, &selected.team_key), Err(BackendError::AuthorityLost { .. })) {
+        return Ok(false);
+    }
+    let binding = backend::read_binding(&selected.run_workspace, &selected.team_key).map_err(error)?;
+    let row = selected.state.get("agents").and_then(|agents| agents.get(id))
+        .ok_or_else(|| error("native stop requires the saved seat"))?;
+    if row.get("contract_scope").and_then(serde_json::Value::as_str) != Some(binding.scope.as_str()) {
+        return Err(error("native stop requires the seat's exact saved scope"));
+    }
+    let tmux = discovery::public_command("tmux").map_err(error)?.entry;
+    carrier_absent_in_team(id, row, &tmux, Some(selected))?;
+    Ok(true)
+}
+
+/// The caller holds the seat lifecycle lock. Close only the saved row, never
+/// create contract authority/operations or touch a replacement pane.
+pub(super) fn stop_if_authority_lost(selected: &SelectedTeam, id: &SeatId) -> Result<bool, CliError> {
+    let workspace = &selected.run_workspace;
+    let team = &selected.team_key;
+    if !matches!(backend::authority_check(workspace, team), Err(BackendError::AuthorityLost { .. })) {
+        return Ok(false);
+    }
+    let binding = backend::read_binding(workspace, team).map_err(error)?;
+    let directory = std::fs::File::open(backend::root_for(workspace, &binding.scope))?;
+    directory.try_lock_shared().map_err(error)?;
+    let current = backend::read_binding(workspace, team).map_err(error)?;
+    if current.transport_root != binding.transport_root || current.scope != binding.scope
+        || !matches!(backend::authority_check(workspace, team), Err(BackendError::AuthorityLost { .. }))
+    {
+        return Err(error("native authority changed during stop admission; retry stop"));
+    }
+    let row = selected.state.get("agents").and_then(|agents| agents.get(id.as_str()))
+        .ok_or_else(|| error("native stop requires the saved seat"))?;
+    if !preflight_stop_without_authority(selected, id.as_str())? {
+        return Err(error("native authority changed during stop admission; retry stop"));
+    }
+    let mut marked = false;
+    // Normal native stop uses this same bounded per-seat publication intent.
+    StateRepository::new(workspace).commit(
+        StateWriteIntent::StartAgent { team_key: team, agent_id: id.as_str() },
+        |state| {
+            if let Some(current) = state.get_mut("agents").and_then(|agents| agents.get_mut(id.as_str())) {
+                if same_saved_carrier(current, row) {
+                    current["status"] = json!("stopped");
+                    current["explicit_stop"] = json!(true);
+                    current["native_recovery_required"] = json!(true);
+                    marked = true;
+                }
+            }
+        },
+    ).map_err(error)?;
+    if !marked { return Err(error("native seat changed during stop admission; retry stop")); }
+    Ok(true)
 }
 
 /// Preserve the provider route/model/prompt captured for the exact old instance.
@@ -244,7 +329,7 @@ pub(crate) fn restart(
             {
                 continue;
             }
-            carrier_absent(id, row, &tmux)?;
+            carrier_absent_in_team(id, row, &tmux, Some(&selected))?;
         }
         let transport =
             crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
@@ -269,14 +354,7 @@ pub(crate) fn restart(
                 if transport.pane_is_dead(&pane.pane_id).map_err(error)? == Some(true) { continue; }
                 // A positively verified legacy co-tenant is not being replaced.
                 // Any live native or unrecognized pane still blocks recovery.
-                let legacy = agents.iter().find(|(_, row)| !framework::is_contract(row)
-                    && row["pane_id"].as_str() == Some(pane.pane_id.as_str()));
-                let preserved = match legacy {
-                    Some((id, row)) => crate::lifecycle::seat_observation::observe(&selected, id, row)
-                        .map_err(error)? == crate::lifecycle::seat_observation::SeatObservation::Live,
-                    None => false,
-                };
-                if !preserved {
+                if !live_legacy_owns_pane(&selected, "", pane) {
                     return Err(error("native recovery refused: the old worker tmux session contains a live or unverified carrier; no session was changed"));
                 }
             }

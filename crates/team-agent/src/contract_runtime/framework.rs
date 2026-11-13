@@ -228,6 +228,18 @@ pub(super) fn recovery_stopped(backend: &Backend, id: &SeatId, row: &Value) -> R
         && backend.store.creation_receipt(id, None)?.is_none())
 }
 
+fn stopped_projection(id: &str, row: &Value) -> Value {
+    json!({
+        "agent_id":id,"provider":row.get("provider"),"runtime_family":"contract",
+        "contract_provider":row.get("contract_provider").or_else(|| row.get("provider")),
+        "status":"stopped","explicit_stop":true,"model":row.get("model"),
+        "contract_instance":null,"session_id":null,"session_observation":"unobserved",
+        "native_pane":null,"native_endpoint":null,"pane_id":null,"pane_pid":null,"pane_birth_identity":null,
+        "tmux_endpoint":null,"window":null,"session_name":null,
+        "mcp_binding":"unverified","mcp_tools":{}
+    })
+}
+
 pub fn project_seat(workspace: &Path, team: &str, id: &str) -> Result<Value, BackendError> {
     project_seat_with_row(workspace, team, id, None)
 }
@@ -238,20 +250,37 @@ pub(crate) fn project_seat_with_row(
     id: &str,
     row: Option<&Value>,
 ) -> Result<Value, BackendError> {
-    let mut backend = Backend::open_readonly(workspace, team)?;
+    let mut backend = match Backend::open_readonly(workspace, team) {
+        Ok(backend) => backend,
+        Err(error @ BackendError::AuthorityLost { .. }) => {
+            if let Some(row) = row.filter(|row| row["status"].as_str() == Some("stopped")
+                && crate::state::projection::agent_explicit_stop(row))
+            {
+                let selected = crate::state::selector::resolve_active_team_readonly(
+                    workspace, Some(team), crate::state::selector::SelectorMode::RuntimeOnly,
+                ).map_err(|error| std::io::Error::other(error.to_string()))?;
+                let current = &selected.state["agents"][id];
+                if current["status"].as_str() == Some("stopped")
+                    && crate::state::projection::agent_explicit_stop(current)
+                    && super::recovery::same_saved_carrier(current, row)
+                    && super::recovery::preflight_stop_without_authority(&selected, id).is_ok_and(|absent| absent)
+                {
+                    let mut stopped = stopped_projection(id, row);
+                    stopped["native_authority_lost"] = json!(true);
+                    stopped["native_recovery_required"] = json!(true);
+                    stopped["health"] = json!("unknown");
+                    return Ok(stopped);
+                }
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let seat_id = SeatId::new(id)?;
     let seat = backend.store.seat(&seat_id)?;
     if let Some(row) = row.filter(|_| seat.is_none()) {
         if recovery_stopped(&backend, &seat_id, row)? {
-            return Ok(json!({
-                "agent_id":id,"provider":row.get("provider"),"runtime_family":"contract",
-                "contract_provider":row.get("contract_provider").or_else(|| row.get("provider")),
-                "status":"stopped","explicit_stop":true,"model":row.get("model"),
-                "contract_instance":null,"session_id":null,"session_observation":"unobserved",
-                "native_pane":null,"native_endpoint":null,"pane_id":null,"pane_pid":null,"pane_birth_identity":null,
-                "tmux_endpoint":null,"window":null,"session_name":null,
-                "mcp_binding":"unverified","mcp_tools":{}
-            }));
+            return Ok(stopped_projection(id, row));
         }
     }
     let seat = seat.ok_or(BackendError::Metadata)?;
@@ -347,8 +376,18 @@ pub fn stop_selected_with_budget(workspace: &Path, state: &Value, budget: std::t
                 let _ownership = crate::lifecycle::lock::try_acquire_seat_lifecycle_lock(crate::lifecycle::lock::LifecycleLockRequest {
                     workspace, operation: "native-team-stop", team: Some(&team), agent_id: Some(&agent_id),
                 }).map_err(|error| std::io::Error::other(error.to_string()))?;
-                let backend = Backend::open_readonly(workspace, &team)?;
                 let seat_id = SeatId::new(id.as_str())?;
+                if matches!(backend::authority_check(workspace, &team), Err(BackendError::AuthorityLost { .. })) {
+                    let selected = crate::state::selector::resolve_active_team_readonly(
+                        workspace, Some(&team), crate::state::selector::SelectorMode::RuntimeOnly,
+                    ).map_err(|error| std::io::Error::other(error.to_string()))?;
+                    if super::recovery::stop_if_authority_lost(&selected, &seat_id)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?
+                    {
+                        return Ok(json!({"agent_id":id,"status":"stopped","native_authority":"lost","physical_action":"not_attempted"}));
+                    }
+                }
+                let backend = Backend::open_readonly(workspace, &team)?;
                 let seat = backend.store.seat(&seat_id)?;
                 physical = seat.as_ref().and_then(|seat| seat.physical.clone());
                 if (seat.as_ref().is_some_and(|seat| seat.status == SeatStatus::Stopped) && !backend.store.leased(&seat_id)?)

@@ -705,6 +705,21 @@ fn plan_with_observer(
         }));
         return Ok(plan);
     }
+    #[cfg(unix)]
+    if plan.intent.verb == Verb::Stop {
+        if let Some((id, row)) = target.as_ref().and_then(|id| selected.state["agents"].get(id.as_str()).map(|row| (id, row))) {
+            if crate::contract_runtime::framework::is_contract(row)
+                && !crate::contract_runtime::framework::is_paused_unstarted(row)
+                && crate::contract_runtime::recovery::preflight_stop_without_authority(&selected, id.as_str())?
+            {
+                // This is only a plan. Locked execution re-proves absence and
+                // publishes metadata; it never synthesizes a native receipt.
+                plan.expected.insert(id.as_str().into(), relevant(row));
+                plan.steps.push(Step::StopAgent(stop_args(&plan, id.as_str())));
+                return Ok(plan);
+            }
+        }
+    }
     let spec = selected.spec_path.as_ref().filter(|p| p.is_file());
     let missing_spec = spec.is_none();
     if missing_spec && plan.intent.verb == Verb::Restart && target.is_none() {

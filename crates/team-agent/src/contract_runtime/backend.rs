@@ -1630,7 +1630,8 @@ pub(crate) fn retire_inactive_siblings(binding: &Binding, state: &serde_json::Va
             !super::framework::is_contract(row)
                 || row["contract_scope"].as_str().is_some_and(|scope| scope != sibling.scope.as_str())
                 || ["contract_instance", "native_endpoint", "native_pane"].iter().all(|key| row[*key].is_null())
-                || super::recovery::carrier_absent(id, row, &sibling.tmux).is_ok()
+                || discovery::public_command("tmux").is_ok_and(|tmux|
+                    super::recovery::carrier_absent(id, row, &tmux.entry).is_ok())
         }));
         if !absent || !carriers_absent {
             eprintln!("warning: sibling native scope {} retained: authority/carrier activity is not excluded", sibling.scope.as_str());

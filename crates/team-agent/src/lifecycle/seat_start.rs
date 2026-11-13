@@ -246,14 +246,16 @@ pub fn resolve(
     {
         return Err(refused(format!("agent is paused; edit paused: false in its role declaration, then run `team-agent start {}`", command_arg(request.agent.as_str()))));
     }
-    // Preserve the user's bytes when rendering only makes implicit defaults
-    // explicit. In particular, an unchanged symlink is not a file replacement.
-    let text = std::fs::read_to_string(&destination).ok().filter(|current| {
-        role_config::declaration_paused(current).ok() == Some(declaration_paused)
-            && crate::compiler::compile_role_text(
-                &destination, current, &team_meta, &request.workspace.to_string_lossy(),
-            ).is_ok_and(|previous| role_config::to_json(&previous.agent) == role_config::to_json(&compiled.agent))
-    }).unwrap_or(text);
+    // Only linked roles preserve their bytes for semantic no-ops. Regular role
+    // files retain the existing normalization/default-materialization contract.
+    let text = if std::fs::symlink_metadata(&destination).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        std::fs::read_to_string(&destination).ok().filter(|current| {
+            role_config::declaration_paused(current).ok() == Some(declaration_paused)
+                && crate::compiler::compile_role_text(
+                    &destination, current, &team_meta, &request.workspace.to_string_lossy(),
+                ).is_ok_and(|previous| role_config::to_json(&previous.agent) == role_config::to_json(&compiled.agent))
+        }).unwrap_or(text)
+    } else { text };
     Ok(Declaration {
         source,
         destination,
