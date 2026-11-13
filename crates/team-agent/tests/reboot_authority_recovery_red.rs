@@ -607,6 +607,117 @@ fn g6_binding_recorded_for_another_workspace_is_not_adopted() {
     );
 }
 
+// ---------------------------------------------------------------- D5: adding a seat after the purge
+//
+// Field incident 2026-11-13: a workspace whose team was created on 2026-11-02 kept its native
+// authority in `/private/tmp/ta-<24 hex>`. A host reboot on 2026-11-10 purged it. The user then
+// declared a NEW legacy seat and ran
+// `team-agent start fable --role-file .team/current/agents/fable.md --workspace . --team current`.
+// The command was refused with `agent start requirement unmet: native_authority_lost: …`. r6 only
+// covers a legacy seat that already has a state row.
+
+const NEW_SEAT: &str = "newbie";
+
+/// Declare a brand-new legacy seat (no state row) in the team's role directory.
+fn declare_new_legacy_seat(ws: &TestWorkspace) -> PathBuf {
+    let path = ws.path().join("agents").join(format!("{NEW_SEAT}.md"));
+    fs::write(
+        &path,
+        format!("---\nname: {NEW_SEAT}\nrole: Fake worker {NEW_SEAT}\nprovider: fake\nmodel: fake\nauth_mode: subscription\ndangerously_skip_permissions: false\ntools:\n  - mcp_team\n---\n\nFake worker {NEW_SEAT}.\n"),
+    )
+    .unwrap();
+    path
+}
+
+fn assert_no_state_row(ws: &TestWorkspace, team: &str, agent: &str) {
+    let state = ws.read_state();
+    for row in [&state["agents"][agent], &state["teams"][team]["agents"][agent]] {
+        assert!(row.is_null(), "fixture invariant: {agent} must have no state row before its first start: {row}");
+    }
+}
+
+fn start_new_legacy_seat_after_purge(tag: &str, purge: Purge) {
+    let (ws, temp, _legacy) = purged_team(tag, purge);
+    declare_new_legacy_seat(&ws);
+    assert_no_state_row(&ws, tag, NEW_SEAT);
+    let before = bindings(&ws, tag);
+    let role = format!("agents/{NEW_SEAT}.md");
+    let dry = ta(&ws, &["start", NEW_SEAT, "--role-file", &role, "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    assert_no_authority_error(&dry, &format!("{purge:?}: dry-run of adding a new legacy seat after the native authority was purged"));
+    let out = ta(&ws, &["start", NEW_SEAT, "--role-file", &role, "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    own_sockets(&ws);
+    assert_no_authority_error(&out, &format!("{purge:?}: adding a new legacy seat after the native authority was purged"));
+    let (node, status) = status_node(&ws, tag, NEW_SEAT);
+    assert_eq!(node["runtime_status"].as_str(), Some("running"), "{purge:?}: the new legacy seat must be running: {node}\n{}", transcript(&status));
+    // Adding a legacy seat neither recreates nor re-homes the lost native authority.
+    assert_eq!(bindings(&ws, tag), before, "{purge:?}: a legacy start must leave the framework binding untouched\n{}", disk_state(&ws, tag));
+    match purge {
+        Purge::Whole => assert!(!temp.0.exists(), "{purge:?}: the purged authority root {} must not be recreated", temp.0.display()),
+        Purge::RegularFiles => assert!(
+            !temp.0.join("contract.json").exists(),
+            "{purge:?}: no contract manifest may be recreated under {}",
+            temp.0.display()
+        ),
+    }
+}
+
+/// The field incident: a NEW legacy seat, declared with `--role-file`, starts (dry-run and real)
+/// although the team's temporary native authority was purged.
+#[test]
+fn r10_new_legacy_seat_added_with_role_file_starts_although_the_native_authority_was_purged() {
+    start_new_legacy_seat_after_purge("rbt-r10w", Purge::Whole);
+    start_new_legacy_seat_after_purge("rbt-r10f", Purge::RegularFiles);
+}
+
+/// A per-seat native role snapshot is written to the workspace scope root before any native carrier
+/// spawns, so it is durable evidence that this seat ID had native authority. A new seat with such a
+/// snapshot must keep failing closed while that authority is lost, whatever provider it now declares.
+#[test]
+fn g7_new_seat_with_a_native_role_snapshot_on_disk_stays_fail_closed() {
+    for (tag, snapshot) in [
+        ("rbt-g7i", format!("role-{NEW_SEAT}-instance-{}.json", "7a".repeat(32))),
+        ("rbt-g7g", format!("role-{NEW_SEAT}.json")),
+    ] {
+        let (ws, _temp, legacy) = purged_team(tag, Purge::Whole);
+        declare_new_legacy_seat(&ws);
+        assert_no_state_row(&ws, tag, NEW_SEAT);
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(legacy.dir.join(&snapshot)).unwrap();
+        file.write_all(format!("{{\"id\":\"{NEW_SEAT}\"}}").as_bytes()).unwrap();
+        file.sync_all().unwrap();
+        let role = format!("agents/{NEW_SEAT}.md");
+        let out = ta(&ws, &["start", NEW_SEAT, "--role-file", &role, "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+        let all = format!("{}{}", out.stdout, out.stderr);
+        assert!(
+            out.exit_code != 0 && all.contains("native_authority"),
+            "{snapshot}: a seat with a native role snapshot must fail closed while its authority is lost\n{}",
+            transcript(&out)
+        );
+    }
+}
+
+/// Guidance for a purged TEMPORARY authority must name the executable consent path
+/// (`team restart --allow-fresh`). `migrate` cannot recreate a purged authority, so neither the
+/// start refusal nor doctor may recommend it.
+#[test]
+fn r11_lost_temporary_authority_guidance_names_the_executable_remedy() {
+    let tag = "rbt-r11";
+    let (ws, _temp, _legacy) = purged_team(tag, Purge::Whole);
+    let start = ta(&ws, &["start", NATIVE, "--dry-run", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    let start_text = format!("{}{}", start.stdout, start.stderr);
+    assert!(start.exit_code != 0 && start_text.contains("native_authority"), "the contract seat must still fail closed\n{}", transcript(&start));
+    let doctor = ta(&ws, &["doctor", "--workspace", &ws_str(&ws), "--team", tag, "--json"]);
+    let doctor_text = format!("{}{}", doctor.stdout, doctor.stderr);
+    // Evaluate both surfaces before asserting, so one run reports every deficit.
+    let mut deficits = Vec::new();
+    if !start_text.contains("team restart --allow-fresh") || start_text.contains("team-agent migrate") {
+        deficits.push(format!("start refusal must name `team restart --allow-fresh`, not migrate\n{}", transcript(&start)));
+    }
+    if !doctor_text.contains("team restart --allow-fresh") || doctor_text.contains("team-agent migrate") || doctor_text.contains("\"migrate\"") {
+        deficits.push(format!("doctor must name `team restart --allow-fresh` and must not recommend migrate\n{}", transcript(&doctor)));
+    }
+    assert!(deficits.is_empty(), "guidance on a purged temporary authority:\n{}", deficits.join("\n\n"));
+}
+
 // ---------------------------------------------------------------- D1b: copy-forward re-points native seats
 
 /// A real, controlled-terminal native seat (real Lifecycle, real tmux, real process), committed and
