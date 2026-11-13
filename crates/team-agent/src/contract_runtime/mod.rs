@@ -18,3 +18,5 @@ pub(crate) mod recovery;
 mod workspace;
 #[cfg(all(test, unix))]
 mod tmuxdesk_leader_friction_red;
+#[cfg(all(test, unix))]
+mod phase1_recovery_red;
