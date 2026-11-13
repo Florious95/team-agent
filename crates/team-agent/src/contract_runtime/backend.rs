@@ -266,6 +266,9 @@ pub fn observation_error(team: &str, seat: &str, error: &BackendError) -> String
 
 pub fn authority_recovery_action(workspace: &Path, team: &str, seat: &str) -> String {
     if let Err(error @ BackendError::AuthorityLost { .. }) = authority_check(workspace, team) {
+        if !read_binding(workspace, team).is_ok_and(|binding| fresh_recovery_allowed(&binding)) {
+            return error.to_string();
+        }
         return format!("{error}; after explicitly accepting fresh conversations, use team-agent team restart --allow-fresh --workspace {} --team {} (recovery refuses live or unobservable old carriers)",
             crate::cli::shell_quote(&workspace.to_string_lossy()), crate::cli::shell_quote(team));
     }
@@ -301,6 +304,9 @@ impl Backend {
         // New launches use this invocation, including relocated binaries.
         binding.candidate = std::env::current_exe()?.canonicalize()?;
         binding.candidate_sha256 = executing_candidate_sha()?;
+        // The client is selected by this invocation's PATH, not an old install
+        // location. Server/process ownership still comes from the saved receipts.
+        binding.tmux = discovery::public_command("tmux")?.entry;
         let scope = binding.scope.clone();
         let store = if readonly {
             ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
@@ -657,7 +663,7 @@ pub fn preflight(team: &super::config::TeamConfig) -> Result<(), BackendError> {
         endpoint: endpoint(&team.scope),
         candidate,
         candidate_sha256,
-        tmux: discovery::executable("tmux")?,
+        tmux: discovery::public_command("tmux")?.entry,
         transport_root: "/tmp/preflight-no-write".into(),
     };
     for role in team.roles.iter().filter(|role| !role.paused) {
@@ -946,12 +952,13 @@ fn finish_receipt_until(backend: &mut Backend, record: OperationRecord, deadline
     Ok(Lifecycle { store: &mut backend.store, host: &mut host, io: &mut NoNewIo }.recover(&record.id)?)
 }
 
-/// Read-only absence proof for an unmaterialized declaration. Missing authority
-/// inside an existing scope is an error, never permission to create a new scope.
+/// Read-only absence proof for an unmaterialized declaration. Existing native
+/// provenance fails closed; missing authority never permits creating a new scope.
 pub(crate) fn seat_authority_absent(workspace: &Path, team: &str, seat: &SeatId) -> Result<bool, BackendError> {
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
-    if !root_for(&cwd.path, &scope).exists() { return Ok(true); }
+    let root = root_for(&cwd.path, &scope);
+    if !root.exists() { return Ok(true); }
     let backend = match Backend::open_readonly(workspace, team) {
         Ok(backend) => backend,
         Err(error @ BackendError::AuthorityLost { .. }) => {
@@ -962,6 +969,24 @@ pub(crate) fn seat_authority_absent(workspace: &Path, team: &str, seat: &SeatId)
             if row.is_object() && !super::framework::is_contract(row)
                 && ["contract_instance", "native_pane", "native_endpoint"].iter().all(|key| row[*key].is_null())
             { return Ok(true); }
+            if selected.state["agents"].as_object().is_some_and(|agents| !agents.contains_key(seat.as_str())) {
+                // write_role precedes native spawn, including a spawn whose row
+                // was never projected. Match this seat, not a shared ID prefix.
+                let legacy = format!("role-{}.json", seat.as_str());
+                let prefix = format!("role-{}-instance-", seat.as_str());
+                let mut witnessed = false;
+                for entry in std::fs::read_dir(&root)? {
+                    let name = entry?.file_name();
+                    let name = name.to_string_lossy();
+                    if name == legacy || name.strip_prefix(&prefix).and_then(|tail| tail.strip_suffix(".json"))
+                        .is_some_and(|nonce| nonce.len() == 64 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    {
+                        witnessed = true;
+                        break;
+                    }
+                }
+                if !witnessed { return Ok(true); }
+            }
             return Err(BackendError::AuthorityLost { root: read_binding(workspace, team)?.transport_root });
         }
         Err(error) => return Err(error),
@@ -1074,7 +1099,7 @@ pub(crate) fn start_with_peer_transfer(
     let cwd = resolve_cwd(workspace)?;
     let scope = scope_for(&cwd, team)?;
     let candidate = std::env::current_exe()?.canonicalize()?;
-    let tmux = discovery::executable("tmux")?;
+    let tmux = discovery::public_command("tmux")?.entry;
     let candidate_sha256 =
         fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(10))?;
     let provisional = Binding {
@@ -1528,6 +1553,33 @@ pub fn temporary_authority(binding: &Binding) -> bool {
         && (path.starts_with("/tmp") || path.starts_with("/private/tmp")
             || path.starts_with(std::env::temp_dir())
             || std::env::temp_dir().canonicalize().is_ok_and(|root| path.starts_with(root)))
+}
+
+/// Storage-location admission only; explicit consent and carrier/owner fences
+/// remain mandatory in recovery. Never follow a scoped path out through a link.
+pub(crate) fn fresh_recovery_allowed(binding: &Binding) -> bool {
+    let root = root_for(&binding.workspace.path, &binding.scope);
+    if !root.canonicalize().is_ok_and(|canonical| canonical == root) { return false; }
+    let old = &binding.transport_root;
+    let temporary = old.parent().is_some_and(|parent| {
+        parent == Path::new("/tmp") || parent == Path::new("/private/tmp")
+            || Path::new("/tmp").canonicalize().is_ok_and(|temp| parent == temp)
+    }) && old.file_name().is_some_and(|name| name.to_string_lossy().starts_with("ta-"));
+    if temporary { return true; }
+    let Ok(relative) = old.strip_prefix(&root) else { return false; };
+    if relative.as_os_str().is_empty()
+        || !relative.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+    { return false; }
+    let mut ancestor = root;
+    for part in relative.components() {
+        ancestor.push(part.as_os_str());
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn quiescent_authority(store: &ProjectionStore) -> Result<bool, BackendError> {

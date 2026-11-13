@@ -47,6 +47,20 @@ fn rejected(error: impl std::fmt::Display) -> LifecycleError {
     refused(error.to_string())
 }
 
+#[cfg(unix)]
+fn rejected_native(
+    error: crate::contract_runtime::backend::BackendError,
+    selected: &SelectedTeam,
+    seat: &str,
+) -> LifecycleError {
+    if matches!(error, crate::contract_runtime::backend::BackendError::AuthorityLost { .. }) {
+        return refused(crate::contract_runtime::backend::authority_recovery_action(
+            &selected.run_workspace, &selected.team_key, seat,
+        ));
+    }
+    rejected(error)
+}
+
 /// Defaults are applied once, and only to genuinely omitted declaration values.
 pub fn resolve(
     request: &StartRequest,
@@ -232,6 +246,14 @@ pub fn resolve(
     {
         return Err(refused(format!("agent is paused; edit paused: false in its role declaration, then run `team-agent start {}`", command_arg(request.agent.as_str()))));
     }
+    // Preserve the user's bytes when rendering only makes implicit defaults
+    // explicit. In particular, an unchanged symlink is not a file replacement.
+    let text = std::fs::read_to_string(&destination).ok().filter(|current| {
+        role_config::declaration_paused(current).ok() == Some(declaration_paused)
+            && crate::compiler::compile_role_text(
+                &destination, current, &team_meta, &request.workspace.to_string_lossy(),
+            ).is_ok_and(|previous| role_config::to_json(&previous.agent) == role_config::to_json(&compiled.agent))
+    }).unwrap_or(text);
     Ok(Declaration {
         source,
         destination,
@@ -471,7 +493,7 @@ pub(crate) fn describe_resolved(
                     &selected.team_key,
                     &id,
                 )
-                .map_err(rejected)?
+                .map_err(|error| rejected_native(error, selected, request.agent.as_str()))?
                 {
                     "fresh"
                 } else {
@@ -607,6 +629,24 @@ pub(crate) fn preflight(
     selected: Option<&SelectedTeam>,
     declaration: &Declaration,
 ) -> Result<(), LifecycleError> {
+    let metadata = match std::fs::symlink_metadata(&declaration.destination) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(rejected(error)),
+    };
+    if metadata.is_some_and(|metadata| metadata.file_type().is_symlink())
+        && !std::fs::read(&declaration.destination).is_ok_and(|bytes| bytes == declaration.text.as_bytes())
+    {
+        let target = declaration.destination.canonicalize().or_else(|_| {
+            std::fs::read_link(&declaration.destination)
+                .map(|target| declaration.destination.with_file_name(target))
+        }).map_err(rejected)?;
+        return Err(refused(format!(
+            "refusing to replace symlink: {}; edit {} directly and rerun start {}",
+            command_arg(&declaration.destination.to_string_lossy()),
+            command_arg(&target.to_string_lossy()), command_arg(request.agent.as_str()),
+        )));
+    }
     if selected
         .and_then(|selected| {
             selected.state["agents"][request.agent.as_str()].get("session_history")
@@ -616,6 +656,14 @@ pub(crate) fn preflight(
         return Err(refused(
             "invalid session history; refusing to replace retained context",
         ));
+    }
+    #[cfg(unix)]
+    if let Some(selected) = selected.filter(|selected| {
+        native(provider(&declaration.compiled.agent))
+            || crate::contract_runtime::framework::is_contract(&selected.state["agents"][request.agent.as_str()])
+    }) {
+        crate::contract_runtime::backend::authority_check(&selected.run_workspace, &selected.team_key)
+            .map_err(|error| rejected_native(error, selected, request.agent.as_str()))?;
     }
     #[cfg(unix)]
     if native(provider(&declaration.compiled.agent)) {
@@ -687,7 +735,7 @@ pub(crate) fn preflight(
                     &selected.team_key,
                     &id,
                 )
-                .map_err(rejected)?
+                .map_err(|error| rejected_native(error, selected, request.agent.as_str()))?
             {
                 return Err(refused("native authority still owns this seat; reconcile or stop that native attempt before starting a legacy provider"));
             }
@@ -1305,7 +1353,7 @@ fn native_continuation_admission(
         &selected.team_key,
         &role.id,
     )
-    .map_err(rejected)?
+    .map_err(|error| rejected_native(error, selected, request.agent.as_str()))?
     {
         if request.session == SessionPolicy::Preserve
             && (row["native_recovery_archive"].is_string()

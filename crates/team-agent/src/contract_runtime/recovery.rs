@@ -1,4 +1,4 @@
-//! Explicit fresh recovery of a purged temporary native store. Never fabricates
+//! Explicit fresh recovery of a lost native store. Never fabricates
 //! a session/ownership receipt, adopts an old process, or deletes the old root.
 use super::{
     backend::{self, BackendError},
@@ -67,16 +67,19 @@ pub(super) fn carrier_absent(id: &str, row: &serde_json::Value, tmux: &Path) -> 
         )
         .map_err(error)?;
         if !absent {
-            let targets = crate::transport_factory::bounded_endpoint_transport(
+            let transport = crate::transport_factory::bounded_endpoint_transport(
                 endpoint,
                 std::time::Instant::now() + std::time::Duration::from_millis(500),
-            )
-            .list_targets()
-            .map_err(error)?;
-            if targets.iter().any(|target| target.pane_id.as_str() == pane) {
-                return Err(error(format!(
-                    "native recovery refused: saved native pane for {id} still exists"
-                )));
+            );
+            let targets = transport.list_targets().map_err(error)?;
+            if let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane) {
+                if transport.pane_is_dead(&target.pane_id).map_err(error)? != Some(true) {
+                    return Err(error(format!(
+                        "native recovery refused: saved native pane for {id} still exists"
+                    )));
+                }
+                // Retained dead panes are evidence, not live carriers. Do not
+                // destroy them or manufacture an ownership receipt for them.
             }
         }
         proved = true;
@@ -205,12 +208,7 @@ pub(crate) fn restart(
     }
     let mut binding = backend::read_binding(workspace, team).map_err(error)?;
     let old_root = binding.transport_root.clone();
-    let temp = Path::new("/tmp").canonicalize()?;
-    if old_root.parent().is_none_or(|parent| parent != temp && parent != Path::new("/tmp") && parent != Path::new("/private/tmp"))
-        || !old_root
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with("ta-"))
-    {
+    if !backend::fresh_recovery_allowed(&binding) {
         return Err(error("native_authority_lost: non-temporary authority is missing; restore it from backup; no replacement was created"));
     }
     if !allow_fresh {
@@ -225,6 +223,8 @@ pub(crate) fn restart(
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .ok_or_else(|| error("native recovery requires the saved roster"))?;
+    // Resolve the public client without changing the archived historical binding.
+    let tmux = super::discovery::public_command("tmux").map_err(error)?.entry;
     // Refuse PID reuse too. No signal is sent and no stale PID is trusted as a
     // cleanup target. A live/unobservable old carrier forbids replacement.
     let dead = || -> Result<(), CliError> {
@@ -244,7 +244,7 @@ pub(crate) fn restart(
             {
                 continue;
             }
-            carrier_absent(id, row, &binding.tmux)?;
+            carrier_absent(id, row, &tmux)?;
         }
         let transport =
             crate::lifecycle::restart::lifecycle_worker_tmux_backend_selection_for_state(
@@ -259,11 +259,27 @@ pub(crate) fn restart(
             .and_then(serde_json::Value::as_str)
             .filter(|session| !session.is_empty())
             .ok_or_else(|| error("native recovery requires the saved tmux session"))?;
-        if transport
-            .has_session(&SessionName::new(session))
-            .map_err(error)?
-        {
-            return Err(error("native recovery refused: the old worker tmux session still exists; no session was changed"));
+        if transport.has_session(&SessionName::new(session)).map_err(error)? {
+            let panes = transport.list_targets().map_err(error)?;
+            let panes: Vec<_> = panes.iter().filter(|pane| pane.session.as_str() == session).collect();
+            if panes.is_empty() {
+                return Err(error("native recovery refused: the old worker tmux session is unobservable; no session was changed"));
+            }
+            for pane in panes {
+                if transport.pane_is_dead(&pane.pane_id).map_err(error)? == Some(true) { continue; }
+                // A positively verified legacy co-tenant is not being replaced.
+                // Any live native or unrecognized pane still blocks recovery.
+                let legacy = agents.iter().find(|(_, row)| !framework::is_contract(row)
+                    && row["pane_id"].as_str() == Some(pane.pane_id.as_str()));
+                let preserved = match legacy {
+                    Some((id, row)) => crate::lifecycle::seat_observation::observe(&selected, id, row)
+                        .map_err(error)? == crate::lifecycle::seat_observation::SeatObservation::Live,
+                    None => false,
+                };
+                if !preserved {
+                    return Err(error("native recovery refused: the old worker tmux session contains a live or unverified carrier; no session was changed"));
+                }
+            }
         }
         Ok(())
     };
@@ -346,7 +362,8 @@ pub(crate) fn restart(
     serde_json::to_writer(
         &mut file,
         &json!({"binding":binding,"state":selected.state,
-        "reason":"temporary_authority_lost","session_preserved":false}),
+        "reason":if backend::temporary_authority(&binding) { "temporary_authority_lost" } else { "workspace_authority_lost" },
+        "session_preserved":false}),
     )
     .map_err(error)?;
     file.sync_all()?;
@@ -370,6 +387,7 @@ pub(crate) fn restart(
             &detached,
         ).map_err(error)?;
     }
+    binding.tmux = tmux;
     binding.candidate = std::env::current_exe()?.canonicalize()?;
     binding.candidate_sha256 = team_agent_contract::host::process::fingerprint_file(
         &binding.candidate,

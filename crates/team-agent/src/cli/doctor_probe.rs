@@ -714,7 +714,10 @@ pub(super) fn run(args: &DoctorArgs) -> CmdResult {
     let mut fix = None;
     #[cfg(unix)]
     if let Ok(binding) = crate::contract_runtime::backend::read_binding(workspace, team) {
-        if crate::contract_runtime::backend::temporary_authority(&binding) {
+        if crate::contract_runtime::backend::temporary_authority(&binding)
+            && matches!(crate::contract_runtime::backend::authority_check(workspace, team),
+                Ok(()) | Err(crate::contract_runtime::backend::BackendError::Migration(_)))
+        {
             links[0] = Link::new(1, "WARN", format!("{team}: native authority is temporary: {}; stop native seats and run team-agent migrate --team {team}", binding.transport_root.display()));
             fix = Some(action("migrate", workspace, team));
         }
