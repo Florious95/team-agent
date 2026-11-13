@@ -313,7 +313,26 @@ sleep 60 & wait $!
     let out = launch.output().unwrap();
     assert!(out.status.success(), "host tmux: {out:?}");
     caller.register_owned_tmux_socket(&host);
-    let launched = wait_for(|| leader_env.is_file(), READY, POLL);
+    // The provider can start before the launcher persists its owner identity.
+    let launched = wait_for(
+        || {
+            if !leader_env.is_file() {
+                return false;
+            }
+            let state: Value = match fs::read(ws.state_path()) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|error| panic!("parse launcher state.json: {error}")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+                Err(error) => panic!("read launcher state.json: {error}"),
+            };
+            let owner = &state["teams"][TEAM]["team_owner"];
+            ["pane_id", "provider", "leader_session_uuid"].iter().all(|key| {
+                owner[*key].as_str().is_some_and(|value| !value.is_empty())
+            }) && owner["owner_epoch"].is_u64()
+        },
+        READY,
+        POLL,
+    );
     own_sockets(&ws);
     assert!(
         launched,
