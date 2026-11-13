@@ -319,7 +319,7 @@ sleep 60 & wait $!
             if !leader_env.is_file() {
                 return false;
             }
-            let state: Value = match fs::read(ws.state_path()) {
+            let state: Value = match fs::read(ws.state_json_path()) {
                 Ok(bytes) => serde_json::from_slice(&bytes)
                     .unwrap_or_else(|error| panic!("parse launcher state.json: {error}")),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
