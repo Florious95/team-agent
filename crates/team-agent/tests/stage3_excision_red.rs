@@ -1191,7 +1191,7 @@ fn guard_fixtures_are_consistent_with_each_other() {
     let census = census();
     let retire = census.iter().filter(|row| row.class.contains('X')).count();
     let repoint = census.iter().filter(|row| row.class.starts_with('R')).count();
-    if census.len() < 3000 || retire != 68 || repoint != 32 {
+    if census.len() < 3000 || retire != 69 || repoint != 32 {
         problems.push(format!("census shape changed: {} names, {retire} retire, {repoint} repoint", census.len()));
     }
     assert!(problems.is_empty(), "fixture problems: {problems:#?}");

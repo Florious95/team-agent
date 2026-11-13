@@ -499,7 +499,8 @@ command_scope_single_alive_team_resolves_automatically	1	1	P
 command_scope_two_alive_teams_no_explicit_team_is_ambiguous	1	1	P	
 command_specs_have_unique_names	1	1	P	
 committed_receipt_retains_projection_success_and_error	1	1	P	
-committed_starting_seat_is_located_and_receives_managed_send	1	1	P	
+# Approved post-Stage-3 release retirement in 056544ef: M4 native delivery case.
+committed_starting_seat_is_located_and_receives_managed_send	0	0	X	tests/m4_native_delivery_dev.rs
 compact_drops_teams_keeps_order	1	1	P	
 compatible_api_profile_init_template_contains_common_five_fields	1	1	P	
 compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_metadata	1	1	P	
