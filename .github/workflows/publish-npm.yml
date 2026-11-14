@@ -86,8 +86,7 @@ jobs:
             exit 1
           fi
 
-      - &test-prerequisites
-        name: Ensure tmux and Python for tests
+      - name: Ensure tmux and Python for tests
         run: |
           if ! command -v tmux >/dev/null || ! command -v python3 >/dev/null; then
             if [ "$RUNNER_OS" = Linux ]; then
@@ -100,8 +99,7 @@ jobs:
           tmux -V
           python3 --version
 
-      - &test-environment
-        name: Prepare isolated serial test environment
+      - name: Prepare isolated serial test environment
         run: |
           set -euo pipefail
           test_root="$(mktemp -d /tmp/ta-ci.XXXXXXXX)"
@@ -125,8 +123,7 @@ jobs:
           } >> "$GITHUB_ENV"
           printf 'Public Python: %s\nTest root: %s\n' "$python" "$test_root"
 
-      - &test-diagnostics
-        name: Record test environment
+      - name: Record test environment
         run: |
           uname -a
           python3 - <<'PY'
@@ -139,39 +136,29 @@ jobs:
               print(name + ":", os.environ[name])
           PY
 
-      - &compile-tests
-        name: Compile Rust tests while the VM ages
+      - name: Compile Rust tests
         run: cargo test --workspace --locked --no-run
-
-      - &test-boot-age
-        name: Require real same-boot history for PID reuse fixtures
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, subprocess, sys, time
-          def uptime():
-              if sys.platform == "darwin":
-                  boot = subprocess.check_output(["sysctl", "-n", "kern.boottime"], text=True)
-                  return time.time() - int(re.search(r"\bsec = (\d+)", boot).group(1))
-              return float(pathlib.Path("/proc/uptime").read_text().split()[0])
-          # Frozen fixtures require >1920s; never fake kernel timestamps or skip them.
-          remaining = max(0, 1925 - uptime())
-          print(f"VM uptime: {uptime():.2f}s; required aging: {remaining:.2f}s", flush=True)
-          if remaining:
-              time.sleep(remaining)
-          observed = uptime()
-          if observed <= 1920:
-              raise SystemExit(f"Insufficient same-boot history: {observed:.2f}s")
-          print(f"Same-boot history ready: {observed:.2f}s", flush=True)
-          PY
-
-      - name: Run Rust tests
-        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build Rust CLI
         run: cargo build --release --bin team-agent --locked
 
       - name: Verify CLI help
         run: ./target/release/team-agent --help >/tmp/team-agent-help.txt
+
+      - name: Verify minimum same-boot history for PID reuse fixtures
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          observed = float(pathlib.Path("/proc/uptime").read_text().split()[0])
+          # The relative 180s fixture needs >300s of real same-boot history.
+          # Compile first; never sleep, fake kernel timestamps, or skip tests.
+          print(f"VM uptime after compilation: {observed:.2f}s", flush=True)
+          if observed <= 300:
+              raise SystemExit(f"Insufficient same-boot history: {observed:.2f}s; require >300s")
+          PY
+
+      - name: Run Rust tests
+        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Verify package dry runs
         run: |
@@ -228,7 +215,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools tmux
+          sudo apt-get install -y musl-tools
 
       - name: Set up Rust
         run: |
@@ -237,15 +224,6 @@ jobs:
           rustup target add "${{ matrix.target }}"
           rustc --version
           cargo --version
-
-      - *test-prerequisites
-      - *test-environment
-      - *test-diagnostics
-      - *compile-tests
-      - *test-boot-age
-
-      - name: Run native Rust tests
-        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build binary
         run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
