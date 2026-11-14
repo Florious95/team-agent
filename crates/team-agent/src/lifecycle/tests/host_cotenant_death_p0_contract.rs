@@ -62,6 +62,28 @@ const POLLUTED_CALLER_AUTHORITY_ENVS: &[&str] = &[
 #[test]
 #[serial(env, pid_probe)]
 fn polluted_caller_env_never_authorizes_teardown_to_kill_foreign_tmux() {
+    // The polluted PATH/TMUX/caller identity lives only in a directed child
+    // process; concurrent tests in this process never observe the shim.
+    const CHILD: &str = "TA_P0_CALLER_ENV_SENTINEL_CHILD";
+    const TEST: &str = "lifecycle::tests::host_cotenant_death_p0_contract::polluted_caller_env_never_authorizes_teardown_to_kill_foreign_tmux";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success()
+                && stdout.contains("running 1 test")
+                && stdout.contains(&format!("test {TEST} ..."))
+                && stdout.contains("P0_CALLER_ENV_CHILD_SUCCESS"),
+            "directed child failed: status={} stdout={stdout} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let env = hermetic_guard::HermeticTestEnv::enter("p0-caller-env-sentinel");
     let shim_dir = env.root().join("bin");
     fs::create_dir_all(&shim_dir).unwrap();
@@ -142,6 +164,7 @@ exec "$TEAM_AGENT_TEST_REAL_TMUX" "$@"
         "P0 caller-env boundary: polluted caller identity must never become teardown authority; missing_scrub_keys={missing_scrub_keys:?}; destructive tmux argv targeting ambient sentinel={destructive_hits:?}; all recorded argv={recorded:?}"
     );
     drop(polluted_env);
+    println!("P0_CALLER_ENV_CHILD_SUCCESS");
 }
 
 #[test]
