@@ -57,8 +57,9 @@ const IDENTITY_REFUSALS: &[&str] = &[
     "unknown physical identity",
     "ownership/liveness is unverified",
 ];
-/// Far outside any plausible spawn latency, well inside the host uptime we require.
-const LONG_AGO_SECS: i64 = 1800;
+/// 60s beyond the classifier's 120s same-boot spawn window (whole-second boot
+/// time, clock ticks, an early-boot clock step), inside the uptime we require.
+const LONG_AGO_SECS: i64 = 180;
 
 fn identity_refusal(value: &Value) -> bool {
     let body = value.to_string();
