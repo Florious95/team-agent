@@ -858,3 +858,31 @@ fn pane_info_with_pid(window: &str, pane: &str, current_command: &str, pane_pid:
         leader_env: BTreeMap::new(),
     }
 }
+
+/// Concurrency boundary for the P0 caller-env sentinel. Running it must never
+/// place its recording tmux shim, polluted TMUX or foreign caller identity in
+/// this shared test process, where concurrent tests resolve `tmux` from PATH
+/// (harvest2 t3 executed the shim and exited 126). The sentinel takes its own
+/// serial lock; this observer deliberately holds none.
+#[test]
+fn p0_caller_env_sentinel_never_pollutes_the_shared_test_process_env() {
+    const MARKERS: &[&str] = &["p0-caller-env-sentinel", "%foreign-sentinel", "foreign-caller-authority"];
+    let sentinel = std::thread::spawn(polluted_caller_env_never_authorizes_teardown_to_kill_foreign_tmux);
+    let mut leaks = BTreeSet::new();
+    let mut samples = 0_u64;
+    while !sentinel.is_finished() {
+        samples += 1;
+        for (key, value) in std::env::vars_os() {
+            let value = value.to_string_lossy();
+            if MARKERS.iter().any(|marker| value.contains(marker)) {
+                leaks.insert(format!("{}={value}", key.to_string_lossy()));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let sentinel_ok = sentinel.join().is_ok();
+    assert!(
+        leaks.is_empty() && sentinel_ok && samples > 0,
+        "P0 sentinel must not mutate the shared test process environment; leaks={leaks:?}; sentinel_ok={sentinel_ok}; samples={samples}"
+    );
+}
