@@ -10,7 +10,9 @@
 #   `max-threads = 1`. `nextest_serial_groups_guard` enforces this mapping.
 # - Frozen physical suites, PID/process-table probes and wall-clock budget
 #   suites run in the exclusive tier: a separate serial invocation that never
-#   overlaps any other test (`--profile ci-exclusive`).
+#   overlaps any other test (`--profile ci-exclusive`). The copilot temp-root
+#   sweep test is there too: it requires that no live test process owns a
+#   `ta-rs-copilot-*` root.
 #
 # The exclusive set appears three times below; the guard requires all three
 # copies to be identical.
@@ -35,8 +37,13 @@ slow-timeout = { period = "120s", terminate-after = 8 }
 
 [[profile.default.overrides]]
 # EXCLUSIVE-SET (copy 1 of 3)
-filter = 'binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red)'
+filter = 'binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red) | (kind(lib) & test(=lifecycle::tests::copilot_provider_red::copilot_tmp_workspace_guard_cleans_and_sweeps_dead_pid_stale_roots))'
 test-group = 'exclusive-host'
+
+# Start the longest tests first so they do not become the tail of a run.
+[[profile.default.overrides]]
+filter = 'binary(=role_lifecycle_intermediate_layer_red) | binary(=decoupled_delivery_dev) | binary(=clone_team_scope_verifier_contract)'
+priority = 50
 
 # serial(status_brief)
 [[profile.default.overrides]]
@@ -92,7 +99,7 @@ test-group = 'serial-stage3-excision'
 [profile.ci]
 test-threads = "num-cpus"
 # EXCLUSIVE-SET (copy 2 of 3)
-default-filter = 'not (binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red))'
+default-filter = 'not (binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red) | (kind(lib) & test(=lifecycle::tests::copilot_provider_red::copilot_tmp_workspace_guard_cleans_and_sweeps_dead_pid_stale_roots)))'
 
 [profile.ci.junit]
 path = "junit.xml"
@@ -101,7 +108,7 @@ path = "junit.xml"
 [profile.ci-exclusive]
 test-threads = 1
 # EXCLUSIVE-SET (copy 3 of 3)
-default-filter = 'binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red)'
+default-filter = 'binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_path_red) | binary(=a13_orphan_converge_red) | binary(=a14_session_absence_red) | binary(=unified_start_contract_red) | binary(=stage3_preserve_invariants) | binary(=perf6_shutdown_budget_red) | binary(=b5_leader_terminal_kill_red) | (kind(lib) & test(=lifecycle::tests::copilot_provider_red::copilot_tmp_workspace_guard_cleans_and_sweeps_dead_pid_stale_roots))'
 
 [profile.ci-exclusive.junit]
 path = "junit.xml"
