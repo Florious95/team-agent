@@ -172,11 +172,19 @@ jobs:
       - name: Verify minimum same-boot history for PID reuse fixtures
         run: |
           python3 - <<'PY'
-          import pathlib
-          observed = float(pathlib.Path("/proc/uptime").read_text().split()[0])
+          import pathlib, time
+          uptime_file = pathlib.Path("/proc/uptime")
+          observed = float(uptime_file.read_text().split()[0])
           # The relative 180s fixture needs >300s of real same-boot history.
-          # Compile first; never sleep, fake kernel timestamps, or skip tests.
+          # Compile first, then wait only for the shortfall; never fake it or skip tests.
           print(f"VM uptime after compilation: {observed:.2f}s", flush=True)
+          # One /proc/uptime precision tick preserves the strict >300s boundary.
+          remaining = 300.01 - observed if observed <= 300 else 0.0
+          print(f"Additional boot-age wait: {remaining:.2f}s", flush=True)
+          if remaining:
+              time.sleep(remaining)
+          observed = float(uptime_file.read_text().split()[0])
+          print(f"VM uptime before tests: {observed:.2f}s", flush=True)
           if observed <= 300:
               raise SystemExit(f"Insufficient same-boot history: {observed:.2f}s; require >300s")
           PY
