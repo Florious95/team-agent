@@ -2428,7 +2428,15 @@ mod containment_tests {
 
     fn tmux_socket(path: &Path, session: &str) {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create tmux socket parent");
+            // The parent may be the platform `$TMPDIR/tmux-<uid>` root. Create it
+            // as tmux would (0700): a 0755 root makes every later default-socket
+            // tmux client fail with "has unsafe permissions".
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .expect("create tmux socket parent");
         }
         let _ = std::fs::remove_file(path);
         let output = Command::new("tmux")
