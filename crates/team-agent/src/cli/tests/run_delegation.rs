@@ -143,9 +143,6 @@ fn run_unknown_subcommand_is_error_not_usage() {
 }
 
 #[test]
-#[ignore = "real-machine: `coordinator --once` dispatches to run_daemon which drives a real \
-                Coordinator (TmuxBackend); in-process needs a run_daemon_with_coordinator seam"]
-#[test]
 #[ignore = "real-machine: quick-start --yes spawns a real team (tmux) + coordinator daemon"]
 fn run_dispatches_quick_start_compiles_spec() {
     // The full quick-start path spawns workers + the coordinator; on a real machine we assert it

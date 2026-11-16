@@ -102,3 +102,26 @@ fn every_cross_process_serialization_need_is_mapped_in_nextest_config() {
          and keep three identical exclusive-set copies; mapped={mapped}; unmapped={unmapped:#?}; copies={copies:#?}"
     );
 }
+
+/// libtest registers a function once per stacked `#[test]`, while nextest keys
+/// tests by name. Duplicate attributes make the two inventories disagree and
+/// silently run the same body twice.
+#[test]
+fn no_function_carries_duplicate_test_attributes() {
+    let crate_root = repo_root().join("crates/team-agent");
+    let mut files = Vec::new();
+    rust_files(&crate_root.join("src"), &mut files);
+    rust_files(&crate_root.join("tests"), &mut files);
+    let mut duplicates = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = source.lines().map(str::trim).collect();
+        for (index, line) in lines.iter().enumerate().filter(|(_, line)| **line == "#[test]") {
+            let span = lines[index + 1..].iter().take_while(|next| !next.contains("fn "));
+            if span.filter(|next| **next == "#[test]").count() > 0 {
+                duplicates.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+    assert!(duplicates.is_empty(), "stacked duplicate #[test] attributes: {duplicates:#?}");
+}

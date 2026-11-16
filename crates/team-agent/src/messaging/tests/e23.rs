@@ -1,6 +1,4 @@
 #[test]
-
-#[test]
 fn e23_no_parallel_direct_inject_or_fake_worker_mirror() {
     let results = include_str!("../../mcp_server/tools.rs");
     assert!(
