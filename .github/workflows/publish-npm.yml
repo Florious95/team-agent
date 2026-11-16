@@ -126,12 +126,24 @@ jobs:
       - name: Record test environment
         run: |
           uname -a
+          lscpu
+          printf 'Available CPUs (nproc): '
+          nproc
+          # Version-only calls, including the tools involved in fixture portability.
+          for utility in nproc sleep cat mkdir; do
+            command -v "$utility"
+            "$utility" --version
+          done
           python3 - <<'PY'
           import os, pathlib, shutil, sys
           launcher = pathlib.Path(shutil.which("python3"))
           print("python_launcher:", launcher, "canonical:", launcher.resolve())
           print("python_image:", sys.executable, "canonical:", pathlib.Path(sys.executable).resolve())
           print("clock_ticks:", os.sysconf("SC_CLK_TCK"))
+          print("cpu_count:", os.cpu_count())
+          print("cpu_affinity:", sorted(os.sched_getaffinity(0)))
+          cpu_quota = pathlib.Path("/sys/fs/cgroup/cpu.max")
+          print("cgroup_v2_cpu_max:", cpu_quota.read_text().strip() if cpu_quota.exists() else "absent")
           for name in ("RUST_TEST_THREADS", "TERM", "TMPDIR"):
               print(name + ":", os.environ[name])
           PY
