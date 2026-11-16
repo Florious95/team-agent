@@ -171,10 +171,13 @@ jobs:
 
       # One process per test; see .config/nextest.toml for the serialized groups.
       - name: Run Rust tests (parallel tier)
+        id: parallel_tests
         run: cargo nextest run --workspace --locked --profile ci
 
+      # Runs after parallel failures for diagnostics, never when the parallel
+      # tier was skipped (failed build or same-boot history preflight).
       - name: Run Rust tests (exclusive serial tier)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.parallel_tests.conclusion != 'skipped' }}
         run: cargo nextest run --workspace --locked --profile ci-exclusive
 
       - name: Run Rust doctests
