@@ -136,6 +136,18 @@ jobs:
               print(name + ":", os.environ[name])
           PY
 
+      - name: Install cargo-nextest
+        env:
+          NEXTEST_VERSION: "0.9.152"
+          NEXTEST_SHA256: "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NEXTEST_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "$archive" -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          cargo nextest --version
+
       - name: Compile Rust tests
         run: cargo test --workspace --locked --no-run
 
@@ -157,8 +169,25 @@ jobs:
               raise SystemExit(f"Insufficient same-boot history: {observed:.2f}s; require >300s")
           PY
 
-      - name: Run Rust tests
-        run: cargo test --workspace --locked --no-fail-fast
+      # One process per test; see .config/nextest.toml for the serialized groups.
+      - name: Run Rust tests (parallel tier)
+        run: cargo nextest run --workspace --locked --profile ci
+
+      - name: Run Rust tests (exclusive serial tier)
+        if: ${{ !cancelled() }}
+        run: cargo nextest run --workspace --locked --profile ci-exclusive
+
+      - name: Run Rust doctests
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked --doc
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-junit
+          path: target/nextest/*/junit.xml
+          if-no-files-found: warn
 
       - name: Verify package dry runs
         run: |

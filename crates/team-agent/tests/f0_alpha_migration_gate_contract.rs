@@ -249,8 +249,9 @@ fn alpha_gate_keeps_a0_b0_contract_families_present_and_ci_executed() {
 
     let workflow = read_to_string(repo_root().join(".github/workflows/publish-npm.yml"));
     assert!(
-        workflow.contains("cargo test --workspace --locked --no-fail-fast"),
-        "F0-4 RED4: npm/release CI must run cargo test for the workspace so standalone A0/B0 integration contracts execute"
+        workflow.contains("cargo nextest run --workspace --locked --profile ci\n")
+            && workflow.contains("cargo nextest run --workspace --locked --profile ci-exclusive\n"),
+        "F0-4 RED4: npm/release CI must run every workspace test (nextest parallel and exclusive tiers) so standalone A0/B0 integration contracts execute"
     );
 }
 
