@@ -103,6 +103,8 @@ default-filter = 'not (binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clea
 
 [profile.ci.junit]
 path = "junit.xml"
+# The XML is uploaded publicly; failure output stays in the job log only.
+store-failure-output = false
 
 # Exclusive tier: the excluded set, one test at a time, after the parallel tier.
 [profile.ci-exclusive]
@@ -112,3 +114,5 @@ default-filter = 'binary(=pid_reuse_lifecycle_red) | binary(=team_stop_clean_pat
 
 [profile.ci-exclusive.junit]
 path = "junit.xml"
+# The XML is uploaded publicly; failure output stays in the job log only.
+store-failure-output = false
