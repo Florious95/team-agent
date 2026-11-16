@@ -634,6 +634,7 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
         let stdout = ws.join("native.stdout");
         let stderr = ws.join("native.stderr");
         let receipt = ws.join("native.exit");
+        let receipt_tmp = ws.join("native.exit.tmp");
         let script = ws.join("invoke.sh");
         // Run inside this genuine PTY, not an SSH child merely claiming its
         // TMUX/PANE identity: the frozen caller controlling-TTY gate remains intact.
@@ -651,7 +652,9 @@ fn h7_native_delimiter_help_preserves_existing_provider_rules_and_raw_order() {
             .map(|arg| quote(arg))
             .collect::<Vec<_>>()
             .join(" ");
-        fs::write(&script, format!("#!/bin/sh\nexport HOME={} PATH={} TEAM_AGENT_CLI_ARGV_ROUTING=off\n{} > {} 2> {}\nprintf '%s\\n' \"$?\" > {}\nexec sleep 600\n", quote(env.home().to_str().unwrap()), quote(&path), command, quote(stdout.to_str().unwrap()), quote(stderr.to_str().unwrap()), quote(receipt.to_str().unwrap()))).unwrap();
+        // Publish the exit code atomically: the poller below reads it as soon as
+        // the receipt path exists, so it must never observe an empty file.
+        fs::write(&script, format!("#!/bin/sh\nexport HOME={} PATH={} TEAM_AGENT_CLI_ARGV_ROUTING=off\n{} > {} 2> {}\nprintf '%s\\n' \"$?\" > {} && mv {} {}\nexec sleep 600\n", quote(env.home().to_str().unwrap()), quote(&path), command, quote(stdout.to_str().unwrap()), quote(stderr.to_str().unwrap()), quote(receipt_tmp.to_str().unwrap()), quote(receipt_tmp.to_str().unwrap()), quote(receipt.to_str().unwrap()))).unwrap();
         let pane_command = format!("/bin/sh {}", quote(script.to_str().unwrap()));
         let started = Command::new("tmux")
             .args([

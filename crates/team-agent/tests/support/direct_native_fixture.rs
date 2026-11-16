@@ -112,7 +112,7 @@ impl NativeAuthority {
         let helper_file = transport_root.join("mcp-helper-pid");
         // Both processes are real, owned and bounded; no fabricated PID or readiness status.
         std::fs::write(&script, format!(
-            "import pathlib, runpy, signal, subprocess\nsignal.alarm(110)\nhelper = subprocess.Popen(['/bin/sleep', '100'])\npathlib.Path({helper:?}).write_text(str(helper.pid))\ntry:\n    runpy.run_path({controlled:?}, run_name='__main__')\nfinally:\n    helper.terminate()\n    helper.wait()\n",
+            "import pathlib, runpy, signal, subprocess\nsignal.alarm(110)\nhelper = subprocess.Popen(['/bin/sleep', '100'])\nstaged = pathlib.Path({helper:?} + '.tmp')\nstaged.write_text(str(helper.pid))\nstaged.replace({helper:?})\ntry:\n    runpy.run_path({controlled:?}, run_name='__main__')\nfinally:\n    helper.terminate()\n    helper.wait()\n",
             helper=helper_file.to_string_lossy(), controlled=controlled.to_string_lossy())).unwrap();
         let planner = ReceiverPlan(script);
         let hooks = ProviderHooks { plan: HookBinding::Bound(&planner), ..physical_support::hooks() };
