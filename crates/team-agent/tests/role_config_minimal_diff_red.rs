@@ -25,6 +25,7 @@ impl ProviderShims {
         fs::create_dir_all(&dir).expect("create provider shim directory");
         fs::create_dir_all(ws.path().join(".role-config-launch"))
             .expect("create launch capture directory");
+        ws.register_fixture_lifetime();
         let binary = shell_quote(&framework::ta_binary().to_string_lossy());
         let pi_target = dir.join("pi-test-target");
         let pi_tty = dir.join("pi-tty-shim.py");

@@ -4,6 +4,7 @@ The real injection must finish bracketed paste and deliver a separate Enter.
 Only then does the controlled worker report the original bytes over real MCP stdio.
 """
 
+import fcntl
 import hashlib
 import json
 import os
@@ -31,7 +32,7 @@ def mcp_input(call):
     return "".join(json.dumps(request) + "\n" for request in requests)
 
 
-def mcp_exchange(binary, workspace, agent, call):
+def mcp_exchange(binary, workspace, agent, call, lease_fd):
     """One real submit session; preserve the actual exit-code receipt."""
     env = os.environ.copy()
     env["TEAM_AGENT_ID"] = agent
@@ -40,7 +41,7 @@ def mcp_exchange(binary, workspace, agent, call):
     child = subprocess.run(
         [binary, "mcp-server", "--workspace", str(workspace)],
         input=mcp_input(call),
-        capture_output=True, text=True, env=env, timeout=10,
+        capture_output=True, text=True, env=env, timeout=10, pass_fds=(lease_fd,),
     )
     replies = [json.loads(line) for line in child.stdout.splitlines() if line.strip()]
     return child, next((reply for reply in replies if reply.get("id") == 2), {})
@@ -111,9 +112,7 @@ def stop_mcp(child, phase, graceful):
                   pid=child.pid, exit_code=child.poll(), killed=killed)
 
 
-def main():
-    binary, workspace, agent = sys.argv[1:]
-    workspace = Path(workspace)
+def run_composer(binary, workspace, agent, lease_fd):
     events = workspace / ".role-config-launch" / f"{agent}.tty.jsonl"
     original = termios.tcgetattr(0)
     transcript = []
@@ -178,13 +177,14 @@ def main():
         draft.clear()
         render()
         child, reply = mcp_exchange(binary, workspace, agent, {"method": "tools/call", "params": {
-            "name": "report_result", "arguments": {"summary": payload, "status": "completed"}}})
+            "name": "report_result", "arguments": {"summary": payload, "status": "completed"}}}, lease_fd)
         result = reply.get("result", {})
         record("mcp_result", exit_code=child.returncode, response=reply)
         if child.returncode != 0 or "error" in reply or result.get("isError") or not result:
             raise RuntimeError(f"controlled MCP report failed: {reply!r} {child.stderr}")
 
     try:
+        phase("lock_acquired")
         tty.setraw(0)
         os.write(1, b"\x1b[?1049h\x1b[?2004h")
         # Real Pi keeps this session alive. Readiness follows the tools/list
@@ -200,7 +200,7 @@ def main():
             startup_child = subprocess.Popen(
                 [binary, "mcp-server", "--workspace", str(workspace)],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=startup_stderr,
-                env=env, bufsize=0,
+                env=env, bufsize=0, pass_fds=(lease_fd,),
             )
         finally:
             spawning_child = False
@@ -273,5 +273,32 @@ def main():
                 termios.tcsetattr(0, termios.TCSANOW, original)
 
 
+def main():
+    binary, workspace, agent = sys.argv[1:]
+    workspace = Path(workspace)
+
+    def terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGHUP, terminate)
+    try:
+        fd = os.open(workspace / ".role-config-launch/lifetime.lock", os.O_RDWR | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        print(json.dumps({"event": "abort_missing"}), file=sys.stderr, flush=True)
+        return 1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        # Read this inode, even if Drop unlinked it while we waited for its lock.
+        if os.pread(fd, 8, 0) != b"open":
+            print(json.dumps({"event": "abort_closing"}), file=sys.stderr, flush=True)
+            return 1
+        run_composer(binary, workspace, agent, fd)
+        return 0
+    finally:
+        # Never LOCK_UN: inherited copies keep the lease after an abrupt death.
+        os.close(fd)
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

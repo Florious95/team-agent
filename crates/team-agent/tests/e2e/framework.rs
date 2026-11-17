@@ -87,6 +87,7 @@ pub struct TestWorkspace {
     /// BEFORE the workspace directory removal (verified by RED
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
     pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
+    fixture_lifetime: Mutex<Option<std::fs::File>>,
     pub(crate) caller: Option<hermetic_guard::HermeticTestEnv>,
     pub(crate) tmux_root: hermetic_guard::proc_guard::TmuxRoot,
 }
@@ -113,9 +114,60 @@ impl TestWorkspace {
             path,
             ta_binary: Mutex::new(None),
             owned_tmux_sockets: Mutex::new(Vec::new()),
+            fixture_lifetime: Mutex::new(None),
             caller: None,
             tmux_root: hermetic_guard::proc_guard::TmuxRoot::new(),
         }
+    }
+
+    /// Register before launch. Children borrow a shared flock on this exact file.
+    pub fn register_fixture_lifetime(&self) {
+        use std::io::Write;
+        let mut lease = self.fixture_lifetime.lock().expect("fixture lifetime registry");
+        assert!(lease.is_none(), "fixture lifetime already registered");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(self.path.join(".role-config-launch/lifetime.lock"))
+            .expect("create registered fixture lifetime");
+        file.write_all(b"open").expect("initialize fixture lifetime");
+        *lease = Some(file);
+    }
+
+    fn close_fixture_lifetime(&self, budget: Duration) -> Result<(), String> {
+        use std::io::{Seek, Write};
+        let mut lease = self.fixture_lifetime.lock().map_err(|e| e.to_string())?;
+        let Some(file) = lease.as_mut() else { return Ok(()) };
+        let path = self.path.join(".role-config-launch/lifetime.lock");
+        let disk = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !disk.is_file() { return Err("fixture lifetime path is not a regular file".into()); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owned = file.metadata().map_err(|e| e.to_string())?;
+            if (disk.dev(), disk.ino()) != (owned.dev(), owned.ino()) {
+                return Err("registered fixture lifetime file was replaced".into());
+            }
+        }
+        let deadline = Instant::now() + budget;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(format!("fixture lifetime join failed: {error}")),
+            }
+        }
+        file.rewind().map_err(|e| e.to_string())?;
+        file.write_all(b"closing").map_err(|e| e.to_string())?;
+        // Do not unlock: the registered File stays alive through rmtree. A late
+        // waiter on its unlinked inode must observe closing, never start a child.
+        Ok(())
     }
 
     /// 0.5.43 debt-sweep (§6.1): register a test-owned tmux socket for
@@ -421,6 +473,13 @@ impl Drop for TestWorkspace {
         self.cleanup_owned_coordinator();
         self.cleanup_owned_tmux();
         self.tmux_root.close();
+        if let Err(error) = self.close_fixture_lifetime(Duration::from_secs(10)) {
+            eprintln!("FIXTURE_LIFETIME_JOIN_FAILED workspace={} retained=true error={error}", self.path.display());
+            if !std::thread::panicking() {
+                panic!("fixture lifetime join failed; workspace retained: {error}");
+            }
+            return;
+        }
         if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
             remove_workspace_dir(&self.path);
         }
