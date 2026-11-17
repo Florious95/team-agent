@@ -34,3 +34,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # deny(clippy::unwrap_used / expect_used / panic)(§10 守护进程不崩)。
 [workspace.lints.clippy]
 all = "warn"
+
+[profile.dev.package.sha2]
+opt-level = 3
