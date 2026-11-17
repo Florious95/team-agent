@@ -103,6 +103,7 @@ mod framework_tests {
                 .join(format!("ta-e2e-platform-{}-0", std::process::id())),
             ta_binary: std::sync::Mutex::new(Some(normalize_existing_path(&bin))),
             owned_tmux_sockets: std::sync::Mutex::new(Vec::new()),
+            fixture_lifetime: std::sync::Mutex::new(None),
             caller: None,
             tmux_root: Default::default(),
         };

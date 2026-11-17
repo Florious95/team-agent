@@ -87,7 +87,7 @@ pub struct TestWorkspace {
     /// BEFORE the workspace directory removal (verified by RED
     /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
     pub(crate) owned_tmux_sockets: Mutex<Vec<PathBuf>>,
-    fixture_lifetime: Mutex<Option<std::fs::File>>,
+    pub(crate) fixture_lifetime: Mutex<Option<std::fs::File>>,
     pub(crate) caller: Option<hermetic_guard::HermeticTestEnv>,
     pub(crate) tmux_root: hermetic_guard::proc_guard::TmuxRoot,
 }
