@@ -8,18 +8,19 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
+import signal
 import subprocess
 import sys
 import termios
+import time
 import tty
 
 BEGIN = b"\x1b[200~"
 END = b"\x1b[201~"
 
 
-def mcp_exchange(binary, workspace, agent, call):
-    """One real MCP stdio session on the worker's submit path: initialize,
-    initialized, then `call` as request id 2. Returns (child, id-2 reply)."""
+def mcp_input(call):
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2024-11-05", "capabilities": {},
@@ -27,17 +28,76 @@ def mcp_exchange(binary, workspace, agent, call):
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, **call},
     ]
+    return "".join(json.dumps(request) + "\n" for request in requests)
+
+
+def mcp_exchange(binary, workspace, agent, call):
+    """One real submit session; preserve the actual exit-code receipt."""
     env = os.environ.copy()
     env["TEAM_AGENT_ID"] = agent
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
     child = subprocess.run(
         [binary, "mcp-server", "--workspace", str(workspace)],
-        input="".join(json.dumps(request) + "\n" for request in requests),
+        input=mcp_input(call),
         capture_output=True, text=True, env=env, timeout=10,
     )
     replies = [json.loads(line) for line in child.stdout.splitlines() if line.strip()]
     return child, next((reply for reply in replies if reply.get("id") == 2), {})
+
+
+def wait_startup_replies(child, phase):
+    """Read complete protocol frames, not child EOF; partial lines stay bounded."""
+    deadline = time.monotonic() + 10
+    pending = b""
+    expected = 1
+    os.set_blocking(child.stdout.fileno(), False)
+    while True:
+        while b"\n" in pending:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("controlled MCP startup response timed out")
+            line, pending = pending.split(b"\n", 1)
+            reply = json.loads(line)
+            if not isinstance(reply, dict) or reply.get("jsonrpc") != "2.0":
+                raise RuntimeError("invalid controlled MCP startup frame")
+            if "id" not in reply and isinstance(reply.get("method"), str):
+                continue
+            if (type(reply.get("id")) is not int or reply["id"] != expected
+                    or "error" in reply or not isinstance(reply.get("result"), dict)):
+                raise RuntimeError("invalid controlled MCP startup response")
+            if expected == 1:
+                phase("initialize_reply")
+                expected = 2
+            else:
+                if not isinstance(reply["result"].get("tools"), list):
+                    raise RuntimeError("controlled MCP tools/list response has no tools list")
+                phase("tools_list_reply")
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([child.stdout], [], [], remaining)[0]:
+            raise TimeoutError("controlled MCP startup response timed out")
+        chunk = os.read(child.stdout.fileno(), 4096)
+        if not chunk:
+            raise RuntimeError("controlled MCP closed stdout before tools/list response")
+        pending += chunk
+        if len(pending) > 1024 * 1024:
+            raise RuntimeError("controlled MCP startup frame exceeds 1 MiB")
+
+
+def stop_mcp(child, phase):
+    killed = False
+    try:
+        child.stdin.close()
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            killed = True
+            child.kill()
+            child.wait(timeout=2)
+    finally:
+        child.stdout.close()
+        phase("child_exit" if child.poll() is not None else "child_unreaped",
+              pid=child.pid, exit_code=child.poll(), killed=killed)
 
 
 def main():
@@ -49,6 +109,35 @@ def main():
     draft = bytearray()
     pending = b""
     pasting = False
+    startup_child = None
+    startup_stderr = None
+    spawning_child = False
+    termination_signal = None
+    phase_start = last_phase = time.monotonic_ns()
+    phases = events.with_name(f"{agent}.mcp-phases.jsonl")
+
+    def phase(event, **fields):
+        nonlocal last_phase
+        now = time.monotonic_ns()
+        with phases.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"event": event, "monotonic_ns": now,
+                                    "wall_time_ns": time.time_ns(),
+                                    "elapsed_ms": (now - phase_start) / 1_000_000,
+                                    "phase_ms": (now - last_phase) / 1_000_000,
+                                    **fields}) + "\n")
+        last_phase = now
+
+    def terminate(signum, _frame):
+        nonlocal termination_signal
+        if spawning_child:
+            # Do not lose the child handle between Popen returning and assignment.
+            termination_signal = signum
+        else:
+            raise SystemExit(128 + signum)
+
+    # tmux teardown may signal the shim rather than send a terminal control key.
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGHUP, terminate)
 
     def record(event, **fields):
         with events.open("a", encoding="utf-8") as stream:
@@ -86,13 +175,34 @@ def main():
     try:
         tty.setraw(0)
         os.write(1, b"\x1b[?1049h\x1b[?2004h")
-        # Real Pi registers its MCP server at session_start
-        # (pi_mcp_extension.js:95), before its composer is ready. No tty event.
-        child, reply = mcp_exchange(binary, workspace, agent, {"method": "tools/list"})
-        if child.returncode != 0 or "error" in reply or not isinstance(reply.get("result", {}).get("tools"), list):
-            raise RuntimeError(f"controlled MCP session_start failed: {reply!r} {child.stderr}")
+        # Real Pi keeps this session alive. Readiness follows the tools/list
+        # response, not EOF after the server's post-response evidence publish.
+        # report_result retains its separate real exchange and actual exit code.
+        env = os.environ.copy()
+        env["TEAM_AGENT_ID"] = agent
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        startup_stderr = events.with_name(f"{agent}.mcp.stderr.log").open("ab")
+        spawning_child = True
+        try:
+            startup_child = subprocess.Popen(
+                [binary, "mcp-server", "--workspace", str(workspace)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=startup_stderr,
+                env=env, bufsize=0,
+            )
+        finally:
+            spawning_child = False
+        phase("spawn", pid=startup_child.pid)
+        if termination_signal is not None:
+            raise SystemExit(128 + termination_signal)
+        # Fixed startup frames fit in the empty pipe; no application payload.
+        startup_child.stdin.write(mcp_input({"method": "tools/list"}).encode())
+        wait_startup_replies(startup_child, phase)
+        if startup_child.poll() is not None:
+            raise RuntimeError("controlled MCP exited before composer readiness")
         render()
         record("ready")
+        phase("ready")
         while True:
             chunk = os.read(0, 4096)
             if not chunk:
@@ -132,9 +242,23 @@ def main():
                         draft.append(key)
             if not pasting and draft:
                 render()
+    except BaseException as error:
+        phase("shim_exit", error_type=type(error).__name__, error=str(error))
+        raise
     finally:
-        os.write(1, b"\x1b[?2004l\x1b[?1049l")
-        termios.tcsetattr(0, termios.TCSANOW, original)
+        # A second teardown signal must not interrupt the bounded child reap.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        try:
+            if startup_child is not None:
+                stop_mcp(startup_child, phase)
+        finally:
+            if startup_stderr is not None:
+                startup_stderr.close()
+            try:
+                os.write(1, b"\x1b[?2004l\x1b[?1049l")
+            finally:
+                termios.tcsetattr(0, termios.TCSANOW, original)
 
 
 if __name__ == "__main__":
