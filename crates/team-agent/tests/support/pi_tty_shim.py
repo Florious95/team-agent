@@ -84,20 +84,31 @@ def wait_startup_replies(child, phase):
             raise RuntimeError("controlled MCP startup frame exceeds 1 MiB")
 
 
-def stop_mcp(child, phase):
+def stop_mcp(child, phase, graceful):
     killed = False
     try:
+        if graceful:
+            child.stdin.close()
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        # Signals/EOF/errors must not give a publishing child a grace window
+        # in which it can recreate a workspace being removed by the test.
+        # This also handles a signal interrupting the normal graceful wait.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        if child.poll() is None:
+            child.kill()
+            killed = True
         child.stdin.close()
         try:
             child.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            killed = True
-            child.kill()
-            child.wait(timeout=2)
-    finally:
-        child.stdout.close()
-        phase("child_exit" if child.poll() is not None else "child_unreaped",
-              pid=child.pid, exit_code=child.poll(), killed=killed)
+        finally:
+            child.stdout.close()
+            phase("child_exit" if child.poll() is not None else "child_unreaped",
+                  pid=child.pid, exit_code=child.poll(), killed=killed)
 
 
 def main():
@@ -113,6 +124,8 @@ def main():
     startup_stderr = None
     spawning_child = False
     termination_signal = None
+    graceful_exit = False
+    exit_error = None
     phase_start = last_phase = time.monotonic_ns()
     phases = events.with_name(f"{agent}.mcp-phases.jsonl")
 
@@ -129,10 +142,9 @@ def main():
 
     def terminate(signum, _frame):
         nonlocal termination_signal
-        if spawning_child:
-            # Do not lose the child handle between Popen returning and assignment.
-            termination_signal = signum
-        else:
+        termination_signal = signum
+        # Do not lose the child handle between Popen returning and assignment.
+        if not spawning_child:
             raise SystemExit(128 + signum)
 
     # tmux teardown may signal the shim rather than send a terminal control key.
@@ -192,9 +204,9 @@ def main():
             )
         finally:
             spawning_child = False
-        phase("spawn", pid=startup_child.pid)
         if termination_signal is not None:
             raise SystemExit(128 + termination_signal)
+        phase("spawn", pid=startup_child.pid)
         # Fixed startup frames fit in the empty pipe; no application payload.
         startup_child.stdin.write(mcp_input({"method": "tools/list"}).encode())
         wait_startup_replies(startup_child, phase)
@@ -233,6 +245,7 @@ def main():
                 else:
                     key, pending = pending[0], pending[1:]
                     if key in (3, 4):
+                        graceful_exit = True
                         return
                     if key in (10, 13):
                         submit(key)
@@ -243,15 +256,14 @@ def main():
             if not pasting and draft:
                 render()
     except BaseException as error:
-        phase("shim_exit", error_type=type(error).__name__, error=str(error))
+        exit_error = error
         raise
     finally:
-        # A second teardown signal must not interrupt the bounded child reap.
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         try:
             if startup_child is not None:
-                stop_mcp(startup_child, phase)
+                stop_mcp(startup_child, phase, graceful_exit and termination_signal is None)
+            if exit_error is not None:
+                phase("shim_exit", error_type=type(exit_error).__name__, error=str(exit_error))
         finally:
             if startup_stderr is not None:
                 startup_stderr.close()

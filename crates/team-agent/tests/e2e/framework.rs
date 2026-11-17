@@ -2626,6 +2626,6 @@ mod containment_tests {
         assert!(!outside_path.exists());
         assert!(!unowned_path.exists());
         assert!(!ambient_path.exists());
-        let _ = std::fs::remove_dir(&uid_root);
+        // Other fixture processes share uid_root; remove only our exact sockets.
     }
 }
