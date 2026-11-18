@@ -54,14 +54,18 @@ fn native_send_resolves_tmux_at_most_once_and_never_probes_past_first_match() {
     let path = format!("{}:{}:{}:{}", prefix.display(), real_dir.display(), suffix.display(),
         std::env::var("PATH").unwrap());
     let log = fixture.root.join(format!("strace-{tag}.log"));
-    let output = Command::new("strace")
-        .args(["-f", "-qq", "-s", "4096", "-e", "trace=%file,execve", "-o"]).arg(&log)
+    let home = fixture.root.join(format!("home-{tag}"));
+    fs::create_dir(&home).unwrap();
+    // Hermetic sender: an unbound operator with no inherited HOME, TMUX or TEAM_AGENT_*
+    // identity; the traced PATH is the only search path it sees.
+    let mut command = Command::new("strace");
+    command.args(["-f", "-qq", "-s", "4096", "-e", "trace=%file,execve", "-o"]).arg(&log)
         .arg(env!("CARGO_BIN_EXE_team-agent"))
         .args(["send", "worker", "resolution trace probe", "--team", "alpha", "--workspace"])
         .arg(&fixture.root).arg("--json")
-        .env("PATH", &path)
-        .env_clear_team_agent()
-        .output().unwrap();
+        .env_clear().env("HOME", &home).env("PATH", &path).current_dir(&fixture.root);
+    if let Some(tmp) = std::env::var_os("TMPDIR") { command.env("TMPDIR", tmp); }
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(receipt["delivery"], "physical", "{receipt}");
@@ -82,13 +86,4 @@ fn native_send_resolves_tmux_at_most_once_and_never_probes_past_first_match() {
     assert_eq!(suffix_probes, 0, "PATH entries after the first valid tmux were probed");
     assert_eq!(suffix_execs, 0, "a child execve searched past the first valid tmux");
     drop(native);
-}
-
-/// The sender is an unbound operator: drop every inherited framework identity.
-trait ClearTeamAgent { fn env_clear_team_agent(&mut self) -> &mut Self; }
-impl ClearTeamAgent for Command {
-    fn env_clear_team_agent(&mut self) -> &mut Self {
-        for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("TEAM_AGENT_")) { self.env_remove(key); }
-        self
-    }
 }
