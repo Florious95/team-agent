@@ -86,15 +86,15 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure tmux and Python for tests
+      - name: Ensure test dependencies
         run: |
-          if ! command -v tmux >/dev/null || ! command -v python3 >/dev/null; then
-            if [ "$RUNNER_OS" = Linux ]; then
+          if [ "$RUNNER_OS" = Linux ]; then
+            if ! command -v tmux >/dev/null || ! command -v python3 >/dev/null || ! command -v strace >/dev/null; then
               sudo apt-get update
-              sudo apt-get install -y tmux python3
-            else
-              brew install tmux python
+              sudo apt-get install -y tmux python3 strace
             fi
+          elif ! command -v tmux >/dev/null || ! command -v python3 >/dev/null; then
+            brew install tmux python
           fi
           tmux -V
           python3 --version
