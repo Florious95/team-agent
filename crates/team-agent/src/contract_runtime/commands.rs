@@ -296,6 +296,8 @@ fn activity(workspace: &Path, team: &str, id: &SeatId) -> Result<Activity, CliEr
     let hooks = adapter.hooks();
     let clock = RealClock::new();
     let nonce = backend.store.propose_identity(id).map_err(error)?.instance;
+    let mut settings = backend::settings(&backend.binding, selected);
+    settings.tmux = backend::current_tmux().map_err(error)?;
     let physical = PhysicalRuntime::new(
         Registration {
             descriptor: selected.descriptor(),
@@ -304,7 +306,7 @@ fn activity(workspace: &Path, team: &str, id: &SeatId) -> Result<Activity, CliEr
             startup: selected.startup(),
             session_panel: selected.session_panel(),
         },
-        backend::settings(&backend.binding, selected),
+        settings,
         OperationId::new(format!("observe-{}", nonce.as_str())).map_err(error)?,
         &clock,
     ).map_err(error)?;
