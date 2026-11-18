@@ -275,7 +275,7 @@ fn known_provider(provider: &str) -> bool {
 fn provider(agent: &Yaml) -> &str {
     agent.get("provider").and_then(Yaml::as_str).unwrap_or("")
 }
-fn same_provider(left: &str, right: &str) -> bool {
+pub(super) fn same_provider(left: &str, right: &str) -> bool {
     if let (Some(left), Some(right)) = (
         crate::provider::wire::parse_provider(left),
         crate::provider::wire::parse_provider(right),

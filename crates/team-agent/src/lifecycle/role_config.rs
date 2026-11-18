@@ -278,6 +278,18 @@ pub(super) fn compile_reset_role(
     if compiled.id != agent_id.as_str() {
         return Err(LifecycleError::Compile(format!("{} declares {}, expected {agent_id}", role.display(), compiled.id)));
     }
+    // Reset is routed on the current provider before reaching this path. A
+    // provider migration needs start's separate runtime/identity admission.
+    if let (Some(current), Some(next)) = (
+        state["agents"][agent_id.as_str()]["provider"].as_str(),
+        compiled.agent.get("provider").and_then(Value::as_str),
+    ) {
+        if !super::seat_start::same_provider(current, next) {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "reset cannot migrate {agent_id} from {current} to {next}"
+            )));
+        }
+    }
     Ok(Some(compiled.agent))
 }
 
@@ -326,45 +338,45 @@ pub(super) fn apply_agent_config(
 pub(super) fn apply_launch_fields(
     agent: &mut serde_json::Map<String, serde_json::Value>, team_dir: &Path, compiled: &Value,
 ) {
-        for field in [
-            "provider",
-            "model",
-            "role",
-            "system_prompt",
-            "output_contract",
-            "auth_mode",
-            "effort",
-            "profile",
-            "dangerously_skip_permissions",
-            "communication_mode",
-        ] {
-            if let Some(value) = compiled.get(field) {
-                agent.insert(field.into(), to_json(value));
-            } else {
-                agent.remove(field);
-            }
-        }
-        agent.insert(
-            "model_source".into(),
-            if compiled.get("model").and_then(Value::as_str).is_some() {
-                "role".into()
-            } else {
-                "default".into()
-            },
-        );
-        // Imported roles are self-contained in this Team, including
-        // profile lookup; never retain an external credential root.
-        if compiled.get("profile").and_then(Value::as_str).is_some() {
-            agent.insert(
-                "_profile_dir".into(),
-                team_dir.join("profiles")
-                    .to_string_lossy()
-                    .to_string()
-                    .into(),
-            );
+    for field in [
+        "provider",
+        "model",
+        "role",
+        "system_prompt",
+        "output_contract",
+        "auth_mode",
+        "effort",
+        "profile",
+        "dangerously_skip_permissions",
+        "communication_mode",
+    ] {
+        if let Some(value) = compiled.get(field) {
+            agent.insert(field.into(), to_json(value));
         } else {
-            agent.remove("_profile_dir");
+            agent.remove(field);
         }
+    }
+    agent.insert(
+        "model_source".into(),
+        if compiled.get("model").and_then(Value::as_str).is_some() {
+            "role".into()
+        } else {
+            "default".into()
+        },
+    );
+    // Imported roles are self-contained in this Team, including
+    // profile lookup; never retain an external credential root.
+    if compiled.get("profile").and_then(Value::as_str).is_some() {
+        agent.insert(
+            "_profile_dir".into(),
+            team_dir.join("profiles")
+                .to_string_lossy()
+                .to_string()
+                .into(),
+        );
+    } else {
+        agent.remove("_profile_dir");
+    }
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {

@@ -1703,28 +1703,24 @@ fn reset_agent_at_paths(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| agent_id.as_str())
         .to_string();
-    let pre_stop_session = Some(state_session_name_from_spec(&state_before_stop, &pre_stop_spec));
+    let pre_stop_session = state_session_name_from_spec(&state_before_stop, &pre_stop_spec);
     let pre_stop_pane_ids: std::collections::BTreeSet<String> =
-        if let Some(session) = pre_stop_session.as_ref() {
-            if is_per_agent_window(&pre_stop_window, agent_id) {
-                list_same_role_panes(transport, session, &pre_stop_window)
-                    .into_iter()
-                    .filter(|pane| {
-                        if !old_pane_live_before {
-                            return true;
-                        }
-                        let same_old_pane = old_pane_id_before
-                            .as_ref()
-                            .is_some_and(|old| pane.pane_id.as_str() == old.as_str());
-                        let same_old_pid = old_pane_pid_before
-                            .is_some_and(|old_pid| pane.pane_pid == Some(old_pid));
-                        same_old_pane || same_old_pid
-                    })
-                    .map(|p| p.pane_id.as_str().to_string())
-                    .collect()
-            } else {
-                std::collections::BTreeSet::new()
-            }
+        if is_per_agent_window(&pre_stop_window, agent_id) {
+            list_same_role_panes(transport, &pre_stop_session, &pre_stop_window)
+                .into_iter()
+                .filter(|pane| {
+                    if !old_pane_live_before {
+                        return true;
+                    }
+                    let same_old_pane = old_pane_id_before
+                        .as_ref()
+                        .is_some_and(|old| pane.pane_id.as_str() == old.as_str());
+                    let same_old_pid = old_pane_pid_before
+                        .is_some_and(|old_pid| pane.pane_pid == Some(old_pid));
+                    same_old_pane || same_old_pid
+                })
+                .map(|p| p.pane_id.as_str().to_string())
+                .collect()
         } else {
             std::collections::BTreeSet::new()
         };
