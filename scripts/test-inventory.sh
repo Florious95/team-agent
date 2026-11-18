@@ -7,7 +7,9 @@
 #   scripts/test-inventory.sh diff <before.tsv> <after.tsv> <retired.txt> <added.txt>
 #       Fails unless REMOVED == retired.txt and ADDED == added.txt exactly
 #       (one "<workspace>\t<binary source>\t<test name>" per line), and no test flips to
-#       ignored unless it is listed in added.txt.
+#       ignored unless it is listed in added.txt. Both inventories must come from the
+#       same OS (some tests are platform-ignored). Release-checklist step; not wired
+#       into pr-gate because the declared lists are per release.
 set -euo pipefail
 
 list_workspace() { # <label> <dir> [cargo args...]
@@ -49,6 +51,9 @@ case "${1:-}" in
     flipped=$(LC_ALL=C comm -12 <(awk -F'\t' '$4==0{print $1"|"$2"|"$3}' "$before" | LC_ALL=C sort -u) \
       <(awk -F'\t' '$4==1{print $1"|"$2"|"$3}' "$after" | LC_ALL=C sort -u) || true)
     if [ -n "$flipped" ]; then echo "tests newly ignored:" >&2; echo "$flipped" >&2; status=1; fi
+    # Report (never hide) tests that arrive already ignored; both lists must come from one OS.
+    added_ignored=$(awk -F'\t' '$4==1{print $1"\t"$2"\t"$3}' "$after" | LC_ALL=C sort -u | LC_ALL=C comm -12 - <(printf '%s\n' "$new" | sed '/^$/d' | LC_ALL=C sort -u) || true)
+    [ -z "$added_ignored" ] || { echo "added tests that are ignored on this OS:"; echo "$added_ignored"; }
     echo "before=$(wc -l <"$before" | tr -d ' ') after=$(wc -l <"$after" | tr -d ' ') removed=$(printf '%s' "$removed" | grep -c . || true) added=$(printf '%s' "$new" | grep -c . || true)"
     exit $status
     ;;

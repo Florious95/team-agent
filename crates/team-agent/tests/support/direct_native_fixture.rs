@@ -61,9 +61,13 @@ impl Drop for NativeAuthority {
     }
 }
 impl NativeAuthority {
+    /// Publishes at the 0.6.1 in-workspace layout, which every build reads while no
+    /// state-home binding exists. No in-process root_for: a test process without an
+    /// isolated XDG_STATE_HOME must never write the user's real state home.
     pub fn start(root: &Path, provider: &'static str) -> Self {
         let canonical = root.canonicalize().unwrap();
-        Self::start_with_binding_roots(&canonical, provider, |scope| vec![backend::root_for(&canonical, scope)])
+        Self::start_with_binding_roots(&canonical, provider,
+            |scope| vec![canonical.join(".team/runtime/contract").join(scope.as_str())])
     }
 
     /// Publish the framework binding at explicit roots (e.g. a 0.6.1 in-workspace
@@ -71,6 +75,19 @@ impl NativeAuthority {
     #[allow(dead_code)]
     pub fn start_with_binding_roots(root: &Path, provider: &'static str,
         binding_roots: impl FnOnce(&ScopeId) -> Vec<PathBuf>) -> Self {
+        Self::launch(root, provider, binding_roots, false)
+    }
+
+    /// A genuinely QUIESCENT scope: committed native start, then the contract
+    /// Lifecycle teardown (pane stopped, seat Stopped, no lease, no unfinished op).
+    #[allow(dead_code)]
+    pub fn start_quiescent_with_binding_roots(root: &Path, provider: &'static str,
+        binding_roots: impl FnOnce(&ScopeId) -> Vec<PathBuf>) -> Self {
+        Self::launch(root, provider, binding_roots, true)
+    }
+
+    fn launch(root: &Path, provider: &'static str,
+        binding_roots: impl FnOnce(&ScopeId) -> Vec<PathBuf>, stop: bool) -> Self {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::io::{BufRead, BufReader, Write};
         // A real launch persists the declared canonical provider, not a legacy wire alias.
@@ -151,9 +168,16 @@ impl NativeAuthority {
             Routing { pane: "unpublished".into(), binding_key: "unpublished-direct".into(), server_key: "fixture-server".into() }, operation).unwrap();
         assert_eq!(started.outcome, Outcome::Committed, "{started:?}");
         let seat = store.assert_current(&identity).unwrap();
-        let owned = Self { socket: seat.endpoint.clone(), pane: seat.pane.clone(),
-            pid: seat.process.as_ref().unwrap().pid, tmux, target: seat.physical.clone(), _storage: storage };
         assert_eq!(seat.status, SeatStatus::Starting);
+        let mut owned = Self { socket: seat.endpoint.clone(), pane: seat.pane.clone(),
+            pid: seat.process.as_ref().unwrap().pid, tmux, target: seat.physical.clone(), _storage: storage };
+        if stop {
+            let stopped = Lifecycle { store: &mut store, host: &mut physical, io: &mut io }
+                .teardown(&identity, OperationId::new("direct-stop").unwrap()).unwrap();
+            assert_eq!(stopped.outcome, Outcome::Committed, "{stopped:?}");
+            assert_eq!(store.assert_current(&identity).unwrap().status, SeatStatus::Stopped);
+            owned.target = None;
+        }
         assert!(!store.leased(&identity.seat).unwrap());
         assert!(store.unfinished().unwrap().is_empty());
         owned

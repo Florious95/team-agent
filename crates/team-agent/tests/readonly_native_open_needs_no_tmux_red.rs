@@ -6,8 +6,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "support/direct_native_fixture.rs"]
-mod direct_native_fixture;
+
+// One fixture module instance per test binary: TempWorkspace names use a per-module
+// counter, so two copies would collide under parallel tests.
+#[path = "support/d1_support.rs"]
+mod d1;
 
 const CHILD: &str = "readonly_open_child_process";
 
@@ -21,6 +24,9 @@ fn readonly_open_child_process() {
     let backend = team_agent::contract_runtime::backend::Backend::open_readonly(Path::new(&root), "alpha")
         .unwrap_or_else(|error| panic!("read-only open required tmux or failed: {error}"));
     assert_eq!(backend.binding.team, "alpha");
+    // A lazy open with no store access must not pass: read committed seat state.
+    let seat = team_agent_contract::contract::types::SeatId::new("worker").unwrap();
+    assert!(backend.store.seat(&seat).unwrap().is_some(), "read-only open did not read the committed seat");
 }
 
 #[test]
@@ -30,7 +36,7 @@ fn readonly_native_authority_open_needs_no_tmux_on_path() {
     std::fs::create_dir_all(base.join("bin")).unwrap();
     let root = base.join("ws");
     std::fs::create_dir_all(root.join(".team/runtime")).unwrap();
-    let authority = direct_native_fixture::NativeAuthority::start(&root, "codex");
+    let authority = d1::direct_native_fixture::NativeAuthority::start(&root, "codex");
     let root = root.canonicalize().unwrap();
     let empty_bin: PathBuf = base.join("bin");
     let output = Command::new(std::env::current_exe().unwrap())
@@ -47,4 +53,23 @@ fn readonly_native_authority_open_needs_no_tmux_on_path() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// INVARIANT (green on 0.6.1, must stay green): tmux is resolved at the physical use
+/// site from the invocation's PATH, never trusted from a persisted absolute path
+/// (3344d0d17: a Homebrew upgrade moves the Cellar path). A stale binding.tmux must
+/// not break a native send.
+#[test]
+fn native_send_ignores_a_stale_persisted_tmux_path() {
+    let base = d1::scratch("stale-tmux");
+    let state_home = base.join("state");
+    let team = d1::native_team(|ws, scope| vec![d1::legacy_root(ws, scope)]);
+    let binding_path = d1::legacy_root(&team.ws, &team.scope).join(d1::BINDING);
+    let mut binding: serde_json::Value = serde_json::from_slice(&std::fs::read(&binding_path).unwrap()).unwrap();
+    binding["tmux"] = serde_json::json!("/nonexistent/team-agent-stale/tmux");
+    std::fs::write(&binding_path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    let receipt = d1::send(&team.ws, &state_home, "stale persisted tmux path still delivers");
+    drop(team);
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(receipt["delivery"], "physical", "{receipt}");
 }

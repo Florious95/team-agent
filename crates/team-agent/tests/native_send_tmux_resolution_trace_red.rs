@@ -50,7 +50,8 @@ fn native_send_resolves_tmux_at_most_once_and_never_probes_past_first_match() {
     let tag = format!("{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap());
     let prefix = fixture.root.join(format!("missing-prefix-{tag}"));
     let suffix = fixture.root.join(format!("missing-suffix-{tag}"));
-    let path = format!("{}:{}:{}:{}", prefix.display(), real_tmux_dir().display(), suffix.display(),
+    let real_dir = real_tmux_dir();
+    let path = format!("{}:{}:{}:{}", prefix.display(), real_dir.display(), suffix.display(),
         std::env::var("PATH").unwrap());
     let log = fixture.root.join(format!("strace-{tag}.log"));
     let output = Command::new("strace")
@@ -73,6 +74,10 @@ fn native_send_resolves_tmux_at_most_once_and_never_probes_past_first_match() {
     let (prefix_probes, prefix_execs) = (count(&prefix, false), count(&prefix, true));
     let (suffix_probes, suffix_execs) = (count(&suffix, false), count(&suffix, true));
     eprintln!("tmux resolution trace: prefix probes={prefix_probes} execve={prefix_execs}; suffix probes={suffix_probes} execve={suffix_execs}");
+    // Positive controls: an empty, filtered or mis-encoded (strace escapes non-ASCII)
+    // trace must not pass. Direct tmux spawns search PATH, so the prefix is touched.
+    assert!(prefix_probes + prefix_execs >= 1, "trace saw no PATH search through the prefix sentinel; trace unusable");
+    assert!(trace.contains(&format!("\"{}/tmux\"", real_dir.display())), "trace never touched the real tmux; trace unusable");
     assert!(prefix_probes <= 1, "send resolved tmux {prefix_probes} times (contract: at most one per physical send)");
     assert_eq!(suffix_probes, 0, "PATH entries after the first valid tmux were probed");
     assert_eq!(suffix_execs, 0, "a child execve searched past the first valid tmux");

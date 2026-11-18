@@ -21,24 +21,6 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Drop `//` line comments and `/* */` block comments; identifiers in prose do not count.
-fn code_only(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut rest = source;
-    while !rest.is_empty() {
-        if let Some(tail) = rest.strip_prefix("//") {
-            rest = tail.find('\n').map_or("", |at| &tail[at..]);
-        } else if let Some(tail) = rest.strip_prefix("/*") {
-            rest = tail.find("*/").map_or("", |at| &tail[at + 2..]);
-        } else {
-            let ch = rest.chars().next().unwrap();
-            out.push(ch);
-            rest = &rest[ch.len_utf8()..];
-        }
-    }
-    out
-}
-
 fn word_hits(text: &str, word: &str) -> usize {
     let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
     text.match_indices(word)
@@ -57,7 +39,9 @@ fn startup_gate_helpers_are_physically_excised_from_both_crates() {
     rust_files(&manifest.join("../team-agent-contract/src"), &mut files);
     let mut hits = Vec::new();
     for file in &files {
-        let code = code_only(&std::fs::read_to_string(file).unwrap());
+        // Raw text, comments and strings included: stricter than any stripper, and a
+        // string such as "agents/*.md" cannot hide the rest of a file.
+        let code = std::fs::read_to_string(file).unwrap();
         for word in GATE_IDENTIFIERS {
             let count = word_hits(&code, word);
             if count > 0 {
@@ -87,8 +71,8 @@ fn send_help_and_operator_docs_promise_no_startup_wait() {
 }
 
 #[test]
-fn guard_helpers_ignore_comments_and_match_whole_words() {
-    let code = code_only("// wait_for_startup\nlet a = 1; /* startup_observed */\nfn startup_observed_extra() {}\nfn x() { startup_observed(); }\n");
-    assert_eq!(word_hits(&code, "wait_for_startup"), 0);
-    assert_eq!(word_hits(&code, "startup_observed"), 1);
+fn guard_helpers_match_whole_words_anywhere_in_raw_text() {
+    let text = "let s = \"agents/*.md\"; // wait_for_startup\nfn startup_observed_extra() {}\nfn x() { startup_observed(); }\n";
+    assert_eq!(word_hits(text, "wait_for_startup"), 1, "comments are scanned too");
+    assert_eq!(word_hits(text, "startup_observed"), 1, "only whole identifiers count");
 }

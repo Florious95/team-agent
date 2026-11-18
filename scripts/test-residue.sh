@@ -1,38 +1,48 @@
 #!/usr/bin/env bash
 # Zero-residue oracle for a full test run.
 #
-#   scripts/test-residue.sh snapshot <run-dir> <out>   # before and after the suite
+#   scripts/test-residue.sh snapshot <run-dir> <out> [checkout]   # before and after the suite
 #   scripts/test-residue.sh diff <before> <after>      # fails on any new residue
 #
-# <run-dir> is the single directory the run owns (CARGO_TARGET_DIR, TMUX_TMPDIR,
-# XDG_STATE_HOME and TMPDIR all point inside it). Only bounded locations are read:
-# no recursive scan of /tmp.
+# <run-dir> is the single directory the run owns; the runner points TMUX_TMPDIR,
+# XDG_STATE_HOME and TMPDIR inside it (macOS fixtures that hard-code /private/tmp are
+# covered by the bounded globs). [checkout] defaults to <run-dir>/src. Only bounded
+# locations are read: no recursive scan of /tmp.
 set -euo pipefail
 
-snapshot() { # <run-dir>
-  local run=$1 uid
+snapshot() { # <run-dir> [checkout]
+  # Every section must complete: no `[ test ] && cmd` as a loop's last command, which
+  # under `set -e -o pipefail` aborts the snapshot and makes before/after vacuously equal.
+  local run=$1 checkout=${2:-} uid dir s g d e
+  [ -n "$checkout" ] || checkout=$run/src
   uid=$(id -u)
   echo "## tmux sockets"
   for dir in "/tmp/tmux-$uid" "/private/tmp/tmux-$uid" "${TMUX_TMPDIR:-$run/tmux}/tmux-$uid"; do
-    [ -d "$dir" ] && for s in "$dir"/*; do [ -S "$s" ] && echo "$s"; done
+    if [ -d "$dir" ]; then for s in "$dir"/*; do if [ -S "$s" ]; then echo "$s"; fi; done; fi
   done | LC_ALL=C sort -u
   echo "## live tmux servers"
-  pgrep -fl 'tmux' 2>/dev/null | grep -v -- ' -C ' | awk '{$1=""; print}' | LC_ALL=C sort -u || true
+  # Full argv on Linux and macOS (pgrep -fl prints only the name on Linux).
+  { ps -axo args= 2>/dev/null || true; } | { grep -E '(^|/)tmux( |$)' || true; } | { grep -v -- ' -C ' || true; } | cut -c1-300 | LC_ALL=C sort -u
   echo "## processes referencing the run dir"
-  pgrep -fl -- "$run" 2>/dev/null | grep -v 'test-residue.sh' | awk '{$1=""; print}' | LC_ALL=C sort -u || true
+  { ps -axo args= 2>/dev/null || true; } | { grep -F -- "$run" || true; } \
+    | { grep -v -e 'test-residue.sh' -e 'grep -F' || true; } | cut -c1-300 | LC_ALL=C sort -u
   echo "## fixture temp roots"
   for g in /tmp/ta-* /private/tmp/ta-* /tmp/ddn* /private/tmp/ddn* "${TMPDIR:-/tmp}"/ta-*; do
-    [ -e "$g" ] && echo "$g"
+    if [ -e "$g" ]; then echo "$g"; fi
   done | LC_ALL=C sort -u
   echo "## state home"
-  [ -d "${XDG_STATE_HOME:-$run/state}/team-agent" ] && ls -A "${XDG_STATE_HOME:-$run/state}/team-agent" || true
+  for d in "${XDG_STATE_HOME:-$run/state}/team-agent" "${XDG_STATE_HOME:-$run/state}"/team-agent/*; do
+    if [ -d "$d" ]; then for e in "$d"/* "$d"/.[!.]*; do if [ -e "$e" ]; then echo "$e"; fi; done; fi
+  done | LC_ALL=C sort -u
   echo "## checkout"
-  [ -d "$run/src" ] && git -C "$run/src" status --porcelain --ignored=no || true
+  if [ -d "$checkout" ]; then git -C "$checkout" status --porcelain --ignored=no; fi
+  echo "## end"
 }
 
 case "${1:-}" in
-  snapshot) snapshot "$2" >"$3" ;;
+  snapshot) snapshot "$2" "${4:-}" >"$3" ;;
   diff)
+    for f in "$2" "$3"; do grep -qx '## end' "$f" || { echo "incomplete snapshot: $f" >&2; exit 2; }; done
     new=$(LC_ALL=C comm -13 <(LC_ALL=C sort -u "$2") <(LC_ALL=C sort -u "$3") | grep -v '^## ' || true)
     if [ -n "$new" ]; then echo "RESIDUE after the run:"; echo "$new"; exit 1; fi
     echo "zero residue"

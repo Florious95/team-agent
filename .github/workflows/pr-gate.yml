@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
           run="$(mktemp -d /tmp/ta-gate.XXXXXXXX)"
           run="$(cd "$run" && pwd -P)"
-          mkdir -m 700 "$run/state" "$run/tmux" "$run/bin"
+          mkdir -m 700 "$run/state" "$run/tmux" "$run/bin" "$run/tmp"
           # Same public-python3 shim as the release verify job: fixtures that canonicalize
           # the launcher keep the public filename and PATH parent.
           printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v python3)" > "$run/bin/python3"
@@ -86,6 +86,12 @@ jobs:
             # Durable native authority (0.6.2 D1) and tmux sockets never touch the runner home.
             echo "XDG_STATE_HOME=$run/state"
             echo "TMUX_TMPDIR=$run/tmux"
+            echo "TMPDIR=$run/tmp"
+            # Contract-workspace fixtures (same values as contract-physical-executor.yml).
+            echo "CONTRACT_TMUX=$(command -v tmux)"
+            echo "CONTRACT_PYTHON=$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+            echo "CONTRACT_OLD_SCOPE=fixture-old-scope"
+            echo "TEAM_AGENT_K2_FOREIGN_PROBE=fixture-foreign-team"
             echo "TERM=xterm-256color"
             echo "RUST_TEST_THREADS=1"
           } >> "$GITHUB_ENV"
@@ -104,15 +110,15 @@ jobs:
           PY
 
       - name: Residue snapshot (before)
-        run: scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-before.txt"
+        run: scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-before.txt" "$GITHUB_WORKSPACE"
 
       - name: Rust tests (parallel tier)
         id: parallel
-        run: cargo nextest run --workspace --locked --profile ci
+        run: cargo nextest run --workspace --locked --profile ci --no-fail-fast
 
       - name: Rust tests (exclusive serial tier)
         if: ${{ !cancelled() && steps.parallel.conclusion != 'skipped' }}
-        run: cargo nextest run --workspace --locked --profile ci-exclusive
+        run: cargo nextest run --workspace --locked --profile ci-exclusive --no-fail-fast
 
       - name: Contract workspace tests
         if: ${{ !cancelled() }}
@@ -126,7 +132,7 @@ jobs:
       - name: Residue snapshot (after) and zero-residue check
         if: ${{ !cancelled() }}
         run: |
-          scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-after.txt"
+          scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-after.txt" "$GITHUB_WORKSPACE"
           scripts/test-residue.sh diff "$RUNNER_TEMP/residue-before.txt" "$RUNNER_TEMP/residue-after.txt"
           if [ -d "$HOME/.local/state/team-agent" ]; then
             echo "::error::tests wrote durable authority into the runner home"; exit 1

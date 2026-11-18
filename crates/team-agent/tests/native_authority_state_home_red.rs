@@ -118,26 +118,40 @@ fn legacy_in_workspace_authority_of_a_live_team_keeps_delivering() {
     assert_eq!(receipt["delivery"], "physical", "{receipt}");
 }
 
-/// RED on 0.6.1 (only one location exists, so it delivers): authority published at
-/// both the legacy and the state-home root for one scope is refused, with no input.
+/// RED on 0.6.1 by construction (same cause as the root test: both roots resolve to
+/// one path there, so it delivers). Authority published at both the legacy and the
+/// state-home root for one scope is refused with a named reason and no input.
 #[test]
 fn competing_authority_roots_are_refused_explicitly() {
     let base = scratch("competing");
     let state_home = base.join("state");
+    let mut roots = Vec::new();
     let team = native_team(|ws, scope| {
         let state_root = selected_root(ws, &[("XDG_STATE_HOME", Some(&state_home))]);
-        vec![legacy_root(ws, scope), state_root]
+        roots = vec![legacy_root(ws, scope), state_root];
+        roots.clone()
     });
+    if roots[0] != roots[1] {
+        // Genuinely competing: the second binding names a different store.
+        let other = roots[1].join("framework-binding.json");
+        let mut binding: Value = serde_json::from_slice(&std::fs::read(&other).unwrap()).unwrap();
+        binding["transport_root"] = json!(base.join("other-store"));
+        std::fs::write(&other, serde_json::to_vec(&binding).unwrap()).unwrap();
+    }
     let receipt = send(&team, &state_home, "competing roots must not deliver");
     drop(team);
     let _ = std::fs::remove_dir_all(&base);
     assert_ne!(receipt["delivery"], "physical", "competing authority roots were silently resolved: {receipt}");
     assert_eq!(receipt["live"], false, "{receipt}");
-    assert!(receipt["delivery_error"].as_str().is_some_and(|error| !error.is_empty()), "{receipt}");
+    assert!(receipt["delivery_error"].as_str().is_some_and(|error| error.contains("competing_native_authority_roots")),
+        "refusal must name the ambiguity: {receipt}");
+    assert_eq!(receipt["submission"], "not_attempted", "input was attempted despite ambiguous authority: {receipt}");
 }
 
-/// INVARIANT for DrvFS/9p: with authority in the state root, world-writable mode bits
-/// on the workspace .team tree (what a 0777 drvfs mount reports) never block send.
+/// INVARIANT for DrvFS/9p at the send/locator level: with the binding in the state
+/// root, world-writable mode bits on the workspace .team tree (what a 0777 drvfs
+/// mount reports) never block send. The store-level DrvFS RED is
+/// native_authority_store_layout_red (this fixture's store lives outside both roots).
 #[test]
 fn send_ignores_world_writable_workspace_tree_with_state_home_authority() {
     use std::os::unix::fs::PermissionsExt;
