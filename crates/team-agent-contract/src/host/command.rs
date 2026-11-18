@@ -322,11 +322,14 @@ impl PublicCommand {
         if directories.is_empty() {
             return Err(HostError::new("PATH entries", HostErrorKind::Invalid));
         }
-        let search_path = std::env::join_paths(directories)
-            .map_err(|_| HostError::new("PATH entries", HostErrorKind::Invalid))?;
-        let entry = path_matches(name, &search_path).into_iter().next().ok_or_else(|| {
+        // Stop at the first match, as a shell does: later PATH entries (e.g. WSL's
+        // appended /mnt/c directories over 9p) are never stat()ed for `entry`.
+        let entry = directories.iter().map(|directory| directory.join(name))
+            .find(|candidate| is_executable_file(candidate)).ok_or_else(|| {
             HostError::new("public command not on PATH", HostErrorKind::Io(std::io::ErrorKind::NotFound))
         })?;
+        let search_path = std::env::join_paths(directories)
+            .map_err(|_| HostError::new("PATH entries", HostErrorKind::Invalid))?;
         Ok(Self { name: name.into(), search_path, entry })
     }
 

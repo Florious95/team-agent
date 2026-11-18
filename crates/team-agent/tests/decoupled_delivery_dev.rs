@@ -108,6 +108,24 @@ fn native_pane_fallback_uses_its_private_endpoint_without_rewriting_snapshot() {
     assert!(!fixture.root.join(".team/db").exists());
 }
 
+/// 0.6.1: send is physical tmux delivery. A freshly spawned, never-sent-to seat
+/// with no MCP handshake receipt and no carrier PID is still pasted immediately.
+#[test]
+fn send_never_waits_for_peer_startup_or_mcp_handshake_evidence() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join(".team/runtime/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["teams"]["alpha"]["agents"]["worker"]["spawned_at"] = json!(chrono::Utc::now().to_rfc3339());
+    fixture.set_state(&state);
+    let started = Instant::now();
+    let output = fixture.cli(&["send", "worker", "no startup gate", "--team", "alpha"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(receipt["delivery"], "physical", "{receipt}");
+    fixture.received("Team Agent message from operator:\n\nno startup gate");
+    assert!(started.elapsed() < Duration::from_secs(10), "send waited {:?}", started.elapsed());
+}
+
 #[test]
 fn bracketed_paste_and_single_enter_are_separate_paced_tmux_calls() {
     use std::os::unix::fs::PermissionsExt;
