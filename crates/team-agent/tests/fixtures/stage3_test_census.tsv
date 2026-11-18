@@ -481,8 +481,9 @@ codex_prompt_worker_identity_is_a_positive_match	1	1	P
 codex_prompt_worker_identity_mismatch_is_rejected_for_that_agent	1	1	P	
 codex_shared_single_candidate_without_identity_is_deferred	1	1	P	
 codex_visibility_and_validation_are_fail_closed	1	1	P	
-cold_readiness_is_incarnation_scoped	1	1	P	
-cold_start_evidence_survives_helper_exit_but_not_a_new_carrier_launch	1	1	P	
+# 0.6.1: send no longer gates on peer startup evidence; these two gate tests are retired with the gate.
+cold_readiness_is_incarnation_scoped	0	0	P	
+cold_start_evidence_survives_helper_exit_but_not_a_new_carrier_launch	0	0	P	
 collect_explicit_invalid_result_file_remains_fatal	1	0	P	
 collect_is_absent_in_team_scoped_command_surface	1	1	P	
 command_approval_is_never_auto_approved_even_under_dangerous_policy	1	1	P	
