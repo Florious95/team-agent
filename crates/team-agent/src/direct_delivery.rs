@@ -300,7 +300,7 @@ impl Directory {
                     self.workspace.canonicalize().is_ok_and(|workspace| owned == workspace)))
     }
 
-    fn verify_endpoint(&self, agent: &str, expected: &Endpoint, deadline: Instant) -> Result<(), String> {
+    fn verify_endpoint(&self, agent: &str, expected: &Endpoint, deadline: Instant, tmux_client: &mut Option<PathBuf>) -> Result<(), String> {
         let current = self.endpoint(agent)?;
         if current.socket != expected.socket || current.pane_id != expected.pane_id || current.dialect != expected.dialect {
             return Err("identity_mismatch: recipient address changed".into());
@@ -327,7 +327,11 @@ impl Directory {
         }
         #[cfg(unix)]
         if let Some((binding, seat)) = self.native_seat(agent)? {
-            crate::contract_runtime::backend::validate_delivery_target(&binding, &seat, deadline.saturating_duration_since(Instant::now()))
+            let client = match tmux_client {
+                Some(path) => path,
+                None => tmux_client.insert(crate::contract_runtime::backend::current_tmux().map_err(|e| e.to_string())?),
+            };
+            crate::contract_runtime::backend::validate_delivery_target_with(&binding, &seat, deadline.saturating_duration_since(Instant::now()), client.clone())
                 .map_err(|e| format!("identity_mismatch: {e}"))?;
         }
         Ok(())
@@ -385,7 +389,8 @@ impl Directory {
     /// Execute normal addressing/identity/composer guards without committing or submitting input.
     pub(crate) fn probe(&self, agent: &str, deadline: Instant) -> Result<Endpoint, String> {
         let endpoint = self.endpoint(agent)?;
-        self.verify_endpoint(agent, &endpoint, deadline)?;
+        let mut client = None;
+        self.verify_endpoint(agent, &endpoint, deadline, &mut client)?;
         if agent != "leader" {
             let observed = pane_identity(&endpoint.socket, &endpoint.pane_id, deadline)?;
             let _input = input_lock(&observed, &endpoint.pane_id, deadline)?;
@@ -398,7 +403,7 @@ impl Directory {
             }
             guard_non_composer(&endpoint.socket, &endpoint.pane_id, deadline)?;
             wait_for_draft(&endpoint.socket, &endpoint.pane_id, deadline)?;
-            self.verify_endpoint(agent, &endpoint, deadline)?;
+            self.verify_endpoint(agent, &endpoint, deadline, &mut client)?;
         }
         Ok(endpoint)
     }
@@ -417,6 +422,7 @@ impl Directory {
         } else { None };
         let endpoint = self.endpoint(agent)?;
         let info = self.recipient(agent)?;
+        let mut client = None;
         let expected_pid = if agent == "leader" { info.get("pane_pid") }
             else { info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")) };
         let expected_pid = expected_pid.and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
@@ -430,7 +436,7 @@ impl Directory {
                     std::env::var("TMUX_PANE").ok().as_deref()) {
                     return Err("leader_identity_self_collision: target is the sender's own pane".into());
                 }
-                self.verify_endpoint(agent, &endpoint, deadline)
+                self.verify_endpoint(agent, &endpoint, deadline, &mut client)
             }).map_err(|error| {
                 if agent == "leader" && ["identity_mismatch", "pane_gone", "recipient_provider_exited"]
                     .iter().any(|prefix| error.starts_with(prefix)) {
@@ -802,12 +808,13 @@ pub fn locate(workspace: &Path, team: Option<&str>) -> Result<Value, String> {
     };
     let mut endpoints = Vec::new();
     let mut unavailable: Vec<Value> = Vec::new();
+    let mut client = None;
     for team in selectors {
         let directory = directory(workspace, team.as_deref())?;
         for agent in std::iter::once("leader".to_string()).chain(directory.agents()) {
             let live = (|| {
                 let endpoint = directory.endpoint(&agent)?;
-                directory.verify_endpoint(&agent, &endpoint, Instant::now() + Duration::from_secs(5))?;
+                directory.verify_endpoint(&agent, &endpoint, Instant::now() + Duration::from_secs(5), &mut client)?;
                 let output = tmux(&endpoint.socket)
                     .args(["display-message", "-p", "-t", &endpoint.pane_id, "#{pane_dead}"])
                     .output().map_err(|e| e.to_string())?;

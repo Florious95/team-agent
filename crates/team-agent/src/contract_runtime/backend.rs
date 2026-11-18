@@ -300,13 +300,12 @@ impl Backend {
             Some(directory)
         };
         check_authority(&binding)?;
-        // Build provenance is diagnostic, not an ownership or lifecycle fence.
-        // New launches use this invocation, including relocated binaries.
-        binding.candidate = std::env::current_exe()?.canonicalize()?;
-        binding.candidate_sha256 = executing_candidate_sha()?;
-        // The client is selected by this invocation's PATH, not an old install
-        // location. Server/process ownership still comes from the saved receipts.
-        binding.tmux = discovery::public_command("tmux")?.entry;
+        // A projection read does not launch this binary or require a tmux client.
+        if !readonly {
+            binding.candidate = std::env::current_exe()?.canonicalize()?;
+            binding.candidate_sha256 = executing_candidate_sha()?;
+            binding.tmux = current_tmux()?;
+        }
         let scope = binding.scope.clone();
         let store = if readonly {
             ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
@@ -451,7 +450,7 @@ pub(super) fn workspace_tmux(
     let mut session = None;
     if socket.is_some() {
         let result = RealCommandRunner::default().run(&CommandRequest {
-            executable: binding.tmux.clone(), arguments: vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned(),
+            executable: current_tmux()?, arguments: vec!["-u".into(), "-S".into(), endpoint.as_os_str().to_owned(),
                 "-N".into(), "list-sessions".into(), "-F".into(), "#{session_id}:#{session_name}".into()],
             cwd: None, environment: EnvironmentDelta { remove: Default::default(), set: Default::default() },
             stdin: None, budget: Duration::from_secs(5), limits: OutputLimits { stdout: 65536, stderr: 4096, stdin: 1 },
@@ -501,7 +500,7 @@ pub(super) fn bind_workspace_session(workspace: &Path, team: &str, seat: &SeatId
     if !target.shared_endpoint { return Ok(()); }
     let clock = RealClock::new();
     let deadline = Duration::from_secs(5);
-    let mut host = TmuxHost::restore_owned(target.clone(), backend.binding.tmux.clone(),
+    let mut host = TmuxHost::restore_owned(target.clone(), current_tmux()?,
         settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
         RealCommandRunner::default(), &clock, deadline)?;
     host.validate_target(target, &clock, deadline)?;
@@ -745,13 +744,21 @@ pub(crate) fn executing_candidate_sha() -> Result<Digest, BackendError> {
     Ok(sha)
 }
 
+pub(crate) fn current_tmux() -> Result<PathBuf, BackendError> {
+    Ok(discovery::public_command("tmux")?.entry)
+}
+
 pub(crate) fn validate_delivery_target(binding: &Binding, seat: &SeatRecord, budget: Duration) -> Result<(), BackendError> {
+    validate_delivery_target_with(binding, seat, budget, current_tmux()?)
+}
+
+pub(crate) fn validate_delivery_target_with(binding: &Binding, seat: &SeatRecord, budget: Duration, tmux: PathBuf) -> Result<(), BackendError> {
     let target = seat.physical_target()?;
     if seat.evidence_kind != EvidenceKind::Native || !matches!(seat.status, SeatStatus::Starting | SeatStatus::Ready) {
         return Err(BackendError::Fence { reason: "delivery_target_not_current_native_owner" });
     }
     let clock = RealClock::new();
-    let mut host = TmuxHost::restore_owned(target.clone(), binding.tmux.clone(),
+    let mut host = TmuxHost::restore_owned(target.clone(), tmux,
         settings(binding, registry::provider(seat.provider.as_str())?).limits,
         RealCommandRunner::default(), &clock, budget)?;
     host.validate_target(target, &clock, budget)?;
@@ -765,7 +772,7 @@ pub(super) fn observe_activity(binding: &Binding, seat: &SeatRecord) -> Result<O
     let target = seat.physical_target()?;
     let budget = Duration::from_millis(500);
     let clock = RealClock::new();
-    let mut host = TmuxHost::restore_owned(target.clone(), binding.tmux.clone(),
+    let mut host = TmuxHost::restore_owned(target.clone(), current_tmux()?,
         settings(binding, registry::provider(seat.provider.as_str())?).limits,
         RealCommandRunner::default(), &clock, budget)?;
     let frame = host.capture(target, &clock, budget, budget)?;
@@ -786,7 +793,7 @@ fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRec
     let target = current.physical.as_ref().ok_or(BackendError::Metadata)?;
     let clock = RealClock::new();
     let deadline = Duration::from_secs(5);
-    let mut host = TmuxHost::restore_owned(target.clone(), backend.binding.tmux.clone(),
+    let mut host = TmuxHost::restore_owned(target.clone(), current_tmux()?,
         settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
         RealCommandRunner::default(), &clock, deadline)?;
     host.validate_target(target, &clock, deadline)?;
