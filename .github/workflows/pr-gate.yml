@@ -1,0 +1,141 @@
+name: PR gate
+
+# Always-on behavioural gate for every pull request and every main update.
+# Required status checks: "pr-gate-linux" and "pr-gate-macos".
+# ubuntu-22.04 ships tmux 3.2a, the same tmux as WSL Ubuntu 22.04.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.95.0"
+  NEXTEST_VERSION: "0.9.152"
+  NEXTEST_LINUX_SHA256: "d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"
+
+jobs:
+  gate:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: pr-gate-linux
+            runner: ubuntu-22.04
+          - name: pr-gate-macos
+            runner: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+
+      - name: Install tmux, Python and (Linux) strace
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y tmux python3 strace
+            strace -V | head -1
+          else
+            command -v tmux >/dev/null || brew install tmux
+          fi
+          tmux -V
+          python3 --version
+
+      - name: Install cargo-nextest
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+            curl -fsSL -o "$archive" "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            echo "${NEXTEST_LINUX_SHA256}  ${archive}" | sha256sum -c -
+            tar -xzf "$archive" -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+          else
+            cargo install --locked "cargo-nextest@${NEXTEST_VERSION}"
+          fi
+          cargo nextest --version
+
+      - name: Prepare one isolated run directory
+        run: |
+          set -euo pipefail
+          run="$(mktemp -d /tmp/ta-gate.XXXXXXXX)"
+          run="$(cd "$run" && pwd -P)"
+          mkdir -m 700 "$run/state" "$run/tmux" "$run/bin"
+          # Same public-python3 shim as the release verify job: fixtures that canonicalize
+          # the launcher keep the public filename and PATH parent.
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v python3)" > "$run/bin/python3"
+          chmod 700 "$run/bin/python3"
+          echo "$run/bin" >> "$GITHUB_PATH"
+          {
+            echo "TA_RUN_DIR=$run"
+            # Durable native authority (0.6.2 D1) and tmux sockets never touch the runner home.
+            echo "XDG_STATE_HOME=$run/state"
+            echo "TMUX_TMPDIR=$run/tmux"
+            echo "TERM=xterm-256color"
+            echo "RUST_TEST_THREADS=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Compile tests
+        run: cargo test --workspace --locked --no-run
+
+      - name: Same-boot history for PID-reuse fixtures (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python3 - <<'PY'
+          import pathlib, time
+          up = float(pathlib.Path("/proc/uptime").read_text().split()[0])
+          if up <= 300:
+              time.sleep(300.01 - up)
+          PY
+
+      - name: Residue snapshot (before)
+        run: scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-before.txt"
+
+      - name: Rust tests (parallel tier)
+        id: parallel
+        run: cargo nextest run --workspace --locked --profile ci
+
+      - name: Rust tests (exclusive serial tier)
+        if: ${{ !cancelled() && steps.parallel.conclusion != 'skipped' }}
+        run: cargo nextest run --workspace --locked --profile ci-exclusive
+
+      - name: Contract workspace tests
+        if: ${{ !cancelled() }}
+        working-directory: crates/team-agent-contract
+        run: cargo test --locked
+
+      - name: Doctests
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked --doc
+
+      - name: Residue snapshot (after) and zero-residue check
+        if: ${{ !cancelled() }}
+        run: |
+          scripts/test-residue.sh snapshot "$TA_RUN_DIR" "$RUNNER_TEMP/residue-after.txt"
+          scripts/test-residue.sh diff "$RUNNER_TEMP/residue-before.txt" "$RUNNER_TEMP/residue-after.txt"
+          if [ -d "$HOME/.local/state/team-agent" ]; then
+            echo "::error::tests wrote durable authority into the runner home"; exit 1
+          fi
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.name }}
+          path: target/nextest/*/junit.xml
+          if-no-files-found: warn

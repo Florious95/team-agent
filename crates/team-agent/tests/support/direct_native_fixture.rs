@@ -1,5 +1,6 @@
 //! B7 / 4e8ff838: real Lifecycle authority for a controlled, owned native TTY.
-//! Same admission/startup-handshake path as m4_native_delivery_dev, not provider acceptance.
+//! Same admission path as m4_native_delivery_dev, not provider acceptance. Since 0.6.2 no
+//! MCP/startup-handshake evidence is seeded: send must deliver without it.
 #[path = "../../../team-agent-contract/tests/physical_support/mod.rs"]
 mod physical_support;
 #[path = "temp_workspace.rs"]
@@ -7,13 +8,12 @@ mod temp_workspace;
 #[path = "proc_guard.rs"]
 mod proc_guard;
 
-use std::{path::{Path, PathBuf}, process::Command, time::{Duration, Instant}};
-use serde_json::json;
+use std::{path::{Path, PathBuf}, process::Command, time::Duration};
 use team_agent::contract_runtime::backend::{self, Binding};
 use team_agent_contract::{
     contract::{descriptor::{AuthMode, FreshSession}, hooks::{PlanHook, ProviderHooks}, plan::*, types::*},
     host::{clock::RealClock, command::{OutputLimits, RealCommandRunner}, materialize::ScopedMaterializer,
-        process::{capture_process, fingerprint_file, resolve_cwd}, tmux::{HostLimits, TmuxHost}, transport::TargetReceipt},
+        process::{fingerprint_file, resolve_cwd}, tmux::{HostLimits, TmuxHost}, transport::TargetReceipt},
     orchestration::{lifecycle::*, physical::*, store::*},
 };
 
@@ -25,7 +25,9 @@ fn limits() -> HostLimits {
 fn selected(command: &str) -> PathBuf {
     let output = Command::new("sh").args(["-c", &format!("command -v {command}")]).output().unwrap();
     assert!(output.status.success(), "public {command} is required");
-    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()).canonicalize().unwrap()
+    // Keep the PATH entry as found (as PublicCommand does); canonicalizing a Homebrew
+    // python3 symlink yields python3.X, which LaunchEntrypoint::validate rejects.
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
 }
 struct ReceiverPlan(PathBuf);
 impl PlanHook for ReceiverPlan {
@@ -60,6 +62,15 @@ impl Drop for NativeAuthority {
 }
 impl NativeAuthority {
     pub fn start(root: &Path, provider: &'static str) -> Self {
+        let canonical = root.canonicalize().unwrap();
+        Self::start_with_binding_roots(&canonical, provider, |scope| vec![backend::root_for(&canonical, scope)])
+    }
+
+    /// Publish the framework binding at explicit roots (e.g. a 0.6.1 in-workspace
+    /// layout, or two competing roots). The native store itself is unchanged.
+    #[allow(dead_code)]
+    pub fn start_with_binding_roots(root: &Path, provider: &'static str,
+        binding_roots: impl FnOnce(&ScopeId) -> Vec<PathBuf>) -> Self {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         use std::io::{BufRead, BufReader, Write};
         // A real launch persists the declared canonical provider, not a legacy wire alias.
@@ -95,11 +106,13 @@ impl NativeAuthority {
         let candidate_sha256 = fingerprint_file(&candidate, 1024 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         let binding = Binding { version: 1, workspace: cwd.clone(), team: "alpha".into(), scope: scope.clone(),
             endpoint, candidate: candidate.clone(), candidate_sha256, tmux: tmux.clone(), transport_root: transport_root.clone() };
-        let binding_root = backend::root_for(root, &scope);
-        std::fs::create_dir_all(&binding_root).unwrap();
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
-            .open(binding_root.join("framework-binding.json")).unwrap()
-            .write_all(&serde_json::to_vec(&binding).unwrap()).unwrap();
+        for binding_root in binding_roots(&scope) {
+            std::fs::create_dir_all(&binding_root).unwrap();
+            std::fs::set_permissions(&binding_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                .open(binding_root.join("framework-binding.json")).unwrap()
+                .write_all(&serde_json::to_vec(&binding).unwrap()).unwrap();
+        }
         let native_hash = fingerprint_file(&python, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
         let native = physical_support::native(native_hash);
         let mut descriptor = physical_support::descriptor("single", &native);
@@ -109,11 +122,10 @@ impl NativeAuthority {
         let script = root.join("native-receiver.py");
         let controlled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../team-agent-contract/tests/fixtures/fake_terminal.py").canonicalize().unwrap();
-        let helper_file = transport_root.join("mcp-helper-pid");
-        // Both processes are real, owned and bounded; no fabricated PID or readiness status.
+        // A real, owned and bounded process; no fabricated PID, readiness or MCP evidence.
         std::fs::write(&script, format!(
-            "import pathlib, runpy, signal, subprocess\nsignal.alarm(110)\nhelper = subprocess.Popen(['/bin/sleep', '100'])\nstaged = pathlib.Path({helper:?} + '.tmp')\nstaged.write_text(str(helper.pid))\nstaged.replace({helper:?})\ntry:\n    runpy.run_path({controlled:?}, run_name='__main__')\nfinally:\n    helper.terminate()\n    helper.wait()\n",
-            helper=helper_file.to_string_lossy(), controlled=controlled.to_string_lossy())).unwrap();
+            "import runpy, signal\nsignal.alarm(110)\nrunpy.run_path({controlled:?}, run_name='__main__')\n",
+            controlled=controlled.to_string_lossy())).unwrap();
         let planner = ReceiverPlan(script);
         let hooks = ProviderHooks { plan: HookBinding::Bound(&planner), ..physical_support::hooks() };
         let request = LaunchRequest { identity: identity.clone(), provider: provider.into(), native,
@@ -144,28 +156,6 @@ impl NativeAuthority {
         assert_eq!(seat.status, SeatStatus::Starting);
         assert!(!store.leased(&identity.seat).unwrap());
         assert!(store.unfinished().unwrap().is_empty());
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !helper_file.exists() {
-            assert!(Instant::now() < deadline, "native MCP descendant never started: {:?}",
-                Command::new("tmux").args(["-S", &owned.socket, "capture-pane", "-p", "-t", &owned.pane]).output());
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let helper_pid = std::fs::read_to_string(helper_file).unwrap().trim().parse().unwrap();
-        let sleep = PathBuf::from("/bin/sleep").canonicalize().unwrap();
-        let hash = fingerprint_file(&sleep, 512 * 1024 * 1024, Duration::from_secs(5)).unwrap();
-        let helper = capture_process(helper_pid, &sleep, hash, Duration::from_secs(5)).unwrap();
-        let connection = InstanceId::new("direct-startup").unwrap();
-        store.register_connection(&team_agent_contract::orchestration::protocol::ConnectionRecord {
-            identity: identity.clone(), connection: connection.clone(), server_key: seat.server_key.clone(),
-            binding_key: seat.binding_key.clone(), process: helper, native_process: seat.physical.as_ref().unwrap().process.clone(), closed: false,
-        }).unwrap();
-        let context = team_agent_contract::orchestration::mcp::CallContext { identity: identity.clone(),
-            binding_key: seat.binding_key.clone(), connection_id: connection, task_id: "startup".into() };
-        assert!(!store.startup_handshake_observed(&identity).unwrap());
-        for (id, method) in [(1, "initialize"), (2, "tools/list")] {
-            team_agent_contract::orchestration::mcp::response_written(&mut store, &context, &json!({"id":id,"method":method})).unwrap();
-        }
-        assert!(store.startup_handshake_observed(&identity).unwrap());
         owned
     }
 }
