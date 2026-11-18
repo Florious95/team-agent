@@ -6,8 +6,8 @@
 #       "<workspace>\t<binary source>\t<test name>\t<ignored 0|1>", sorted.
 #   scripts/test-inventory.sh diff <before.tsv> <after.tsv> <retired.txt> <added.txt>
 #       Fails unless REMOVED == retired.txt and ADDED == added.txt exactly
-#       (one "<binary source>\t<test name>" per line), and no test flips to ignored
-#       unless it is listed in added.txt.
+#       (one "<workspace>\t<binary source>\t<test name>" per line), and no test flips to
+#       ignored unless it is listed in added.txt.
 set -euo pipefail
 
 list_workspace() { # <label> <dir> [cargo args...]
@@ -39,15 +39,15 @@ case "${1:-}" in
     ;;
   diff)
     before=$2 after=$3 retired=$4 added=$5 status=0
-    key() { cut -f2,3 "$1" | LC_ALL=C sort -u; }
+    key() { cut -f1-3 "$1" | LC_ALL=C sort -u; }
     removed=$(LC_ALL=C comm -23 <(key "$before") <(key "$after"))
     new=$(LC_ALL=C comm -13 <(key "$before") <(key "$after"))
     if ! diff -u <(LC_ALL=C sort -u "$retired") <(printf '%s\n' "$removed" | sed '/^$/d'); then
       echo "REMOVED set differs from the declared retire list" >&2; status=1; fi
     if ! diff -u <(LC_ALL=C sort -u "$added") <(printf '%s\n' "$new" | sed '/^$/d'); then
       echo "ADDED set differs from the declared new-test list" >&2; status=1; fi
-    flipped=$(LC_ALL=C join -t $'\t' <(awk -F'\t' '$4==0{print $2"|"$3}' "$before" | LC_ALL=C sort -u) \
-      <(awk -F'\t' '$4==1{print $2"|"$3}' "$after" | LC_ALL=C sort -u) || true)
+    flipped=$(LC_ALL=C comm -12 <(awk -F'\t' '$4==0{print $1"|"$2"|"$3}' "$before" | LC_ALL=C sort -u) \
+      <(awk -F'\t' '$4==1{print $1"|"$2"|"$3}' "$after" | LC_ALL=C sort -u) || true)
     if [ -n "$flipped" ]; then echo "tests newly ignored:" >&2; echo "$flipped" >&2; status=1; fi
     echo "before=$(wc -l <"$before" | tr -d ' ') after=$(wc -l <"$after" | tr -d ' ') removed=$(printf '%s' "$removed" | grep -c . || true) added=$(printf '%s' "$new" | grep -c . || true)"
     exit $status
