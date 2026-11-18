@@ -300,12 +300,12 @@ impl Backend {
             Some(directory)
         };
         check_authority(&binding)?;
-        // A projection read does not launch this binary or require a tmux client.
-        if !readonly {
-            binding.candidate = std::env::current_exe()?.canonicalize()?;
-            binding.candidate_sha256 = executing_candidate_sha()?;
-            binding.tmux = current_tmux()?;
-        }
+        // Build provenance is diagnostic, not an ownership or lifecycle fence.
+        // New launches use this invocation, including relocated binaries.
+        binding.candidate = std::env::current_exe()?.canonicalize()?;
+        binding.candidate_sha256 = executing_candidate_sha()?;
+        // Pure reads do not require a client; terminal operations resolve their own.
+        if !readonly { binding.tmux = current_tmux()?; }
         let scope = binding.scope.clone();
         let store = if readonly {
             ProjectionStore::open_readonly(&binding.transport_root, scope, &binding.endpoint)
