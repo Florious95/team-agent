@@ -1662,6 +1662,19 @@ fn reset_agent_at_paths(
         .filter(|session| !session.is_empty())
         .map(SessionId::new);
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state_before_stop, Some(agent_id))?;
+    let team_dir = state_before_stop["team_dir"].as_str().filter(|p| !p.is_empty())
+        .map(Path::new).unwrap_or(workspace);
+    let role = role_config::compile_reset_role(workspace, team_dir, &state_before_stop, agent_id)?;
+    let refresh_spec = |spec: &mut YamlValue| -> Result<(), LifecycleError> {
+        if let Some(compiled) = &role {
+            role_config::replace_spec_agent(spec, agent_id, compiled)?;
+            crate::model::spec::validate_spec(spec, workspace)
+                .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+        }
+        Ok(())
+    };
+    let mut pre_stop_spec = load_team_spec(spec_workspace)?;
+    refresh_spec(&mut pre_stop_spec)?;
     // Capture old pane_id / pane_pid / window BEFORE stop, so the hard gate
     // below can prove the same prior instance is gone (or refuse start).
     let old_pane_id_before = state_before_stop
@@ -1690,10 +1703,7 @@ fn reset_agent_at_paths(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| agent_id.as_str())
         .to_string();
-    let pre_stop_spec = load_team_spec(spec_workspace).ok();
-    let pre_stop_session = pre_stop_spec
-        .as_ref()
-        .map(|spec| state_session_name_from_spec(&state_before_stop, spec));
+    let pre_stop_session = Some(state_session_name_from_spec(&state_before_stop, &pre_stop_spec));
     let pre_stop_pane_ids: std::collections::BTreeSet<String> =
         if let Some(session) = pre_stop_session.as_ref() {
             if is_per_agent_window(&pre_stop_window, agent_id) {
@@ -1817,7 +1827,20 @@ fn reset_agent_at_paths(
     }
 
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
-    let spec = load_team_spec(spec_workspace)?;
+    // Re-read after stop so sibling changes during teardown aren't overwritten.
+    let mut spec = load_team_spec(spec_workspace)?;
+    let team_key = restart_projection_team_key(&state, team);
+    let runtime_spec = crate::model::paths::runtime_spec_path(workspace, &team_key);
+    let spec_workspace = if let Some(compiled) = &role {
+        refresh_spec(&mut spec)?;
+        let row = state["agents"][agent_id.as_str()].as_object_mut()
+            .ok_or_else(|| unknown_worker(agent_id))?;
+        role_config::apply_launch_fields(row, team_dir, compiled);
+        crate::lifecycle::launch::write_spec_atomic(&runtime_spec, &spec)?;
+        runtime_spec.parent().expect("runtime spec has a parent")
+    } else {
+        spec_workspace
+    };
     discard_agent_session_fields(&mut state, agent_id)?;
     // 0.4.6 Stage 1: bump spawn_epoch on every reset. The new epoch is
     // visible to subsequent capture/event/status paths so they can
@@ -1833,7 +1856,6 @@ fn reset_agent_at_paths(
         obj.insert("spawn_epoch".to_string(), serde_json::json!(new_epoch));
         obj.insert("explicit_stop".to_string(), serde_json::Value::Bool(false));
     }
-    let team_key = restart_projection_team_key(&state, team);
     crate::station::projection::publish(workspace, &mut state, &team_key, &[agent_id.as_str()])
         .map_err(LifecycleError::StatePersist)?;
     sync_restart_team_projections(&mut state, &team_key);

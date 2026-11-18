@@ -246,6 +246,41 @@ pub(super) fn replace_spec_agent(
     Ok(())
 }
 
+/// Take one snapshot of the role before a destructive reset. Old spec-only
+/// workspaces have no role document; a missing *declared* source is an error.
+pub(super) fn compile_reset_role(
+    workspace: &Path,
+    team_dir: &Path,
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+) -> Result<Option<Value>, LifecycleError> {
+    validate_id(agent_id)?;
+    let role = super::launch::role_source::role_source_path(workspace, team_dir, state, agent_id);
+    let team_doc = team_dir.join("TEAM.md");
+    let text = match fs::read_to_string(&role) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            && !team_doc.try_exists().map_err(persist_error)?
+            && state["agents"][agent_id.as_str()]["dynamic_role_file"].as_str().is_none()
+            && fs::symlink_metadata(&role).is_err() => return Ok(None),
+        Err(e) => return Err(LifecycleError::Compile(format!("{}: {e}", role.display()))),
+    };
+    if declaration_paused(&text)? {
+        return Err(LifecycleError::RequirementUnmet(format!("agent {agent_id} is paused in {}", role.display())));
+    }
+    let team_meta = if team_doc.try_exists().map_err(persist_error)? {
+        role_parts(&read_text(&team_doc)?)?.0
+    } else {
+        Value::Map(Vec::new())
+    };
+    let compiled = crate::compiler::compile_role_text(&role, &text, &team_meta, &workspace.to_string_lossy())
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", role.display())))?;
+    if compiled.id != agent_id.as_str() {
+        return Err(LifecycleError::Compile(format!("{} declares {}, expected {agent_id}", role.display(), compiled.id)));
+    }
+    Ok(Some(compiled.agent))
+}
+
 pub(super) fn to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -281,6 +316,16 @@ pub(super) fn apply_agent_config(
         .and_then(|agents| agents.get_mut(agent_id.as_str()))
         .and_then(serde_json::Value::as_object_mut)
     {
+        agent.insert("dynamic_role_file".into(), role.to_string_lossy().to_string().into());
+        agent.insert("role_source_ownership".into(), "external".into());
+        apply_launch_fields(agent, &selected.team_dir, compiled);
+    }
+}
+
+/// Refresh launch configuration without changing role-source ownership or session history.
+pub(super) fn apply_launch_fields(
+    agent: &mut serde_json::Map<String, serde_json::Value>, team_dir: &Path, compiled: &Value,
+) {
         for field in [
             "provider",
             "model",
@@ -300,11 +345,6 @@ pub(super) fn apply_agent_config(
             }
         }
         agent.insert(
-            "dynamic_role_file".into(),
-            role.to_string_lossy().to_string().into(),
-        );
-        agent.insert("role_source_ownership".into(), "external".into());
-        agent.insert(
             "model_source".into(),
             if compiled.get("model").and_then(Value::as_str).is_some() {
                 "role".into()
@@ -317,9 +357,7 @@ pub(super) fn apply_agent_config(
         if compiled.get("profile").and_then(Value::as_str).is_some() {
             agent.insert(
                 "_profile_dir".into(),
-                selected
-                    .team_dir
-                    .join("profiles")
+                team_dir.join("profiles")
                     .to_string_lossy()
                     .to_string()
                     .into(),
@@ -327,7 +365,6 @@ pub(super) fn apply_agent_config(
         } else {
             agent.remove("_profile_dir");
         }
-    }
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
