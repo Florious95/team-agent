@@ -72,7 +72,22 @@ fn private_file() -> std::io::Result<(PrivateFile, std::fs::File)> {
         // The command remains visible after unlink. Other accounts must not
         // be able to recreate its path if someone replays the tmux command.
         let uid = unsafe { libc::geteuid() };
-        let root = Path::new("/tmp").join(format!("team-agent-spawn-{uid}"));
+        let temp = std::env::temp_dir().canonicalize()?;
+        // The pane sources this absolute path later. A safe leaf alone isn't
+        // enough if another account can replace one of its parent directories.
+        for ancestor in temp.ancestors() {
+            let meta = std::fs::symlink_metadata(ancestor)?;
+            if !meta.is_dir()
+                || (meta.uid() != uid && meta.uid() != 0)
+                || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
+            {
+                return Err(std::io::Error::other("unsafe tmux temporary directory"));
+            }
+        }
+        if temp.to_str().is_none() {
+            return Err(std::io::Error::other("tmux temporary path is not UTF-8"));
+        }
+        let root = temp.join(format!("team-agent-spawn-{uid}"));
         match std::fs::DirBuilder::new().mode(0o700).create(&root) {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
@@ -195,6 +210,15 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    // Extract only the generated nonce; the shell-quoted temp path may contain spaces.
+    fn launch_file(cmd: &str) -> PathBuf {
+        let dir = format!("team-agent-spawn-{}", unsafe { libc::geteuid() });
+        let (_, suffix) = cmd.split_once(&format!("{dir}/")).unwrap();
+        let nonce = &suffix[..32];
+        assert!(nonce.bytes().all(|b| b.is_ascii_hexdigit()));
+        std::env::temp_dir().join(dir).join(nonce)
+    }
+
     #[test]
     fn small_environment_is_private_and_literal_too() {
         let value = "private ' quoted\n$HOME `literal`";
@@ -215,12 +239,8 @@ mod tests {
             &["TEST_UNSET".into()],
             |cmd| {
                 assert!(!cmd.contains("private ' quoted"));
-                let path = Path::new(
-                    cmd.split_whitespace()
-                        .find(|s| s.starts_with("/tmp/team-agent-spawn-"))
-                        .unwrap(),
-                );
-                assert_eq!(std::fs::metadata(path)?.mode() & 0o777, 0o600);
+                let path = launch_file(cmd);
+                assert_eq!(std::fs::metadata(&path)?.mode() & 0o777, 0o600);
                 let output = std::process::Command::new("/bin/sh")
                     .args(["-c", cmd])
                     .env("TEST_UNSET", "stale")
@@ -244,11 +264,7 @@ mod tests {
             &BTreeMap::from([("X".into(), "x".into())]),
             &[],
             |cmd| {
-                path = PathBuf::from(
-                    cmd.split_whitespace()
-                        .find(|s| s.starts_with("/tmp/team-agent-spawn-"))
-                        .unwrap(),
-                );
+                path = launch_file(cmd);
                 assert!(path.is_file());
                 Err::<(), _>(std::io::Error::other("spawn refused").into())
             },
