@@ -70,6 +70,18 @@ fn test_binary_path() -> PathBuf {
     path
 }
 
+/// A fixture launching a real provider shell doesn't need the Actions job's
+/// command files or runner metadata. Preserve PATH and the rest of its toolchain.
+pub fn remove_actions_job_env(command: &mut Command) {
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| {
+            ["GITHUB_", "ACTIONS_", "RUNNER_"].iter().any(|prefix| key.starts_with(prefix))
+        }) {
+            command.env_remove(key);
+        }
+    }
+}
+
 /// The CI-selected public tmux tool, retained before a test isolates PATH.
 /// This is a fixture driver path, not production executable authorization.
 pub fn fixture_tmux_binary() -> PathBuf {

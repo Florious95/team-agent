@@ -299,6 +299,7 @@ sleep 60 & wait $!
     let host = hermetic::short_tmux_socket("dynlead");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let mut launch = Command::new(hermetic::fixture_tmux_binary());
+    hermetic::remove_actions_job_env(&mut launch);
     launch
         .args(["-u", "-S"])
         .arg(&host)
