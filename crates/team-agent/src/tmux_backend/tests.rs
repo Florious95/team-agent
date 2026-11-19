@@ -711,9 +711,7 @@ fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
     );
     let s = SessionName::new("teamsess");
     let w = WindowName::new("w1");
-    // The canned runner acknowledges a pane id, but does not execute a shell.
-    // Private environment consumption is exercised by spawn_env's shell test.
-    let env = BTreeMap::new();
+    let env = BTreeMap::from([("TEAM_AGENT_ID".to_string(), "w1".to_string())]);
     let result = be
         .spawn_first(
             &s,

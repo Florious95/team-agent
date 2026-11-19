@@ -1500,15 +1500,15 @@ thread_local! {
 
 #[cfg(test)]
 fn shell_command(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, env_unset: &[String]) -> String {
-    shell_command_with_exec(argv, cwd, env, env_unset, "exec")
+    shell_command_with_env_file(argv, cwd, env, env_unset, None)
 }
 
-fn shell_command_with_exec(
+fn shell_command_with_env_file(
     argv: &[String],
     cwd: &Path,
     env: &BTreeMap<String, String>,
     env_unset: &[String],
-    dispatch: &str,
+    file: Option<&Path>,
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
@@ -1525,6 +1525,9 @@ fn shell_command_with_exec(
         parts.push(key.clone());
         parts.push("&&".to_string());
     }
+    if let Some(file) = file {
+        parts.push(format!(". {} &&", shell_quote(&file.to_string_lossy())));
+    }
     // 0.4.x ordering fix (env-leak symptom #3): KEY=val exports must NOT
     // re-introduce any key that was just unset. Filter env entries whose key
     // appears in env_unset so the unset wins on the final shell line. This
@@ -1540,7 +1543,7 @@ fn shell_command_with_exec(
         parts.push(format!("{key}={}", shell_quote(value)));
     }
     append_caller_context_assignments(&mut parts, caller_provider);
-    parts.push(dispatch.to_string());
+    parts.push("exec".to_string());
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.join(" ")
 }
