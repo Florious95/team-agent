@@ -96,8 +96,9 @@ fn run_process_isolated(marker: &str, test_name: &str, body: impl FnOnce()) {
         return;
     }
 
-    let output = Command::new(std::env::current_exe().expect("current lib-test executable"))
-        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+    let mut child = Command::new(std::env::current_exe().expect("current lib-test executable"));
+    hermetic_guard::remove_actions_job_env(&mut child);
+    let output = child.args(["--exact", test_name, "--nocapture", "--test-threads=1"])
         .env(marker, "1")
         .env(PARENT_PID_ENV, std::process::id().to_string())
         .output()
