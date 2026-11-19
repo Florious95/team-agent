@@ -904,6 +904,7 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     if let Some(caller) = &ws.caller {
         caller.configure_command(&mut cmd);
     }
+    hermetic_guard::remove_actions_job_env(&mut cmd);
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
