@@ -65,38 +65,50 @@ fn reap_expired(root: &Path) {
     }
 }
 
+#[cfg(unix)]
+fn checked_root(candidate: &Path, uid: libc::uid_t) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    // Use the checked canonical path in the pane too: macOS /var and /tmp
+    // are symlinks, and TMPDIR can be relative to the operator's cwd.
+    let temp = candidate.canonicalize()?;
+    if temp.to_str().is_none() {
+        return Err(std::io::Error::other("tmux temporary path is not UTF-8"));
+    }
+    let mut ancestor = PathBuf::new();
+    for part in temp.components() {
+        ancestor.push(part.as_os_str());
+        let meta = std::fs::symlink_metadata(&ancestor)?;
+        if !meta.is_dir()
+            || (meta.uid() != uid && meta.uid() != 0)
+            || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
+        {
+            return Err(std::io::Error::other("unsafe tmux temporary directory"));
+        }
+    }
+    let root = temp.join(format!("team-agent-spawn-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(&root)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o777 != 0o700 {
+        return Err(std::io::Error::other("unsafe tmux launch directory"));
+    }
+    Ok(root)
+}
+
+#[cfg(unix)]
+fn select_root(candidate: &Path, fallback: &Path) -> std::io::Result<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    checked_root(candidate, uid).or_else(|_| checked_root(fallback, uid))
+}
+
 fn private_file() -> std::io::Result<(PrivateFile, std::fs::File)> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-        // The command remains visible after unlink. Other accounts must not
-        // be able to recreate its path if someone replays the tmux command.
-        let uid = unsafe { libc::geteuid() };
-        let temp = std::env::temp_dir().canonicalize()?;
-        // The pane sources this absolute path later. A safe leaf alone isn't
-        // enough if another account can replace one of its parent directories.
-        for ancestor in temp.ancestors() {
-            let meta = std::fs::symlink_metadata(ancestor)?;
-            if !meta.is_dir()
-                || (meta.uid() != uid && meta.uid() != 0)
-                || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
-            {
-                return Err(std::io::Error::other("unsafe tmux temporary directory"));
-            }
-        }
-        if temp.to_str().is_none() {
-            return Err(std::io::Error::other("tmux temporary path is not UTF-8"));
-        }
-        let root = temp.join(format!("team-agent-spawn-{uid}"));
-        match std::fs::DirBuilder::new().mode(0o700).create(&root) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-            Err(e) => return Err(e),
-        }
-        let meta = std::fs::symlink_metadata(&root)?;
-        if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
-            return Err(std::io::Error::other("unsafe tmux launch directory"));
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = select_root(&std::env::temp_dir(), Path::new("/tmp"))?;
         let nonce = crate::station::seat_store::random_instance().map_err(std::io::Error::other)?;
         let path = root.join(nonce);
         sweep(root);
@@ -210,13 +222,41 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    #[test]
+    fn selects_only_roots_with_a_trusted_directory_chain() -> std::io::Result<()> {
+        use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
+        let uid = unsafe { libc::geteuid() };
+        let base = std::env::temp_dir().canonicalize()?.join(format!(
+            "ta-root-test-{}",
+            crate::station::seat_store::random_instance().map_err(std::io::Error::other)?
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&base)?;
+        let secure = base.join("safe 'temp' directory");
+        std::fs::create_dir(&secure)?;
+        let alias = base.join("alias");
+        symlink(&secure, &alias)?;
+        let leaf = format!("team-agent-spawn-{uid}");
+        assert_eq!(select_root(&alias, &base)?, secure.join(&leaf));
+        let unsafe_parent = base.join("untrusted");
+        std::fs::create_dir(&unsafe_parent)?;
+        std::fs::set_permissions(&unsafe_parent, std::fs::Permissions::from_mode(0o777))?;
+        let candidate = unsafe_parent.join("nested");
+        std::fs::create_dir(&candidate)?;
+        assert_eq!(select_root(&candidate, &alias)?, secure.join(&leaf));
+        assert!(select_root(&candidate, &unsafe_parent).is_err());
+        assert!(!candidate.join(&leaf).exists());
+        std::fs::remove_dir_all(base)
+    }
+
     // Extract only the generated nonce; the shell-quoted temp path may contain spaces.
     fn launch_file(cmd: &str) -> PathBuf {
         let dir = format!("team-agent-spawn-{}", unsafe { libc::geteuid() });
         let (_, suffix) = cmd.split_once(&format!("{dir}/")).unwrap();
         let nonce = &suffix[..32];
         assert!(nonce.bytes().all(|b| b.is_ascii_hexdigit()));
-        std::env::temp_dir().join(dir).join(nonce)
+        select_root(&std::env::temp_dir(), Path::new("/tmp"))
+            .unwrap()
+            .join(nonce)
     }
 
     #[test]
