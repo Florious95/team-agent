@@ -78,6 +78,7 @@ mod harvest2_a_batch_red;
 mod host_cotenant_death_p0_contract;
 mod issue238_codex_effort_contract;
 mod issue432_reset_role_reload_red;
+mod issue434_team_restart_role_config_red;
 mod lane_ops;
 mod launch_spawn;
 mod lifecycle_lock;
