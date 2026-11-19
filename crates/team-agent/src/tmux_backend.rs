@@ -67,6 +67,8 @@ use crate::transport::{
 };
 
 mod native_input;
+mod spawn_env;
+use spawn_env::{with_command, Invocation};
 
 pub const PANE_BINDING_NONCE_METADATA_KEY: &str = "TEAM_AGENT_PANE_BINDING_NONCE";
 pub(crate) const KEEPALIVE_WINDOW_NAME: &str = "[team-agent keepalive]";
@@ -1186,8 +1188,8 @@ impl TmuxBackend {
         env_unset: &[String],
         first: bool,
     ) -> Result<SpawnResult, TransportError> {
-        let command = shell_command(argv, cwd, env, env_unset);
-        self.spawn_with_command(session, window, &command, first)
+        with_command(Invocation::Exec, argv, cwd, env, env_unset, |command|
+            self.spawn_with_command(session, window, command, first))
     }
 
     /// 0.4.x (CR C-2): spawn variant that takes a pre-built shell command
@@ -1301,7 +1303,12 @@ impl TmuxBackend {
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
-        let command = shell_command(argv, cwd, env, env_unset);
+        with_command(Invocation::Exec, argv, cwd, env, env_unset, |cmd|
+            self.spawn_split_with_command(session, window, cmd))
+    }
+
+    fn spawn_split_with_command(&self, session: &SessionName, window: &WindowName, command: &str)
+        -> Result<SpawnResult, TransportError> {
         let target = format!("{}:{}", session.as_str(), window.as_str());
         // E53 (0.3.26, adaptive layout same-session tabs): `-d` prevents the
         // new split pane from stealing focus from the leader's active pane.
@@ -1320,7 +1327,7 @@ impl TmuxBackend {
             "#{pane_id}".to_string(),
             "sh".to_string(),
             "-lc".to_string(),
-            command,
+            command.to_string(),
         ];
         self.validate_spawn_command(&split_argv, "tmux.split-window", session, window)?;
         let output = self.run_spawn(&split_argv)?;
@@ -1491,11 +1498,17 @@ thread_local! {
 
 
 
-fn shell_command(
+#[cfg(test)]
+fn shell_command(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, env_unset: &[String]) -> String {
+    shell_command_with_exec(argv, cwd, env, env_unset, "exec")
+}
+
+fn shell_command_with_exec(
     argv: &[String],
     cwd: &Path,
     env: &BTreeMap<String, String>,
     env_unset: &[String],
+    dispatch: &str,
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
@@ -1527,7 +1540,7 @@ fn shell_command(
         parts.push(format!("{key}={}", shell_quote(value)));
     }
     append_caller_context_assignments(&mut parts, caller_provider);
-    parts.push("exec".to_string());
+    parts.push(dispatch.to_string());
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
     parts.join(" ")
 }
@@ -1901,8 +1914,8 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        let command = worker_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
-        self.spawn_with_command(session, window, &command, true)
+        with_command(Invocation::Worker(provider_label), argv, cwd, env, env_unset, |command|
+            self.spawn_with_command(session, window, command, true))
     }
 
     fn spawn_into_with_worker_shell_wrapper(
@@ -1915,8 +1928,8 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        let command = worker_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
-        self.spawn_with_command(session, window, &command, false)
+        with_command(Invocation::Worker(provider_label), argv, cwd, env, env_unset, |command|
+            self.spawn_with_command(session, window, command, false))
     }
 
     /// 0.4.x (CR C-2): TmuxBackend override of the leader-shell-wrapper
@@ -1933,8 +1946,8 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        let command = leader_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
-        self.spawn_with_command(session, window, &command, true)
+        with_command(Invocation::Leader(provider_label), argv, cwd, env, env_unset, |command|
+            self.spawn_with_command(session, window, command, true))
     }
 
     fn spawn_into_with_leader_shell_wrapper(
@@ -1947,8 +1960,8 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        let command = leader_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
-        self.spawn_with_command(session, window, &command, false)
+        with_command(Invocation::Leader(provider_label), argv, cwd, env, env_unset, |command|
+            self.spawn_with_command(session, window, command, false))
     }
 
 
