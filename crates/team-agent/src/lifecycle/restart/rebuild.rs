@@ -684,11 +684,12 @@ fn restart_with_selected_team_and_transport(
     let parallel_safe = !plan_decisions
         .iter()
         .any(|decision| matches!(decision.restart_mode, StartMode::Resumed));
+    let roles = RestartRoles { spec: &spec, team_dir: &selected.team_dir };
     let parallel_outcomes = if parallel_safe {
         run_bounded_parallel_worker_spawns(
             &plan_decisions,
             &selected.run_workspace,
-            spec_workspace,
+            roles,
             &selected.team_key,
             &session_name,
             transport,
@@ -716,20 +717,6 @@ fn restart_with_selected_team_and_transport(
         if let Some(parallel_result) = parallel_result {
             match parallel_result {
                 Ok(pspawn) => {
-                    let raw_agent = state
-                        .get("agents")
-                        .and_then(|v| v.get(decision.agent_id.as_str()))
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-                    let rehydrated = rehydrate_agent_command_context_from_spec(
-                        spec_workspace,
-                        &decision.agent_id,
-                        &raw_agent,
-                    );
-                    let launched_bypass = matches!(
-                        rehydrated.get("dangerously_skip_permissions"),
-                        Some(serde_json::Value::Bool(true))
-                    );
                     apply_marked_respawn(
                         &selected.run_workspace,
                         &selected.team_key,
@@ -743,7 +730,7 @@ fn restart_with_selected_team_and_transport(
                         &mut successful_agents,
                         &mut failed_agents,
                         &mut fatal_resume_failure,
-                        launched_bypass,
+                        roles,
                     );
                 }
                 Err(error) => {
@@ -768,7 +755,7 @@ fn restart_with_selected_team_and_transport(
         if fatal_resume_failure {
             continue;
         }
-        let Some(raw_agent) = state
+        let Some(mut agent) = state
             .get("agents")
             .and_then(|v| v.get(decision.agent_id.as_str()))
             .cloned()
@@ -784,11 +771,9 @@ fn restart_with_selected_team_and_transport(
             failed_agents.push(restart_failed_agent(decision, "spawn", error));
             continue;
         };
-        let agent = rehydrate_agent_command_context_from_spec(
-            spec_workspace,
-            &decision.agent_id,
-            &raw_agent,
-        );
+        if let Some(row) = agent.as_object_mut() {
+            roles.apply(&decision.agent_id, row);
+        }
         if endpoint_convergence_fake_harness_enabled(&state) && is_fake_model_harness_agent(&agent)
         {
             write_fake_harness_spawn_argv_event(
@@ -911,17 +896,13 @@ fn restart_with_selected_team_and_transport(
             }
         };
         let verify_start = std::time::Instant::now();
-        let launched_bypass = matches!(
-            agent.get("dangerously_skip_permissions"),
-            Some(serde_json::Value::Bool(true))
-        );
         if let Err(error) = mark_agent_respawned(
             &mut state,
             &decision.agent_id,
             decision.restart_mode,
             &spawn,
             transport,
-            launched_bypass,
+            roles,
         )
         {
             let error = error.to_string();
@@ -2342,13 +2323,28 @@ fn apply_session_repair_fields(
     target.remove("attribution_ambiguous");
 }
 
+/// One rebuilt spec supplies both worker argv and the row published on respawn.
+#[derive(Clone, Copy)]
+struct RestartRoles<'a> {
+    spec: &'a YamlValue,
+    team_dir: &'a Path,
+}
+
+impl RestartRoles<'_> {
+    fn apply(self, id: &AgentId, row: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(compiled) = find_spec_agent(self.spec, id) {
+            crate::lifecycle::role_config::apply_launch_fields(row, self.team_dir, compiled);
+        }
+    }
+}
+
 fn mark_agent_respawned(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
     restart_mode: StartMode,
     spawn: &SpawnedAgentWindow,
     transport: &dyn crate::transport::Transport,
-    launched_bypass: bool,
+    roles: RestartRoles<'_>,
 ) -> Result<(), LifecycleError> {
     let Some(agent) = state
         .get_mut("agents")
@@ -2367,6 +2363,7 @@ fn mark_agent_respawned(
     // fields so stale `activity=working` / `worker_state=BUSY` do not
     // survive into the fresh cohort.
     clear_agent_runtime_activity_observation(agent);
+    roles.apply(agent_id, agent);
     agent.insert("status".to_string(), serde_json::json!("running"));
     agent.insert(
         "window".to_string(),
@@ -2478,6 +2475,8 @@ fn mark_agent_respawned(
         .unwrap_or(crate::model::enums::Provider::Codex);
     crate::lifecycle::launch::persist_effective_approval_policy_from_agent(agent, agent_provider);
     // 0.5.66 bypass 单源 §2.6:fresh spawn(restart)记录运行面 bypass 值。
+    let launched_bypass = agent.get("dangerously_skip_permissions")
+        .and_then(serde_json::Value::as_bool).unwrap_or(false);
     agent.insert(
         "as_launched_dangerously_skip_permissions".to_string(),
         serde_json::json!(launched_bypass),
@@ -2896,7 +2895,7 @@ impl Clone for ParallelSpawnResult {
 fn run_bounded_parallel_worker_spawns(
     plan_decisions: &[RestartedAgent],
     run_workspace: &Path,
-    spec_workspace: &Path,
+    roles: RestartRoles<'_>,
     team_key: &str,
     session_name: &SessionName,
     transport: &(dyn crate::transport::Transport),
@@ -2921,7 +2920,7 @@ fn run_bounded_parallel_worker_spawns(
     }
     let mut inputs: Vec<SpawnInput> = Vec::with_capacity(plan_decisions.len());
     for (index, decision) in plan_decisions.iter().enumerate() {
-        let Some(raw_agent) = state
+        let Some(mut agent) = state
             .get("agents")
             .and_then(|v| v.get(decision.agent_id.as_str()))
             .cloned()
@@ -2930,11 +2929,9 @@ fn run_bounded_parallel_worker_spawns(
             // and skips. Leave outcomes[index] = None so it takes that path.
             continue;
         };
-        let agent = rehydrate_agent_command_context_from_spec(
-            spec_workspace,
-            &decision.agent_id,
-            &raw_agent,
-        );
+        if let Some(row) = agent.as_object_mut() {
+            roles.apply(&decision.agent_id, row);
+        }
         if endpoint_convergence_fake_harness_enabled(state) && is_fake_model_harness_agent(&agent) {
             // Fake harness respawn is a synchronous state mutation; keep it
             // serial so the pre-0.5.38 semantics are preserved.
@@ -3113,7 +3110,7 @@ fn apply_marked_respawn(
     successful_agents: &mut Vec<RestartedAgent>,
     failed_agents: &mut Vec<RestartFailedAgent>,
     fatal_resume_failure: &mut bool,
-    launched_bypass: bool,
+    roles: RestartRoles<'_>,
 ) {
     let verify_start = std::time::Instant::now();
     if let Err(error) = mark_agent_respawned(
@@ -3122,7 +3119,7 @@ fn apply_marked_respawn(
         decision.restart_mode,
         spawn,
         transport,
-        launched_bypass,
+        roles,
     )
     {
         let error = error.to_string();
@@ -4102,7 +4099,7 @@ tasks:
             StartMode::Resumed,
             &spawn,
             &RespawnEpochTransport,
-            false,
+            RestartRoles { spec: &YamlValue::Null, team_dir: Path::new(".") },
         )
         .expect("mark respawned");
 

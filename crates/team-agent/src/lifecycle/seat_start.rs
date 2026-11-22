@@ -275,7 +275,7 @@ fn known_provider(provider: &str) -> bool {
 fn provider(agent: &Yaml) -> &str {
     agent.get("provider").and_then(Yaml::as_str).unwrap_or("")
 }
-fn same_provider(left: &str, right: &str) -> bool {
+pub(super) fn same_provider(left: &str, right: &str) -> bool {
     if let (Some(left), Some(right)) = (
         crate::provider::wire::parse_provider(left),
         crate::provider::wire::parse_provider(right),
@@ -692,8 +692,12 @@ pub(crate) fn preflight(
                 .is_some_and(|path| path.is_file())
             {
                 let spec = role_config::read_spec(selected)?;
-                crate::model::spec::validate_spec(&spec, &selected.run_workspace)
-                    .map_err(rejected)?;
+                crate::model::spec::validate_spec_with_roster(
+                    &spec,
+                    &selected.run_workspace,
+                    crate::model::spec::RosterKind::Persisted,
+                )
+                .map_err(rejected)?;
             }
             let config = crate::contract_runtime::config::read_start_declaration(
                 &selected.run_workspace,
