@@ -1080,15 +1080,14 @@ fn execute_managed_leader_plan_attempt(
     } else { None };
     #[cfg(not(unix))]
     let pipe: Option<WrapperPipe> = None;
-    let spawned = ensure_watched_managed_leader_pane(
-        &transport,
-        session,
-        window,
-        plan,
-        workspace,
-        session_existed_before,
-        pipe.as_ref().map(|p| p.path.as_path()),
-    )?;
+    let spawned = if let Some(pipe) = pipe.as_ref() {
+        transport.spawn_managed_leader(session, window, &plan.provider_argv, workspace,
+            &plan.leader_env, &leader_env_unset_for_provider(plan.provider),
+            provider_command_name(plan.provider), !session_existed_before, Some(&pipe.path))
+            .map_err(|error| prompt_aware_spawn_error(plan, error))?
+    } else {
+        ensure_managed_leader_pane(&transport, session, window, plan, workspace, session_existed_before)?
+    };
     // A-55 (window rename race): tmux defaults `allow-rename` + `automatic-rename`
     // ON, so the pane's shell wrapper can print an OSC title-set escape during
     // init (zshrc/starship/PROMPT_COMMAND) and rename the window away from WINDOW
@@ -1222,21 +1221,19 @@ fn managed_leader_attach_recovery_plan(
     Ok(retry_plan)
 }
 
-#[cfg(test)]
 fn ensure_managed_leader_pane(
-    transport: &TmuxBackend, session: &SessionName, window: &WindowName,
+    transport: &dyn Transport, session: &SessionName, window: &WindowName,
     plan: &LeaderStartPlan, workspace: &Path, session_existed_before: bool,
 ) -> Result<SpawnResult, LeaderError> {
-    ensure_watched_managed_leader_pane(transport, session, window, plan, workspace, session_existed_before, None)
-}
-
-fn ensure_watched_managed_leader_pane(
-    transport: &TmuxBackend, session: &SessionName, window: &WindowName,
-    plan: &LeaderStartPlan, workspace: &Path, session_existed_before: bool, exit_pipe: Option<&Path>,
-) -> Result<SpawnResult, LeaderError> {
-    transport.spawn_managed_leader(session, window, &plan.provider_argv, workspace, &plan.leader_env,
-        &leader_env_unset_for_provider(plan.provider), provider_command_name(plan.provider),
-        !session_existed_before, exit_pipe).map_err(|error| prompt_aware_spawn_error(plan, error))
+    let unset = leader_env_unset_for_provider(plan.provider);
+    let label = provider_command_name(plan.provider);
+    if session_existed_before {
+        transport.spawn_into_with_leader_shell_wrapper(session, window, &plan.provider_argv,
+            workspace, &plan.leader_env, &unset, label)
+    } else {
+        transport.spawn_first_with_leader_shell_wrapper(session, window, &plan.provider_argv,
+            workspace, &plan.leader_env, &unset, label)
+    }.map_err(|error| prompt_aware_spawn_error(plan, error))
 }
 
 fn prompt_aware_spawn_error(plan: &LeaderStartPlan, error: TransportError) -> LeaderError {
