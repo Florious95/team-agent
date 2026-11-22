@@ -9,7 +9,7 @@ use super::super::helpers::{object_fields, tool_runtime_error};
 use super::super::{ToolOk, ToolResult};
 
 pub(crate) fn get_team_status(workspace: &Path, owner_team: Option<&TeamKey>) -> ToolResult {
-    let selected = crate::state::selector::resolve_active_team(
+    let selected = crate::state::selector::resolve_active_team_readonly(
         workspace,
         owner_team.map(TeamKey::as_str),
         crate::state::selector::SelectorMode::RuntimeOnly,

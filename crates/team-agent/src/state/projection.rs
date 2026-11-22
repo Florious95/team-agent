@@ -556,6 +556,15 @@ fn resolve_runtime_team_scope_loaded(
     state: Value,
     team: Option<&str>,
 ) -> Result<TeamScopeResolution, StateError> {
+    // An exact key wins even for a terminal team. Do not deep-copy every
+    // live sibling merely to discover that this request already named its row.
+    if let Some(key) = team.filter(|key| !key.is_empty() && state.get("teams")
+        .and_then(Value::as_object).is_some_and(|rows| rows.contains_key(*key))) {
+        return Ok(TeamScopeResolution {
+            canonical_team_key: key.to_owned(),
+            state: project_top_level_view(&state, key),
+        });
+    }
     let alive = team_state_candidates(&state);
     // Python `if team:` —— 空串 falsy,等同无 team(对抗 P1:此前 Some("") 误入 team 分支,空
     // team_dir 匹配致歧义/未找到错误串漂移)。
@@ -565,9 +574,7 @@ fn resolve_runtime_team_scope_loaded(
         // selector resolution validates the active team against the alive/terminal
         // view, while the lock-held merge cannot depend on that mutable view. A
         // change to either CURRENT_TEAM_ALIAS mapping must evaluate the other.
-        let exact_key = state.get("teams").and_then(Value::as_object)
-            .is_some_and(|teams| teams.contains_key(team));
-        let canonical_request = if !exact_key && team.eq_ignore_ascii_case(CURRENT_TEAM_ALIAS) {
+        let canonical_request = if team.eq_ignore_ascii_case(CURRENT_TEAM_ALIAS) {
             let teams = state.get("teams").and_then(Value::as_object);
             state
                 .get("active_team_key")
@@ -616,7 +623,7 @@ fn resolve_runtime_team_scope_loaded(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if team == active || team == team_state_key(&state) {
-                let mut projection = state.clone();
+                let mut projection = state;
                 match projection.as_object_mut() {
                     Some(o) => {
                         o.insert(

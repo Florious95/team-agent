@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         return Ok(());
     }
-    if matches!(command.as_deref(), Some("mcp-server")) {
+    if matches!(command.as_deref(), Some("mcp-server" | "mcp-tool-once")) {
         let mut workspace = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -58,7 +58,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         let workspace = workspace.unwrap_or(std::env::current_dir()?);
-        team_agent::mcp_server::main(&workspace, &[])?;
+        if command.as_deref() == Some("mcp-tool-once") {
+            std::process::exit(team_agent::mcp_server::tool_once(&workspace)?);
+        } else {
+            team_agent::mcp_server::main(&workspace, &[])?;
+        }
         return Ok(());
     }
     let argv = std::env::args_os()
