@@ -52,10 +52,26 @@ const TASK_STATUS_STRS: &[&str] = &[
     "cancelled",
 ];
 
+/// An initialized team can have no workers after the last seat is removed.
+/// A spec compiled to launch a team still requires at least one worker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RosterKind {
+    Runnable,
+    Persisted,
+}
+
 /// `spec.validate_spec`:basic schema + semantic 校验。失败 → `ModelError::Validation`,
 /// 消息与 Python 字节一致(`team.spec.yaml validation failed:\n- ...`)。
 pub fn validate_spec(spec: &Yaml, base_dir: &Path) -> Result<(), ModelError> {
-    let mut errors = basic_schema_errors(spec);
+    validate_spec_with_roster(spec, base_dir, RosterKind::Runnable)
+}
+
+pub(crate) fn validate_spec_with_roster(
+    spec: &Yaml,
+    base_dir: &Path,
+    roster: RosterKind,
+) -> Result<(), ModelError> {
+    let mut errors = basic_schema_errors(spec, roster);
     errors.extend(semantic_errors(spec, base_dir));
     if errors.is_empty() {
         return Ok(());
@@ -114,7 +130,7 @@ fn check_list_y(value: Option<&Yaml>, path: &str, errors: &mut Vec<String>) {
     }
 }
 
-fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
+fn basic_schema_errors(spec: &Yaml, roster: RosterKind) -> Vec<String> {
     let mut e = Vec::new();
     check_keys_y(Some(spec), "/", ROOT_KEYS, ROOT_KEYS, &mut e);
     if !matches!(spec.get("version"), Some(Yaml::Int(1))) {
@@ -168,7 +184,7 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
         &mut e,
     );
     match spec.get("agents") {
-        Some(Yaml::List(agents)) if !agents.is_empty() => {
+        Some(Yaml::List(agents)) if !agents.is_empty() || roster == RosterKind::Persisted => {
             // 0.5.66 bypass 单源:收集缺/错 `dangerously_skip_permissions` 的角色清单,
             // 循环后一次性报出,满足"缺字段错误消息含每个缺字段的角色 id 清单"硬要求。
             let mut missing_bypass: Vec<String> = Vec::new();
@@ -740,7 +756,7 @@ mod tests {
     const TD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/model/testdata");
 
     fn all_spec_errors(spec: &Yaml) -> Vec<String> {
-        let mut v = basic_schema_errors(spec);
+        let mut v = basic_schema_errors(spec, RosterKind::Runnable);
         v.extend(semantic_errors(spec, Path::new(TD)));
         v
     }

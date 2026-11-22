@@ -1,5 +1,6 @@
 //! Read-only planning; execution remains in the original typed lifecycle ports.
 use super::*;
+use crate::model::spec::{validate_spec_with_roster, RosterKind};
 use crate::model::yaml::{self, Value as Yaml};
 use crate::state::selector::{resolve_active_team_readonly, SelectedTeam, SelectorMode};
 use crate::transport::Transport;
@@ -70,8 +71,8 @@ fn discover(
         .next()
         .ok_or_else(|| usage("missing team source"))
 }
-fn validate_roster(spec: &Yaml, directory: &Path) -> Result<(), CliError> {
-    checked(crate::model::spec::validate_spec(spec, directory))?;
+fn validate_roster(spec: &Yaml, directory: &Path, roster: RosterKind) -> Result<(), CliError> {
+    checked(validate_spec_with_roster(spec, directory, roster))?;
     if let Some(agents) = spec.get("agents").and_then(Yaml::as_list) {
         for agent in agents {
             if let Some(id) = agent.get("id").and_then(Yaml::as_str) {
@@ -591,7 +592,7 @@ fn plan_with_observer(
                             &selected.run_workspace, &selected.team_key, &selected.state,
                         ))?
                     };
-                    validate_roster(&spec, &selected.run_workspace)?;
+                    validate_roster(&spec, &selected.run_workspace, RosterKind::Persisted)?;
                     if existing_spec.is_none() {
                         plan.steps.push(Step::RestoreSpec { workspace: selected.run_workspace.clone(), team: selected.team_key.clone(), compiled: spec });
                     }
@@ -639,7 +640,7 @@ fn plan_with_observer(
         }
         let source = discover(&plan.scope.workspace, explicit, None)?;
         let compiled = checked(crate::compiler::compile_team(&source))?;
-        validate_roster(&compiled, &source)?;
+        validate_roster(&compiled, &source, RosterKind::Runnable)?;
         let create = QuickStartArgs {
             workspace: plan.scope.workspace.clone(),
             agents_dir: source.clone(),
@@ -770,6 +771,7 @@ fn plan_with_observer(
         spec.unwrap_or(&runtime_spec)
             .parent()
             .unwrap_or(&selected.run_workspace),
+        if plan.intent.verb == Verb::Start { RosterKind::Persisted } else { RosterKind::Runnable },
     )?;
     let spec_ids: BTreeSet<String> = spec_value
         .get("agents")
@@ -793,7 +795,7 @@ fn plan_with_observer(
     } else {
         let source = discover(&plan.scope.workspace, None, Some(&selected))?;
         let compiled = checked(crate::compiler::compile_team(&source))?;
-        validate_roster(&compiled, &source)?;
+        validate_roster(&compiled, &source, RosterKind::Runnable)?;
         let mut ids: BTreeSet<String> = rows.keys().cloned().collect();
         if let Some(agents) = compiled.get("agents").and_then(Yaml::as_list) {
             for agent in agents {

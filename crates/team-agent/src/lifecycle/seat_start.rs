@@ -692,8 +692,12 @@ pub(crate) fn preflight(
                 .is_some_and(|path| path.is_file())
             {
                 let spec = role_config::read_spec(selected)?;
-                crate::model::spec::validate_spec(&spec, &selected.run_workspace)
-                    .map_err(rejected)?;
+                crate::model::spec::validate_spec_with_roster(
+                    &spec,
+                    &selected.run_workspace,
+                    crate::model::spec::RosterKind::Persisted,
+                )
+                .map_err(rejected)?;
             }
             let config = crate::contract_runtime::config::read_start_declaration(
                 &selected.run_workspace,
