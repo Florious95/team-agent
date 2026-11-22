@@ -7,7 +7,7 @@ use super::*;
 pub(super) enum Invocation<'a> {
     Exec,
     Worker(&'a str),
-    Leader(&'a str),
+    Leader(&'a str, Option<&'a Path>),
 }
 
 struct PrivateFile(PathBuf, bool);
@@ -144,7 +144,7 @@ pub(super) fn with_command<T>(
     if unset.iter().any(|key| !identifier(key)) {
         return Err(std::io::Error::other("invalid tmux environment key").into());
     }
-    let worker = !matches!(kind, Invocation::Leader(_));
+    let worker = !matches!(kind, Invocation::Leader(..));
     let mut values = env
         .iter()
         .filter(|(key, _)| {
@@ -187,7 +187,7 @@ pub(super) fn with_command<T>(
     // file in its child only, so the tail cannot inherit the provider environment.
     let mut args = Vec::new();
     let wrapped = match (kind, path) {
-        (Invocation::Worker(_) | Invocation::Leader(_), Some(path)) => {
+        (Invocation::Worker(_) | Invocation::Leader(..), Some(path)) => {
             args.extend([
                 "sh".into(),
                 "-c".into(),
@@ -204,9 +204,8 @@ pub(super) fn with_command<T>(
         Invocation::Worker(label) => {
             worker_shell_wrapper_command(wrapped, cwd, &public, unset, label)
         }
-        Invocation::Leader(label) => {
-            leader_shell_wrapper_command(wrapped, cwd, &public, unset, label)
-        }
+        Invocation::Leader(label, None) => leader_shell_wrapper_command(wrapped, cwd, &public, unset, label),
+        Invocation::Leader(label, Some(pipe)) => watched_leader_shell_wrapper(wrapped, cwd, &public, unset, label, Some(pipe)),
     };
     let result = spawn(&cmd)?;
     // Acknowledging pane creation does not imply the login shell is running.

@@ -82,6 +82,8 @@ pub mod owner_bind;
 pub mod provider_attribution;
 pub mod prompt;
 pub mod registry;
+#[cfg(unix)]
+mod attach_events;
 pub mod start;
 pub mod types;
 

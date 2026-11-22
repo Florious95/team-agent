@@ -10,7 +10,10 @@ use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
+use super::attach_events::{Signals, WrapperPipe};
+#[cfg(not(unix))]
+struct WrapperPipe { path: PathBuf }
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -1070,14 +1073,21 @@ fn execute_managed_leader_plan_attempt(
     let session_existed_before = transport.has_session(session).map_err(|error| {
         LeaderError::Start(format!("managed leader session probe failed: {error}"))
     })?;
-    let spawned = ensure_managed_leader_pane(
-        &transport,
-        session,
-        window,
-        plan,
-        workspace,
-        session_existed_before,
-    )?;
+    #[cfg(unix)]
+    let pipe = if plan.argv.iter().any(|s| s == "attach-session")
+        && !(plan.mode == LeaderStartMode::NewTmuxSession && !std::io::stdin().is_terminal()) {
+        Some(WrapperPipe::new(workspace)?)
+    } else { None };
+    #[cfg(not(unix))]
+    let pipe: Option<WrapperPipe> = None;
+    let spawned = if let Some(pipe) = pipe.as_ref() {
+        transport.spawn_managed_leader(session, window, &plan.provider_argv, workspace,
+            &plan.leader_env, &leader_env_unset_for_provider(plan.provider),
+            provider_command_name(plan.provider), !session_existed_before, Some(&pipe.path))
+            .map_err(|error| prompt_aware_spawn_error(plan, error))?
+    } else {
+        ensure_managed_leader_pane(&transport, session, window, plan, workspace, session_existed_before)?
+    };
     // A-55 (window rename race): tmux defaults `allow-rename` + `automatic-rename`
     // ON, so the pane's shell wrapper can print an OSC title-set escape during
     // init (zshrc/starship/PROMPT_COMMAND) and rename the window away from WINDOW
@@ -1120,14 +1130,14 @@ fn execute_managed_leader_plan_attempt(
         &BTreeMap::new(),
         plan,
         workspace,
-        Some(ManagedAttachWatch {
+        Some((ManagedAttachWatch {
             transport: &transport,
             spawned: &spawned,
             session,
             session_existed_before,
             workspace,
             provider_label: provider_command_name(plan.provider),
-        }),
+        }, pipe)),
     ) {
         Ok(process) => process,
         Err(error) => {
@@ -1212,50 +1222,18 @@ fn managed_leader_attach_recovery_plan(
 }
 
 fn ensure_managed_leader_pane(
-    transport: &dyn Transport,
-    session: &SessionName,
-    window: &WindowName,
-    plan: &LeaderStartPlan,
-    workspace: &Path,
-    session_existed_before: bool,
+    transport: &dyn Transport, session: &SessionName, window: &WindowName,
+    plan: &LeaderStartPlan, workspace: &Path, session_existed_before: bool,
 ) -> Result<SpawnResult, LeaderError> {
-    // A-22: a managed launch may reuse an existing provider leader session;
-    // only a newly selected nonce session is absent before this probe.
-    // Reusing the existing session adds one pane; a new session uses the
-    // first-spawn path.
+    let unset = leader_env_unset_for_provider(plan.provider);
+    let label = provider_command_name(plan.provider);
     if session_existed_before {
-        // 0.4.x (CR C-1 + C-2): leader env_unset reuses the worker
-        // provider_env_unsets (single source of truth) + spawn through the
-        // leader shell wrapper so provider exit returns to a shell, not
-        // `[exited]`.
-        let env_unset = leader_env_unset_for_provider(plan.provider);
-        let provider_label = provider_command_name(plan.provider);
-        transport
-            .spawn_into_with_leader_shell_wrapper(
-                session,
-                window,
-                &plan.provider_argv,
-                workspace,
-                &plan.leader_env,
-                &env_unset,
-                provider_label,
-            )
-            .map_err(|error| prompt_aware_spawn_error(plan, error))
+        transport.spawn_into_with_leader_shell_wrapper(session, window, &plan.provider_argv,
+            workspace, &plan.leader_env, &unset, label)
     } else {
-        let env_unset = leader_env_unset_for_provider(plan.provider);
-        let provider_label = provider_command_name(plan.provider);
-        transport
-            .spawn_first_with_leader_shell_wrapper(
-                session,
-                window,
-                &plan.provider_argv,
-                workspace,
-                &plan.leader_env,
-                &env_unset,
-                provider_label,
-            )
-            .map_err(|error| prompt_aware_spawn_error(plan, error))
-    }
+        transport.spawn_first_with_leader_shell_wrapper(session, window, &plan.provider_argv,
+            workspace, &plan.leader_env, &unset, label)
+    }.map_err(|error| prompt_aware_spawn_error(plan, error))
 }
 
 fn prompt_aware_spawn_error(plan: &LeaderStartPlan, error: TransportError) -> LeaderError {
@@ -1294,38 +1272,7 @@ struct ManagedAttachWatch<'a> {
     provider_label: &'a str,
 }
 
-#[cfg(unix)]
-static MANAGED_ATTACH_TEARDOWN: AtomicBool = AtomicBool::new(false);
 
-#[cfg(unix)]
-struct ManagedTermGuard {
-    old: libc::sighandler_t,
-}
-
-#[cfg(unix)]
-impl ManagedTermGuard {
-    fn install() -> Self {
-        MANAGED_ATTACH_TEARDOWN.store(false, Ordering::SeqCst);
-        let handler = managed_term_handler as *const () as libc::sighandler_t;
-        let old = unsafe { libc::signal(libc::SIGTERM, handler) };
-        Self { old }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ManagedTermGuard {
-    fn drop(&mut self) {
-        unsafe {
-            libc::signal(libc::SIGTERM, self.old);
-        }
-        MANAGED_ATTACH_TEARDOWN.store(false, Ordering::SeqCst);
-    }
-}
-
-#[cfg(unix)]
-extern "C" fn managed_term_handler(_: libc::c_int) {
-    MANAGED_ATTACH_TEARDOWN.store(true, Ordering::SeqCst);
-}
 
 fn managed_attach_should_teardown(watch: &ManagedAttachWatch<'_>) -> bool {
     matches!(
@@ -1676,7 +1623,7 @@ fn run_leader_argv(
     env: &BTreeMap<String, String>,
     plan: &LeaderStartPlan,
     workspace: &Path,
-    managed_watch: Option<ManagedAttachWatch<'_>>,
+    mut managed_watch: Option<(ManagedAttachWatch<'_>, Option<WrapperPipe>)>,
 ) -> Result<LeaderProcessExit, LeaderError> {
     let Some(program) = argv.first() else {
         return Err(LeaderError::Start(
@@ -1735,6 +1682,11 @@ fn run_leader_argv(
         command.env_remove("TMUX");
         command.env_remove("TMUX_PANE");
     }
+    #[cfg(unix)]
+    let signals = if let Some((watch, Some(pipe))) = managed_watch.as_mut() {
+        if let Some(pid) = watch.spawned.child_pid { pipe.watch_pane(pid)?; }
+        Some(Signals::install()?)
+    } else { None };
     let mut child = command.spawn().map_err(|error| {
         LeaderError::Start(format!(
             "leader launcher spawn failed; startup_stage=spawn; launcher_diagnostics={}; error={error}",
@@ -1794,12 +1746,11 @@ fn run_leader_argv(
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
     }
     #[cfg(unix)]
-    let _term_guard = managed_watch.as_ref().map(|_| ManagedTermGuard::install());
-    let (status, intentional_teardown) = if let Some(watch) = managed_watch.as_ref() {
-        wait_managed_attach_child(&mut child, watch)?
-    } else {
-        (child.wait().map_err(LeaderError::Io)?, false)
-    };
+    let (status, intentional_teardown) = if let (Some((watch, Some(mut pipe))), Some(signals)) = (managed_watch, signals) {
+        wait_managed_attach_child(&mut child, &watch, &mut pipe, &signals)?
+    } else { (child.wait()?, false) };
+    #[cfg(not(unix))]
+    let (status, intentional_teardown) = (child.wait()?, false);
     let stdout = match stdout_reader {
         Some(reader) => match reader.join() {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -1845,61 +1796,27 @@ fn run_leader_argv(
     })
 }
 
+#[cfg(unix)]
 fn wait_managed_attach_child(
-    child: &mut std::process::Child,
-    watch: &ManagedAttachWatch<'_>,
+    child: &mut std::process::Child, watch: &ManagedAttachWatch<'_>, pipe: &mut WrapperPipe, signals: &Signals,
 ) -> Result<(std::process::ExitStatus, bool), LeaderError> {
+    let mut exited = managed_attach_should_teardown(watch);
     loop {
-        if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
-            return Ok((status, false));
+        if let Some(status) = child.try_wait()? {
+            // A client that detached normally leaves a live provider alone. An
+            // attach failure must propagate even if the pane exited concurrently.
+            if !status.success() || (!exited && !signals.terminated() && !managed_attach_should_teardown(watch)) {
+                return Ok((status, false));
+            }
+            exited = true;
         }
-        let signalled = {
-            #[cfg(unix)]
-            {
-                MANAGED_ATTACH_TEARDOWN.load(Ordering::SeqCst)
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        };
-        if signalled || managed_attach_should_teardown(watch) {
-            // `managed_attach_should_teardown` costs a tmux round-trip, and the
-            // attach child can lose that race: it dies BY ITSELF inside the
-            // window (`open terminal failed: not a terminal`, or a client whose
-            // attach was rejected). Re-check before we touch anything. A child
-            // that already failed on its own was never torn down by us, so it
-            // must NOT be reported as an intentional teardown — its non-zero
-            // status has to reach the launcher failure path
-            // (`execute_managed_leader_plan_attempt`), which is what surfaces the
-            // error and drives attach recovery. Only the FAILING self-exit is
-            // diverted: a clean self-exit keeps the pre-existing behaviour
-            // (cleanup + intentional teardown + exit 0), and an explicit signal
-            // teardown stays intentional regardless.
-            if !signalled {
-                if let Some(status) = child.try_wait().map_err(LeaderError::Io)? {
-                    if !status.success() {
-                        return Ok((status, false));
-                    }
-                }
-            }
-            let reason = if signalled {
-                "launcher_signal"
-            } else {
-                "provider_exited"
-            };
-            cleanup_managed_leader_resources(
-                watch.transport,
-                watch.session,
-                watch.spawned,
-                watch.session_existed_before,
-                watch.workspace,
-                reason,
-            );
-            let status = terminate_managed_attach_child(child)?;
-            return Ok((status, true));
+        if exited || signals.terminated() {
+            let reason = if signals.terminated() { "launcher_signal" } else { "provider_exited" };
+            cleanup_managed_leader_resources(watch.transport, watch.session, watch.spawned,
+                watch.session_existed_before, watch.workspace, reason);
+            return Ok((terminate_managed_attach_child(child)?, true));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        exited = signals.wait(pipe)?;
     }
 }
 
@@ -2068,8 +1985,6 @@ fn spawn_managed_provider_startup_prompt_handler(
     pane_id: String,
 ) {
     std::thread::spawn(move || {
-        // Phase 1d Batch 6: factory tmux workspace helper for
-        // grep-visibility. Semantics unchanged.
         let transport = crate::transport_factory::tmux_workspace_transport(&workspace);
         let _ = handle_exec_provider_startup_prompts(
             provider, &workspace, &pane_id, &transport, 30, 0.5,
