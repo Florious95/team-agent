@@ -238,17 +238,22 @@ impl TeamOrchestratorTools {
         if let Some(nested) = args.get("task").or_else(|| args.get("envelope")) {
             self.validate_rpc_scope_args(tool, nested)?;
         }
-        let owner_team = if tool == "send_message" && self.agent_id.as_ref().is_some_and(|id| id.as_str() == "leader") {
-            None
-        } else {
-            self.canonical_owner_team_key()?
-        };
         let requested_team = requested_team_arg(args);
         let requested_scope = requested_scope_arg(args);
         let workspace_override = args.get("workspace").is_some();
         let scope_widens = requested_scope
             .as_deref()
             .is_some_and(|scope| !scope.eq_ignore_ascii_case("team"));
+        // The handler resolves its captured scope before performing any work.
+        // With no request overrides there is nothing additional to compare.
+        if requested_team.is_none() && !workspace_override && !scope_widens {
+            return Ok(());
+        }
+        let owner_team = if tool == "send_message" && self.agent_id.as_ref().is_some_and(|id| id.as_str() == "leader") {
+            None
+        } else {
+            self.canonical_owner_team_key()?
+        };
         let team_widens = match (owner_team.as_ref(), requested_team.as_deref()) {
             (_, None) => false,
             (Some(owner), Some(requested)) => {
@@ -440,13 +445,14 @@ impl TeamOrchestratorTools {
         // through state::projection::resolve_owner_team_id to the runtime team key.
         // Unresolved/ambiguous owner scope emits mcp.scope_refused; never fallback
         // to active/top-level/sibling teams in a multi-team state.
+        let state = crate::direct_delivery::owner_scope_snapshot(&self.workspace,
+            self.owner_team_id.as_ref().map(TeamKey::as_str))
+            .map_err(|error| self.scope_unverifiable(&error))?;
         let Some(owner_team_id) = &self.owner_team_id else {
             // swallow batch 4 C5-C8 (MUST-16 fail-closed): the runtime state is the
             // scope truth source — when it cannot be read, the gate REFUSES with a
             // structured transient scope_unverifiable instead of silently treating
             // the workspace as legacy single-team (silent privilege widening).
-            let state = load_runtime_state(&self.workspace)
-                .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
             if state
                 .get("teams")
                 .and_then(Value::as_object)
@@ -458,8 +464,6 @@ impl TeamOrchestratorTools {
             }
             return Ok(None);
         };
-        let state = load_runtime_state(&self.workspace)
-            .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
         match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
             Some(team) => Ok(Some(TeamKey::new(team))),
             None => Err(self.scope_refused("owner team could not be resolved")),

@@ -163,19 +163,25 @@ pub fn main(workspace: &Path, argv: &[String]) -> Result<ServerRunReport, McpErr
     let _ = argv;
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    run_stdio_loop(workspace, stdin.lock(), stdout.lock())
+    serve(workspace, stdin.lock(), stdout.lock(), Some(std::env::current_exe()?))
 }
 
-fn run_stdio_loop<R: BufRead, W: Write>(
+#[cfg(test)]
+fn run_stdio_loop<R: BufRead, W: Write>(workspace: &Path, reader: R, writer: W) -> Result<ServerRunReport, McpError> {
+    serve(workspace, reader, writer, None)
+}
+
+fn serve<R: BufRead, W: Write>(
     workspace: &Path,
     reader: R,
     mut writer: W,
+    worker: Option<std::path::PathBuf>,
 ) -> Result<ServerRunReport, McpError> {
     let tools = TeamOrchestratorTools::new(workspace);
     let mut report = ServerRunReport::default();
     let marker = McpServerLifecycleMarker::from_env(workspace);
     marker.write_started();
-    let result = run_stdio_loop_inner(&tools, reader, &mut writer, &mut report, &marker);
+    let result = run_session(&tools, reader, &mut writer, &mut report, &marker, worker.as_deref());
     match &result {
         Ok(_) => marker.write_exit("stdin_eof", None),
         Err(error) => marker.write_exit("fatal_error", Some(&error.to_string())),
@@ -183,17 +189,59 @@ fn run_stdio_loop<R: BufRead, W: Write>(
     result
 }
 
-fn run_stdio_loop_inner<R: BufRead, W: Write>(
+#[cfg(test)]
+fn run_stdio_loop_inner<R: BufRead, W: Write>(tools: &TeamOrchestratorTools, reader: R, writer: &mut W,
+    report: &mut ServerRunReport, marker: &McpServerLifecycleMarker) -> Result<ServerRunReport, McpError> {
+    run_session(tools, reader, writer, report, marker, None)
+}
+
+fn run_session<R: BufRead, W: Write>(
     tools: &TeamOrchestratorTools,
     reader: R,
     writer: &mut W,
     report: &mut ServerRunReport,
     marker: &McpServerLifecycleMarker,
+    worker: Option<&Path>,
 ) -> Result<ServerRunReport, McpError> {
     let mut initialized = false;
+    let mut frame_buf = Vec::new();
     for line in reader.lines() {
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
+        // Only protocol control and lifecycle receipts live for the session.
+        // Publish a business response only once the worker has exited successfully.
+        if let Some(exe) = worker {
+            #[derive(serde::Deserialize)]
+            struct Header { jsonrpc: Option<String>, method: Option<String> }
+            let local = serde_json::from_str::<Header>(&line).is_ok_and(|h| {
+                h.jsonrpc.as_deref() == Some("2.0") && h.method.as_deref() != Some("tools/call")
+            });
+            if !local {
+                let error_frame = match run_call(exe, &marker.workspace, &line, &mut frame_buf) {
+                    Ok(error_frame) => {
+                        writer.write_all(&frame_buf)?;
+                        error_frame
+                    }
+                    Err(_) => {
+                        // A tool may already have committed a send: never retry the call.
+                        #[derive(serde::Deserialize)]
+                        struct RequestId { id: RpcId }
+                        let id = serde_json::from_str::<RequestId>(&line).map_or(RpcId::Null, |r| r.id);
+                        let error = error_response_value(id, -32603, "MCP tool worker failed".into());
+                        serde_json::to_writer(&mut *writer, &error)?;
+                        writer.write_all(b"\n")?;
+                        true
+                    }
+                };
+                writer.flush()?;
+                frame_buf.clear();
+                // Reuse normal response capacity, never retain an outlier.
+                if frame_buf.capacity() > 512 * 1024 { frame_buf = Vec::new(); }
+                if error_frame { report.error_frames = report.error_frames.saturating_add(1); }
+                report.responses_written = report.responses_written.saturating_add(1);
+                continue;
+            }
+        }
         let (frame, response_kind) = handle_stdin_line(tools, &line, report)?;
         if let Some(value) = frame {
             let value = crate::redaction::redact_external_value(&value);
@@ -210,6 +258,44 @@ fn run_stdio_loop_inner<R: BufRead, W: Write>(
     }
     report.clean_eof = true;
     Ok(report.clone())
+}
+
+// Separate a well-formed error response from a worker/transport failure.
+const ERROR_FRAME: i32 = 2;
+
+fn run_call(exe: &Path, workspace: &Path, line: &str, frame: &mut Vec<u8>) -> std::io::Result<bool> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe).arg("mcp-tool-once").arg("--workspace").arg(workspace)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+    let input = child.stdin.take().unwrap().write_all(line.as_bytes());
+    let read = child.stdout.take().unwrap().read_to_end(frame);
+    let status = child.wait()?;
+    input?;
+    read?;
+    let error_frame = match status.code() {
+        Some(0) => false,
+        Some(ERROR_FRAME) => true,
+        _ => return Err(std::io::Error::other(format!("MCP tool worker: {status}"))),
+    };
+    if !frame.ends_with(b"\n") { return Err(std::io::Error::other("incomplete MCP worker frame")); }
+    Ok(error_frame)
+}
+
+/// Single request on stdin. No session lifecycle or independent handshake.
+pub fn tool_once(workspace: &Path) -> Result<i32, McpError> {
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let tools = TeamOrchestratorTools::new(workspace);
+    let mut report = ServerRunReport::default();
+    let (frame, _) = handle_stdin_line(&tools, &line, &mut report)?;
+    if let Some(value) = frame {
+        let mut out = std::io::stdout().lock();
+        serde_json::to_writer(&mut out, &crate::redaction::redact_external_value(&value))?;
+        out.write_all(b"\n")?;
+        out.flush()?;
+    }
+    Ok(if report.error_frames != 0 { ERROR_FRAME } else { 0 })
 }
 
 enum ResponseKind {

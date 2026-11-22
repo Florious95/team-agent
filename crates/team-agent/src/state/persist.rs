@@ -3,7 +3,7 @@
 //! + `runtime.py:_runtime_lock`)。
 //!
 //! 流程(逐条对齐 bug_084_085_contract.md):
-//! 1. 入参 deep-equal `_RUNTIME_STATE_CACHE[path]` → 取锁/os.replace **之前**返回。
+//! 1. An unchanged state may skip save using the last document fingerprint, without retaining its tree.
 //! 2. `_runtime_lock(workspace, "state-save", timeout=2.0)` 串行化(flock;state-save 不发锁事件)。
 //! 3. 原子 `tmp -> rename(tmp, state.json)`;payload = `json.dumps(indent=2, ensure_ascii=False)`(无尾换行)。
 //! 4. EACCES/EPERM/EBUSY/PermissionError → 有界退避重试 delays=[0.05,0.2,0.5](4 次尝试);
@@ -19,16 +19,17 @@
 //! **load 迁移(本 slice 接入)**:`load_runtime_state` 现复刻 Python 全链——
 //! `normalize_agent_session_state`(SESSION_STATE_FIELDS 补 None)→ `_migrate_state_identity`
 //! (`identity::migrate_state_identity`,补 leader_session_uuid)→ `_migrate_active_team_key`
-//! (seed active 指针);任一改动 → `save_runtime_state` 回写。不存在且命中缓存 → 返回缓存 deepcopy。
+//! (seed active 指针);任一改动 → `save_runtime_state` 回写。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::event_log::EventLog;
 use crate::model::paths::runtime_dir;
@@ -68,9 +69,9 @@ const ROSTER_STUB_ALLOWLIST: [&str; 17] = [
     "explicit_stop",
 ];
 
-/// `state.py:_RUNTIME_STATE_CACHE`:进程级 path→state 缓存(deep-equal 早返回)。
-static RUNTIME_STATE_CACHE: LazyLock<Mutex<HashMap<PathBuf, Value>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+// Save deduplication is a hint, not a source of state. Bound it independently
+// of both the document size and the number of workspaces visited.
+static RECENT_DOCUMENTS: Mutex<VecDeque<(PathBuf, [u8; 32])>> = Mutex::new(VecDeque::new());
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 ///
@@ -79,22 +80,24 @@ pub fn runtime_state_path(workspace: &Path) -> PathBuf {
     runtime_dir(workspace).join("state.json")
 }
 
+fn fingerprint(state: &Value) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    serde_json::to_writer(&mut hash, state).expect("serializing a JSON value into a hash cannot fail");
+    hash.finalize().into()
+}
 fn cache_equals(path: &Path, state: &Value) -> bool {
-    RUNTIME_STATE_CACHE
-        .lock()
-        .is_ok_and(|c| c.get(path) == Some(state))
+    let digest = RECENT_DOCUMENTS.lock().ok().and_then(|writes| {
+        writes.iter().find(|(p, _)| p == path).map(|(_, digest)| *digest)
+    });
+    digest.is_some_and(|digest| digest == fingerprint(state))
 }
 fn cache_set(path: &Path, state: &Value) {
-    if let Ok(mut c) = RUNTIME_STATE_CACHE.lock() {
-        c.insert(path.to_path_buf(), state.clone());
+    let digest = fingerprint(state);
+    if let Ok(mut writes) = RECENT_DOCUMENTS.lock() {
+        writes.retain(|(p, _)| p != path);
+        if writes.len() == 64 { writes.pop_front(); }
+        writes.push_back((path.to_owned(), digest));
     }
-}
-/// `_RUNTIME_STATE_CACHE.get(...)` → `copy.deepcopy(cached)`(clone = deepcopy)。
-fn cache_get(path: &Path) -> Option<Value> {
-    RUNTIME_STATE_CACHE
-        .lock()
-        .ok()
-        .and_then(|c| c.get(path).cloned())
 }
 
 fn unique_tmp(path: &Path, suffix: &str) -> PathBuf {
@@ -1882,9 +1885,6 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
         if let Some(projected) = recover_runtime_projection(workspace)? {
             return Ok(projected);
         }
-        if let Some(cached) = cache_get(&path) {
-            return Ok(cached);
-        }
         return Ok(
             json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
         );
@@ -1909,8 +1909,11 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     }
     if changed {
         save_runtime_state(workspace, &state)?;
+    } else {
+        // Keep optimistic no-op saves coherent with the latest read, even if a
+        // different process wrote the document since our last save.
+        cache_set(&path, &state);
     }
-    cache_set(&path, &state);
     Ok(state)
 }
 

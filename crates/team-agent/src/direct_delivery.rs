@@ -34,6 +34,38 @@ pub struct Directory {
 
 /// Read the published JSON snapshot without migrations, locks, SQLite or self-healing writes.
 pub fn snapshot(workspace: &Path) -> Result<Value, String> {
+    read_snapshot(workspace, |bytes| serde_json::from_slice(bytes))
+}
+
+/// Common seat-scope checks only need canonical team keys. Skip rosters, task
+/// payloads and historical data. For an alias, delegate to the full resolver.
+pub(crate) fn owner_scope_snapshot(workspace: &Path, owner: Option<&str>) -> Result<Value, String> {
+    use serde_json::value::RawValue;
+    use std::collections::BTreeMap;
+    read_snapshot(workspace, |bytes| {
+        let Ok(root) = serde_json::from_slice::<BTreeMap<String, &RawValue>>(bytes) else {
+            return serde_json::from_slice(bytes);
+        };
+        let teams = root.get("teams").and_then(|raw|
+            serde_json::from_str::<BTreeMap<String, serde::de::IgnoredAny>>(raw.get()).ok());
+        if let Some(teams) = teams.filter(|m| !m.is_empty()) {
+            if owner.is_some_and(|id| !teams.contains_key(id.trim())) {
+                return serde_json::from_slice(bytes); // legacy aliases live inside the rows
+            }
+            let keys = teams.into_keys().map(|key| (key, Value::Null)).collect();
+            return Ok(json!({"teams": Value::Object(keys)}));
+        }
+        let mut identity = serde_json::Map::new();
+        for key in ["team_key", "active_team_key", "team_dir", "spec_path", "session_name"] {
+            if let Some(value) = root.get(key) {
+                identity.insert(key.into(), serde_json::from_str(value.get())?);
+            }
+        }
+        Ok(Value::Object(identity))
+    })
+}
+
+fn read_snapshot<T>(workspace: &Path, decode: impl FnOnce(&[u8]) -> serde_json::Result<T>) -> Result<T, String> {
     let runtime = workspace.join(".team/runtime/state.json");
     let path = if runtime.exists() {
         runtime
@@ -41,7 +73,7 @@ pub fn snapshot(workspace: &Path) -> Result<Value, String> {
         workspace.join(".team/state.json")
     };
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Presentation lookup only: identify a team led by this terminal without changing scope.
@@ -150,7 +182,9 @@ fn select_directory(workspace: &Path, team: Option<&str>, recipient: Option<&str
     };
     // active_team_key is a projection pointer, not caller authority. Inbox and
     // send share the same alive-team predicate as the read-only status gate.
-    let alive = crate::state::projection::team_state_candidates(&snapshot);
+    let alive: Vec<_> = teams.iter().filter(|(_, state)| {
+        team.is_none() && crate::state::projection::team_is_alive_candidate(state)
+    }).collect();
     // Bare operator recipients are resolved by the current roster, not by a
     // stale launch/default team. Explicit scopes (including worker seats) are
     // never widened, and leader/broadcast still require unambiguous team scope.
@@ -167,7 +201,7 @@ fn select_directory(workspace: &Path, team: Option<&str>, recipient: Option<&str
     if team.is_none() && alive.len() > 1 {
         let mut error = AddressError::new("name_ambiguous",
             "workspace has multiple alive teams; pass --team <key> to choose one");
-        error.candidates = alive.keys().map(|key| json!({"team_key":key,"advisory":true})).collect();
+        error.candidates = alive.iter().map(|(key, _)| json!({"team_key":key,"advisory":true})).collect();
         return Err(error);
     }
     // A stale default pointer cannot make the sole remaining team ambiguous.
