@@ -1117,7 +1117,6 @@ fn execute_managed_leader_plan_attempt(
         plan.provider,
         workspace.to_path_buf(),
         spawned.pane_id.as_str().to_string(),
-        pipe.is_some(),
     );
     if plan.mode == LeaderStartMode::NewTmuxSession && !std::io::stdin().is_terminal() {
         return Ok(LeaderLaunchOutcome {
@@ -1987,15 +1986,11 @@ fn spawn_managed_provider_startup_prompt_handler(
     provider: Provider,
     workspace: PathBuf,
     pane_id: String,
-    attached: bool,
 ) {
     std::thread::spawn(move || {
         let transport = crate::transport_factory::tmux_workspace_transport(&workspace);
-        // At interactive handoff, handle an already-visible prompt once. The
-        // attached operator owns subsequent input; do not probe their live pane.
-        let (checks, interval) = if attached { (1, 0.0) } else { (30, 0.5) };
         let _ = handle_exec_provider_startup_prompts(
-            provider, &workspace, &pane_id, &transport, checks, interval,
+            provider, &workspace, &pane_id, &transport, 30, 0.5,
         );
     });
 }
