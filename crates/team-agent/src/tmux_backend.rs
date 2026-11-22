@@ -1196,6 +1196,13 @@ impl TmuxBackend {
     /// (used by `spawn_first_with_leader_shell_wrapper` /
     /// `spawn_into_with_leader_shell_wrapper` to inject the leader wrapper
     /// shape without going through `shell_command`'s `exec`-only template).
+    pub(crate) fn spawn_managed_leader(&self, session: &SessionName, window: &WindowName,
+        argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, unset: &[String],
+        label: &str, first: bool, exit_pipe: Option<&Path>) -> Result<SpawnResult, TransportError> {
+        with_command(Invocation::Leader(label, exit_pipe), argv, cwd, env, unset, |cmd|
+            self.spawn_with_command(session, window, cmd, first))
+    }
+
     fn spawn_with_command(
         &self,
         session: &SessionName,
@@ -1722,11 +1729,14 @@ pub fn worker_shell_wrapper_command(
 ///   - 退出标记文本必须来自 leader_provider_exit_marker,禁止在此写字面量
 /// ---
 pub fn leader_shell_wrapper_command(
-    argv: &[String],
-    cwd: &Path,
-    env: &BTreeMap<String, String>,
-    env_unset: &[String],
-    provider_label: &str,
+    argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, env_unset: &[String], provider_label: &str,
+) -> String {
+    watched_leader_shell_wrapper(argv, cwd, env, env_unset, provider_label, None)
+}
+
+fn watched_leader_shell_wrapper(
+    argv: &[String], cwd: &Path, env: &BTreeMap<String, String>, env_unset: &[String], provider_label: &str,
+    exit_pipe: Option<&Path>,
 ) -> String {
     let unset_set: std::collections::BTreeSet<&str> =
         env_unset.iter().map(String::as_str).collect();
@@ -1746,6 +1756,12 @@ pub fn leader_shell_wrapper_command(
     parts.push(format!(
         "{{ tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} running >/dev/null 2>&1 || :; }} &&"
     ));
+    // Hold the lifetime pipe in the supervisor, not in the provider or its
+    // descendants. Closing it after the receipt (or shell death) wakes attach.
+    if let Some(path) = exit_pipe {
+        let path = shell_quote(&path.to_string_lossy());
+        parts.push(format!("if [ -p {path} ]; then exec 9<> {path}; printf R >&9; fi &&"));
+    }
     // 3. env exports + provider (NO `exec` so the provider is a child).
     // 0.4.x ordering fix: skip keys present in env_unset so KEY=val does not
     // re-introduce a just-unset variable from the inherited env map.
@@ -1756,12 +1772,15 @@ pub fn leader_shell_wrapper_command(
         parts.push(format!("{key}={}", shell_quote(value)));
     }
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));
+    if exit_pipe.is_some() { parts.push("9>&-".into()); }
     parts.push(";".to_string());
     // 4. exit marker + inert shell tail
     parts.push("rc=$?;".to_string());
     parts.push(format!(
         "tmux -S \"${{TMUX%%,*}}\" set-option -p -t \"$TMUX_PANE\" {PROVIDER_EXIT_STATUS_OPTION} \"$rc\" >/dev/null 2>&1;"
     ));
+    // The exit receipt is committed before the reader can observe EOF.
+    if exit_pipe.is_some() { parts.push("{ printf E >&9; } 2>/dev/null; exec 9>&-;".into()); }
     parts.push("printf".to_string());
     // CR R6: marker text comes from single-source `leader_provider_exit_marker`.
     parts.push(shell_quote(&format!(
@@ -1949,8 +1968,7 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        with_command(Invocation::Leader(provider_label), argv, cwd, env, env_unset, |command|
-            self.spawn_with_command(session, window, command, true))
+        self.spawn_managed_leader(session, window, argv, cwd, env, env_unset, provider_label, true, None)
     }
 
     fn spawn_into_with_leader_shell_wrapper(
@@ -1963,8 +1981,7 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
         provider_label: &str,
     ) -> Result<SpawnResult, TransportError> {
-        with_command(Invocation::Leader(provider_label), argv, cwd, env, env_unset, |command|
-            self.spawn_with_command(session, window, command, false))
+        self.spawn_managed_leader(session, window, argv, cwd, env, env_unset, provider_label, false, None)
     }
 
 
