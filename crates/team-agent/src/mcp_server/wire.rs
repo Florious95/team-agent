@@ -208,8 +208,7 @@ fn run_session<R: BufRead, W: Write>(
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
         // Only protocol control and lifecycle receipts live for the session.
-        // Business responses (including a potentially large status) stream to the
-        // host without constructing a second copy in this process.
+        // Publish a business response only once the worker has exited successfully.
         if let Some(exe) = worker {
             #[derive(serde::Deserialize)]
             struct Header { jsonrpc: Option<String>, method: Option<String> }
@@ -217,7 +216,23 @@ fn run_session<R: BufRead, W: Write>(
                 h.jsonrpc.as_deref() == Some("2.0") && h.method.as_deref() != Some("tools/call")
             });
             if !local {
-                let error_frame = forward_call(exe, &marker.workspace, &line, writer)?;
+                let error_frame = match run_call(exe, &marker.workspace, &line) {
+                    Ok((mut frame, error_frame)) => {
+                        std::io::copy(&mut frame, writer)?;
+                        error_frame
+                    }
+                    Err(_) => {
+                        // A tool may already have committed a send: never retry the call.
+                        #[derive(serde::Deserialize)]
+                        struct RequestId { id: RpcId }
+                        let id = serde_json::from_str::<RequestId>(&line).map_or(RpcId::Null, |r| r.id);
+                        let error = error_response_value(id, -32603, "MCP tool worker failed".into());
+                        serde_json::to_writer(&mut *writer, &error)?;
+                        writer.write_all(b"\n")?;
+                        true
+                    }
+                };
+                writer.flush()?;
                 if error_frame { report.error_frames = report.error_frames.saturating_add(1); }
                 report.responses_written = report.responses_written.saturating_add(1);
                 continue;
@@ -244,22 +259,25 @@ fn run_session<R: BufRead, W: Write>(
 // Separate a well-formed error response from a worker/transport failure.
 const ERROR_FRAME: i32 = 2;
 
-fn forward_call(exe: &Path, workspace: &Path, line: &str, writer: &mut impl Write) -> std::io::Result<bool> {
+fn run_call(exe: &Path, workspace: &Path, line: &str) -> std::io::Result<(std::fs::File, bool)> {
+    use std::io::Seek;
     use std::process::{Command, Stdio};
+    // A crash may follow a partial write. Stage output in a private anonymous
+    // file: no partial frame reaches the host and large results do not grow RSS.
+    let mut frame = tempfile::tempfile()?;
     let mut child = Command::new(exe).arg("mcp-tool-once").arg("--workspace").arg(workspace)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
-    let forwarded = (|| {
-        child.stdin.take().unwrap().write_all(line.as_bytes())?;
-        std::io::copy(&mut child.stdout.take().unwrap(), writer)?;
-        writer.flush()
-    })();
+        .stdin(Stdio::piped()).stdout(frame.try_clone()?).spawn()?;
+    let input = child.stdin.take().unwrap().write_all(line.as_bytes());
     let status = child.wait()?;
-    forwarded?;
-    match status.code() {
-        Some(0) => Ok(false),
-        Some(ERROR_FRAME) => Ok(true),
-        _ => Err(std::io::Error::other(format!("MCP tool worker: {status}"))),
-    }
+    input?;
+    let error_frame = match status.code() {
+        Some(0) => false,
+        Some(ERROR_FRAME) => true,
+        _ => return Err(std::io::Error::other(format!("MCP tool worker: {status}"))),
+    };
+    if frame.metadata()?.len() == 0 { return Err(std::io::Error::other("empty MCP worker frame")); }
+    frame.rewind()?;
+    Ok((frame, error_frame))
 }
 
 /// Single request on stdin. No session lifecycle or independent handshake.
