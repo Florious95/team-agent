@@ -204,6 +204,7 @@ fn run_session<R: BufRead, W: Write>(
     worker: Option<&Path>,
 ) -> Result<ServerRunReport, McpError> {
     let mut initialized = false;
+    let mut frame_buf = Vec::new();
     for line in reader.lines() {
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
@@ -216,9 +217,9 @@ fn run_session<R: BufRead, W: Write>(
                 h.jsonrpc.as_deref() == Some("2.0") && h.method.as_deref() != Some("tools/call")
             });
             if !local {
-                let error_frame = match run_call(exe, &marker.workspace, &line) {
-                    Ok((mut frame, error_frame)) => {
-                        std::io::copy(&mut frame, writer)?;
+                let error_frame = match run_call(exe, &marker.workspace, &line, &mut frame_buf) {
+                    Ok(error_frame) => {
+                        writer.write_all(&frame_buf)?;
                         error_frame
                     }
                     Err(_) => {
@@ -233,6 +234,9 @@ fn run_session<R: BufRead, W: Write>(
                     }
                 };
                 writer.flush()?;
+                frame_buf.clear();
+                // Reuse normal response capacity, never retain an outlier.
+                if frame_buf.capacity() > 512 * 1024 { frame_buf = Vec::new(); }
                 if error_frame { report.error_frames = report.error_frames.saturating_add(1); }
                 report.responses_written = report.responses_written.saturating_add(1);
                 continue;
@@ -259,25 +263,23 @@ fn run_session<R: BufRead, W: Write>(
 // Separate a well-formed error response from a worker/transport failure.
 const ERROR_FRAME: i32 = 2;
 
-fn run_call(exe: &Path, workspace: &Path, line: &str) -> std::io::Result<(std::fs::File, bool)> {
-    use std::io::Seek;
+fn run_call(exe: &Path, workspace: &Path, line: &str, frame: &mut Vec<u8>) -> std::io::Result<bool> {
+    use std::io::Read;
     use std::process::{Command, Stdio};
-    // A crash may follow a partial write. Stage output in a private anonymous
-    // file: no partial frame reaches the host and large results do not grow RSS.
-    let mut frame = tempfile::tempfile()?;
     let mut child = Command::new(exe).arg("mcp-tool-once").arg("--workspace").arg(workspace)
-        .stdin(Stdio::piped()).stdout(frame.try_clone()?).spawn()?;
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
     let input = child.stdin.take().unwrap().write_all(line.as_bytes());
+    let read = child.stdout.take().unwrap().read_to_end(frame);
     let status = child.wait()?;
     input?;
+    read?;
     let error_frame = match status.code() {
         Some(0) => false,
         Some(ERROR_FRAME) => true,
         _ => return Err(std::io::Error::other(format!("MCP tool worker: {status}"))),
     };
-    if frame.metadata()?.len() == 0 { return Err(std::io::Error::other("empty MCP worker frame")); }
-    frame.rewind()?;
-    Ok((frame, error_frame))
+    if !frame.ends_with(b"\n") { return Err(std::io::Error::other("incomplete MCP worker frame")); }
+    Ok(error_frame)
 }
 
 /// Single request on stdin. No session lifecycle or independent handshake.
