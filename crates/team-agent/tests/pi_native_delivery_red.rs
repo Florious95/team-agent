@@ -14,6 +14,8 @@
 //!   T3 busy + human draft + Escape (`agent_settled{aborted:true}`): the message stays held, the editor still holds
 //!      exactly the human draft, nothing is ingested, and the message stays in the durable inbox. Release policy: the
 //!      next non-aborted settle (here: the human submits the draft) dispatches it as its own turn.
+//!   T6 the T3 hold is scoped to messages pending at abort time: after an aborted run has settled and Pi is idle with
+//!      nothing pending, a NEW worker message is delivered like any idle delivery (own turn, accepted:true).
 //!   T4 session replacement (`/new`, `/reload`) before delivery: no stale-handle error surfaces, the message is
 //!      ingested exactly once in the live session as its own turn, and the human draft is intact.
 //!   T5 honest ACK:
@@ -1033,6 +1035,39 @@ fn run_t5_honest_ack(version: &str) {
     rig.finish();
 }
 
+fn run_t6_abort_then_later_idle_delivery(version: &str) {
+    let mut rig = Rig::launch("T6_abort_then_later_idle_delivery", version);
+    let from = rig.events().len();
+    rig.human_prompt_busy("SLOW T6 long answer");
+    rig.key("Escape");
+    assert!(
+        rig.settled_after(from, true, Duration::from_secs(20)),
+        "HARNESS: Escape did not abort the busy run (no agent_settled{{aborted:true}})"
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    let s = rig.snap("idle after abort");
+    assert!(
+        s["idle"] == true && s["editor"] == "" && s["pending"] == false,
+        "HARNESS: leader not idle/empty after abort: {s}"
+    );
+    let tag = format!("T6TAG{}", unique());
+    let reply = rig.worker_send(&Rig::content(&tag), &tag);
+    let ingested = rig.wait_ingested(&tag, Duration::from_secs(20));
+    std::thread::sleep(Duration::from_secs(2));
+    rig.check(
+        ingested,
+        "T6 a message that arrives while Pi is idle after an earlier aborted run must be delivered (the abort hold only covers messages pending at abort time)",
+        format!("not ingested within 20 s; reply={reply}"),
+    );
+    rig.check(
+        reply["accepted"] == true,
+        "T6 that idle delivery must report accepted:true",
+        format!("reply={reply}"),
+    );
+    assert_independent_turn(&mut rig, "T6", &tag, "HUMAN-DRAFT-NONE", None);
+    rig.finish();
+}
+
 fn run_t0_native_mode_guard(version: &str) {
     let mut rig = Rig::launch("T0_native_mode_guard", version);
     let alt = rig.tmux(&["display", "-p", "-t", &rig.pane.clone(), "#{alternate_on}"]);
@@ -1093,4 +1128,5 @@ per_version! {
     t4_session_new => |v| run_t4_session_replacement(v, "/new");
     t4_session_reload => |v| run_t4_session_replacement(v, "/reload");
     t5_honest_ack => run_t5_honest_ack;
+    t6_abort_then_later_idle_delivery => run_t6_abort_then_later_idle_delivery;
 }
