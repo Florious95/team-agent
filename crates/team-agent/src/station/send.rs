@@ -492,6 +492,29 @@ fn send_one(
             return Ok(result);
         }
     };
+    let text = if framing == Framing::Bare { req.content.to_owned() }
+        else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
+    // A Pi leader shares its editor with the operator. Never paste into that editor,
+    // including when the managed extension is absent or its session was replaced.
+    let receiver = directory.state.get("leader_receiver").or_else(|| directory.state.get("leader"));
+    let observe_sender = || {
+        let local = match authority {
+            Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
+                && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
+            _ => String::new(),
+        };
+        crate::provider::session::capture::observe_physical_delivery(
+            &directory.workspace, directory.team.as_deref(), &directory.state, &local, recipient,
+        )
+    };
+    if let Some(receiver) = receiver.filter(|r| recipient == "leader" && (r["provider"] == "pi" || r["dialect"] == "pi")) {
+        if let Err(error) = pi_leader_delivery(directory, receiver, &submission, &stored, &text, &mut result) {
+            result["delivery_error"] = json!(error);
+        } else if result["accepted"] == true {
+            if let Err(error) = observe_sender() { result["session_observation_warning"] = json!(error); }
+        }
+        return Ok(result);
+    }
     result["submission"] = json!(submission.phase);
     if submission.phase != "not_attempted" {
         if framing == Framing::Bare {
@@ -507,8 +530,6 @@ fn send_one(
         result["delivery_error"] = json!(error);
         return Ok(result);
     }
-    let text = if framing == Framing::Bare { req.content.to_owned() }
-        else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
     match directory.send_with_framing(recipient, &text, framing, || {
         if req.envelope.is_none() {
             if let Some(task) = req.task_id {
@@ -527,16 +548,9 @@ fn send_one(
             result["live"] = json!(true);
             result["delivery"] = json!("physical");
             result["submission"] = json!("physical");
-            let observed_sender = match authority {
-                Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
-                    && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
-                _ => String::new(),
-            };
             if framing == Framing::Bare {
                 result["session_binding"] = json!("not_reobserved");
-            } else if let Err(error) = crate::provider::session::capture::observe_physical_delivery(
-                &directory.workspace, directory.team.as_deref(), &directory.state, &observed_sender, recipient,
-            ) {
+            } else if let Err(error) = observe_sender() {
                 result["session_observation_warning"] = json!(error);
             }
             for key in ["pane_id", "dialect"] {
@@ -600,6 +614,48 @@ mod retry_tests {
         let stored = crate::inbox_store::store(&root, "worker", &record).unwrap();
         assert_eq!(Submission::lock(&root, "worker", Some("team"), &stored).unwrap().phase, "unknown");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+// The inbox is authoritative. This private spool is only the handoff to the Pi
+// instance which owns the addressed seat. A timeout is not permission to replay.
+fn pi_leader_delivery(directory: &crate::direct_delivery::Directory, receiver: &Value, submission: &Submission,
+    stored: &crate::inbox_store::StoredRecord, text: &str, result: &mut Value) -> Result<(), String> {
+    let team = directory.team.as_deref().ok_or("pi leader has no team scope")?;
+    let owner = receiver["leader_session_uuid"].as_str().filter(|v| !v.is_empty()).ok_or("pi receiver is not bound; message stored")?;
+    let dir = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&directory.workspace, team, "leader").runtime_root
+        .join(format!("native-{:x}", Sha256::digest(owner.as_bytes())));
+    let key = format!("{:020}-{:x}", stored.reference.seq, Sha256::digest(stored.reference.token().as_bytes()));
+    let id = &stored.record["message_id"];
+    result["submission"] = json!(submission.phase);
+    if submission.phase != "not_attempted" && submission.phase != "native_pending" { return Ok(()); }
+    if !dir.is_dir() { return Err("pi native receiver unavailable; message retained in inbox".into()); }
+    if submission.phase == "not_attempted" {
+        if stored.record["envelope"].is_null() {
+            if let Some(task) = stored.record["task_id"].as_str() {
+                remember_task(directory, "leader", task, id.as_str().ok_or("missing message ID")?)?;
+            }
+        }
+        submission.save("native_pending")?;
+        super::seat_store::write_json(&dir.join(format!("{key}.ready")), &json!({
+            "id":id, "text":text, "epoch":receiver["owner_epoch"], "pane":receiver["pane_id"]
+        }), 512 * 1024)?;
+    }
+    result["submission"] = json!("native_pending");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let ack = dir.join("accepted").join(&key);
+    loop {
+        if let Some(proof) = super::seat_store::read_json(&ack, 4096)? {
+            if proof["id"] != *id || proof["entry"].as_str().is_none() { return Err("invalid pi receipt".into()); }
+            result["accepted"] = json!(true);
+            result["live"] = json!(true);
+            result["status"] = json!(if stored.record["kind"] == "result" { "reported" } else { "sent" });
+            result["submission"] = json!("accepted");
+            result["delivery"] = json!("native");
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline { return Ok(()); }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
