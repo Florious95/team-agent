@@ -654,6 +654,11 @@ fn pi_leader_delivery(directory: &crate::direct_delivery::Directory, receiver: &
             result["delivery"] = json!("native");
             return Ok(());
         }
+        if dir.join(format!("{key}.uncertain")).try_exists().map_err(|e| e.to_string())? {
+            result["submission"] = json!("uncertain");
+            result["retry_allowed"] = json!(false);
+            return Ok(());
+        }
         if std::time::Instant::now() >= deadline { return Ok(()); }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
