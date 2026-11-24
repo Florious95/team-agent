@@ -494,9 +494,10 @@ fn send_one(
     };
     let text = if framing == Framing::Bare { req.content.to_owned() }
         else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
-    // A Pi leader shares its editor with the operator. Never paste into that editor,
-    // including when the managed extension is absent or its session was replaced.
-    let receiver = directory.state.get("leader_receiver").or_else(|| directory.state.get("leader"));
+    // Only a registered Pi receiver owns this native inbox. A legacy station's
+    // `leader` row describes a physical endpoint, not a managed receiver.
+    // Never downgrade a registered receiver to paste if its binding is missing.
+    let receiver = directory.state.get("leader_receiver");
     let observe_sender = || {
         let local = match authority {
             Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
