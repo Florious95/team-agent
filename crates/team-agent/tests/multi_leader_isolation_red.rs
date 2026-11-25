@@ -27,6 +27,8 @@
 //! - D7 (live run #3 finding): a leader's bare lifecycle commands never claim, register or
 //!   unregister a peer team, and never touch its owner, receiver or workers, even after the
 //!   peer leader's provider has exited.
+//!   This also holds after the leader has stopped its own team (its registry entry is gone):
+//!   it never falls back to the top-level peer team for claim, status or start (r23).
 //! - K1: a stored-only send keeps its exit-0 JSON contract and says so in plain text.
 //! - K2: every leader provider gets a per-launch team MCP binding; inherited identity is
 //!   scrubbed.
@@ -1363,5 +1365,68 @@ fn r22_lifecycle_commands_never_claim_or_touch_a_peer_team_whose_leader_exited()
         "D7: the exited peer's leader_receiver must stay unchanged");
     assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
     assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's lifecycle commands must not touch the peer team's worker {}", w2.id);
+    assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
+}
+
+/// Probe p01 on c05c4606 (the r22 fix): once a leader has stopped its own team, its registry
+/// entry is gone, so its caller-team lookup returns nothing. A later bare command from the same
+/// leader pane then fell back to the top-level (peer) team: it evaluated a claim on it, and its
+/// refusal told the caller to run `claim-leader --confirm` against the peer team. Its bare status
+/// listed the peer team's roster.
+#[test]
+fn r23_after_its_own_team_stop_a_leader_never_falls_back_to_the_exited_peer_team() {
+    let rig = Rig::new("r23");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    ok(&rig.start_fake(&l1, "worker", None), "L1 bare start worker");
+    rig.wait_worker_ready(&l1.socket, "current", "worker");
+    // L2 writes last, so its team becomes the top-level projection.
+    ok(&rig.start_fake(&l2, "w2", None), "L2 bare start w2");
+    let w2 = rig.wait_worker_ready(&l2.socket, &t2, "w2");
+    ok(&rig.as_leader(&l1, &["stop", "--json"]), "L1 bare team stop");
+    assert!(wait_until("L1 team panes gone", SETTLE, || rig.agent_pane(&l1.socket, "current", "worker").is_none()),
+        "fixture: L1's bare team stop must stop its own team");
+    rig.kill_provider(&l2);
+    wait_until("L2 observed as exited", SETTLE, || {
+        rig.leaders().1.iter().all(|e| e["pane_id"].as_str() != Some(l2.pane.as_str()) || e["status"] != "LIVE")
+    });
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "M6.3: the exit of L2's provider must not kill its team's worker {}", w2.id);
+    let team_before = rig.state()["teams"][&t2].clone();
+    let registry_before = registry_entries(&rig, &t2);
+    let mark = rig.events().len();
+    // Any mention of the peer team key or the peer leader's uuid means the command resolved to the peer team.
+    let names_peer = |out: &Out| out.all().contains(&t2) || out.all().contains(&l2.uuid());
+
+    let stop = rig.as_leader(&l1, &["stop", "--json"]);
+    assert!(!names_peer(&stop),
+        "D7: after its own team stop, L1's bare `stop` must stay on its own team; it must never resolve to the peer team \
+         {t2} (p01 on c05c4606: owner gate refusal with the peer's team_owner and `claim-leader --confirm`): {stop:?}");
+    let status = rig.as_leader(&l1, &["status", "--json"]);
+    let listed = serde_json::from_str::<Value>(status.stdout.trim()).ok()
+        .and_then(|v| v["nodes"].as_array().cloned()).unwrap_or_default()
+        .iter().filter_map(|n| n["name"].as_str().map(str::to_string)).collect::<BTreeSet<_>>();
+    assert!(!listed.contains("w2") && !names_peer(&status),
+        "D4/D7: after its own team stop, L1's bare `status` must not list the peer team {t2}'s roster: {status:?}");
+    let mut args = vec!["start", "helper"];
+    args.extend_from_slice(FAKE);
+    args.push("--json");
+    let start = rig.as_leader(&l1, &args);
+    assert!(!names_peer(&start),
+        "D7: after its own team stop, L1's bare `start` must never resolve to the peer team {t2}: {start:?}");
+    if !start.refused() {
+        assert_eq!(start.json()["scope"]["team"], json!("current"), "D7: L1's bare start stays on its own team: {}", start.stdout);
+    }
+    std::thread::sleep(Duration::from_secs(2));
+
+    let stray = receiver_events_for(&events_since(&rig, mark), &t2);
+    assert!(stray.is_empty(),
+        "D7: after its own team stop, L1's bare stop/status/start must never evaluate, claim, rebind, register or \
+         unregister the exited peer team {t2}'s leader receiver: {stray:?}");
+    let team_after = rig.state()["teams"][&t2].clone();
+    assert_eq!(team_after["team_owner"], team_before["team_owner"], "D7: the exited peer's team_owner must stay unchanged");
+    assert_eq!(team_after["leader_receiver"], team_before["leader_receiver"], "D7: the exited peer's leader_receiver must stay unchanged");
+    assert!(team_after["agents"].get("helper").is_none(), "D7: L1's start must never admit a seat into the peer team: {}", team_after["agents"]);
+    assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's commands must not touch the peer team's worker {}", w2.id);
     assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
 }
