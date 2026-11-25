@@ -19,7 +19,7 @@
 //! Frozen rules (each test prints every violated rule with its observation):
 //!   T0 GUARD (Pi 1.6.0 and 1.5.2): native fullscreen, no UI-altering argv/env, exactly one `-e` extension (the Team
 //!      MCP `team-mcp.ts`), no other extension source file created, scratch `~/.pi` byte-identical outside
-//!      `agent/sessions`, no project `.pi` created.
+//!      `agent/sessions` (Pi's own auth/models stores and managed fd/rg excepted), no project `.pi` created.
 //!   T1 (1.6.0) idle + human draft with the cursor inside it: the draft and the cursor position are untouched, the
 //!      draft is never submitted, the message is its own user turn, and the reply is `accepted:true`.
 //!   T2 (1.6.0) busy + draft: the reply is `submission:native_pending`. While busy, nothing is in Pi's
@@ -41,6 +41,9 @@
 //!      candidate sends. The send must not fail with "pi native receiver unavailable". It must use physical delivery
 //!      (`live:true`, `delivery:"physical"`, `submission:"physical"`). The SAME running Pi process must ingest it
 //!      exactly once, without restart.
+//!   T9 (1.6.0, amendment) receiver refresh: after the documented `team-agent claim-leader` runs from the leader
+//!      pane (same owner/epoch/pane, new `attached_at`), an idle delivery with a human draft is still
+//!      `accepted:true`, the draft is untouched and never submitted, and the message is its own turn.
 //!
 //! Run (macOS/Linux with tmux, node, npm, git):
 //!   cargo test -p team-agent --test pi_16_delivery_red -- --ignored --test-threads=1
@@ -1074,15 +1077,22 @@ fn run_t0_native_mode_guard(version: &str) {
         "T0 Team Agent must not create any extension source file besides the leader's team-mcp.ts",
         format!("{scripts:?}"),
     );
-    // Pi itself creates its empty credential/model stores on first start (pi-ai AuthStorage/models-store).
+    // Pi itself creates its empty credential/model stores on first start (pi-ai AuthStorage/models-store),
+    // and its tools-manager (`ensureTool`) downloads fd/rg into agent/bin when they are not on PATH.
+    const PI_OWNED: [&str; 4] = [
+        "added agent/auth.json",
+        "added agent/models-store.json",
+        "added agent/bin/fd",
+        "added agent/bin/rg",
+    ];
     let changes: Vec<String> = rig
         .pi_tree_changes()
         .into_iter()
-        .filter(|c| c != "added agent/auth.json" && c != "added agent/models-store.json")
+        .filter(|c| !PI_OWNED.contains(&c.as_str()))
         .collect();
     rig.check(
         changes.is_empty(),
-        "T0 the user's ~/.pi must stay untouched (every existing file byte-identical, settings.json never modified, no new file outside agent/sessions except Pi's own auth.json/models-store.json)",
+        "T0 the user's ~/.pi must stay untouched (every existing file byte-identical, settings.json never modified, no new file outside agent/sessions except Pi's own auth.json/models-store.json and its managed agent/bin/fd, agent/bin/rg)",
         format!("{changes:?}"),
     );
     rig.check(
@@ -1511,6 +1521,86 @@ fn run_t8_preupgrade_leader_physical_fallback(version: &str) {
     rig.finish();
 }
 
+/// T9 (amendment): native delivery must survive a same-owner receiver observation refresh. The documented
+/// recovery command `team-agent claim-leader`, run from the leader pane (here: Pi `!!` user bash, a child of the
+/// leader Pi), rewrites `leader_receiver.attached_at` while owner, epoch and pane stay the same.
+fn run_t9_native_survives_receiver_refresh(version: &str) {
+    let mut rig = Rig::launch("T9_native_survives_receiver_refresh", version, &candidate());
+    let before_tag = format!("T9PRE{}", unique());
+    let reply = rig.worker_send(&Rig::content(&before_tag), &before_tag);
+    rig.check(
+        reply["accepted"] == true,
+        "T9 precondition: an idle delivery before the refresh must report accepted:true",
+        format!("accepted={} reply={reply}", reply["accepted"]),
+    );
+    rig.wait_ingested(&before_tag, Duration::from_secs(20));
+    rig.wait_any_settle();
+    let before = rig.leader_receiver();
+    let out = rig.root.join("claim-leader.out");
+    rig.keys(&format!(
+        "!!team-agent claim-leader > '{}' 2>&1",
+        out.display()
+    ));
+    std::thread::sleep(Duration::from_millis(400));
+    rig.key("Enter");
+    let refreshed = rig.wait(Duration::from_secs(20), |r| {
+        r.leader_receiver()["attached_at"] != before["attached_at"]
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    let after = rig.leader_receiver();
+    let output = std::fs::read_to_string(&out).unwrap_or_default();
+    rig.step(
+        "operator ran claim-leader from the leader pane",
+        json!({"before": before, "after": after, "output": output}),
+    );
+    assert!(
+        refreshed
+            && after["owner_epoch"] == before["owner_epoch"]
+            && after["leader_session_uuid"] == before["leader_session_uuid"]
+            && after["pane_id"] == before["pane_id"],
+        "HARNESS: claim-leader did not refresh the same-owner receiver; before={before} after={after} output:\n{output}"
+    );
+    let s = rig.snap("editor after claim-leader");
+    assert!(
+        s["editor"] == "",
+        "HARNESS: editor not empty after the `!!` command: {s}"
+    );
+    let draft = "HUMAN-DRAFT-T9 typed after claim-leader";
+    rig.type_draft(draft);
+    let tag = format!("T9TAG{}", unique());
+    let reply = rig.worker_send(&Rig::content(&tag), &tag);
+    let ingested = rig.wait_ingested(&tag, Duration::from_secs(20));
+    std::thread::sleep(Duration::from_secs(2));
+    rig.check(
+        ingested,
+        "T9 after the refresh the worker message must reach the Pi session transcript",
+        "not ingested within 20 s",
+    );
+    rig.check(
+        reply["accepted"] == true,
+        "T9 after a same-owner receiver refresh an idle delivery on Pi 1.6 must still report accepted:true (native delivery must not silently degrade)",
+        format!("accepted={} delivery={} reply={reply}", reply["accepted"], reply["delivery"]),
+    );
+    let editor = rig.editor("after delivery");
+    rig.check(
+        editor == draft,
+        "T9 after the refresh the human draft must stay byte-identical",
+        format!("expected {draft:?}, editor={editor:?}"),
+    );
+    let draft_entries: Vec<_> = rig
+        .transcript_users()
+        .into_iter()
+        .filter(|(_, t)| t.contains(DRAFT_MARK))
+        .collect();
+    rig.check(
+        draft_entries.is_empty(),
+        "T9 the human draft (or any part of it) must not be submitted by a delivery",
+        show(&draft_entries),
+    );
+    assert_independent_turn(&mut rig, "T9", &tag, None);
+    rig.finish();
+}
+
 macro_rules! physical {
     ($version:literal, $($name:ident => $body:expr;)*) => {
         $( #[test] #[ignore = "physical: real Pi + tmux; run with --ignored --test-threads=1"] #[serial(pi_16_delivery_red)]
@@ -1530,6 +1620,7 @@ mod pi_1_6_0 {
         t5_honest_ack => run_t5_honest_ack;
         t6_abort_then_later_idle_delivery => run_t6_abort_then_later_idle_delivery;
         t8_preupgrade_leader_physical_fallback => run_t8_preupgrade_leader_physical_fallback;
+        t9_native_survives_receiver_refresh => run_t9_native_survives_receiver_refresh;
     }
 }
 
