@@ -631,7 +631,7 @@ fn pi_native_receiver<'a>(directory: &'a crate::direct_delivery::Directory, reci
     if patch.is_empty() || !patch.bytes().all(|b| b.is_ascii_digit()) || (patch.len() > 1 && patch.starts_with('0'))
         || cap["protocol"] != 1 || cap["owner"] != owner || cap["epoch"].as_u64()? == 0
         || cap["epoch"] != receiver["owner_epoch"] || cap["pane"].as_str()? != receiver["pane_id"].as_str()?
-        || cap["attached"].as_str()? != receiver["attached_at"].as_str()? { return None; }
+        || cap["carrierBirth"].as_str()? != receiver["pane_birth_identity"].as_str()? { return None; }
     // A reused PID isn't the Pi that advertised this capability. Require a
     // live process born before registration, under the original pane carrier.
     use crate::lifecycle::carrier;

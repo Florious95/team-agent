@@ -111,17 +111,21 @@ async function installLeaderDelivery(pi) {
     if (receiver?.leader_session_uuid === owner && receiver.status === "attached" &&
         receiver.pane_id === process.env.TMUX_PANE && receiver.owner_epoch > 0) return receiver;
   }
-  function advertise() {
-    // claim_leader can publish its state just after session_start.
+  function advertise(delay = 200) {
+    // claim_leader can publish its state just after session_start. Back off
+    // while unbound, but still recognize a late claim without restarting Pi.
     try {
       const receiver = activeReceiver();
-      if (!receiver) return;
-      const tmp = `${capability}.${randomUUID()}.tmp`;
-      writeFileSync(tmp, JSON.stringify({protocol:1, version, owner, generation, epoch:receiver.owner_epoch,
-        pane:receiver.pane_id, attached:receiver.attached_at, pid:process.pid}), {flag:"wx", mode:0o600});
-      renameSync(tmp, capability);
-      clearInterval(bindingTimer);
+      if (receiver?.pane_birth_identity) {
+        const tmp = `${capability}.${randomUUID()}.tmp`;
+        writeFileSync(tmp, JSON.stringify({protocol:1, version, owner, generation, epoch:receiver.owner_epoch,
+          pane:receiver.pane_id, carrierBirth:receiver.pane_birth_identity, pid:process.pid}), {flag:"wx", mode:0o600});
+        renameSync(tmp, capability);
+        return;
+      }
     } catch { /* No handshake: sender continues using direct_tmux. */ }
+    bindingTimer = setTimeout(() => advertise(Math.min(30_000, delay * 2)), delay);
+    bindingTimer.unref();
   }
   pi.on("session_start", (_event, context) => {
     if (typeof context.isIdle !== "function" || typeof context.sessionManager?.getSessionFile !== "function") return;
@@ -129,8 +133,6 @@ async function installLeaderDelivery(pi) {
     mkdirSync(accepted, {recursive:true, mode:0o700});
     watcher = watch(dir, (_event, name) => { if (!name || name.endsWith(".ready")) wake(); });
     watcher.unref();
-    bindingTimer = setInterval(advertise, 200);
-    bindingTimer.unref();
     advertise();
     wake();
   });
@@ -149,7 +151,7 @@ async function installLeaderDelivery(pi) {
     setImmediate(async () => { await retire(item); wake(); });
   });
   pi.on("session_shutdown", async () => {
-    clearInterval(bindingTimer);
+    clearTimeout(bindingTimer);
     watcher?.close();
     try { if (JSON.parse(readFileSync(capability, "utf8")).generation === generation) unlinkSync(capability); }
     catch { /* no capability to withdraw */ }
