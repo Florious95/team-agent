@@ -19,7 +19,7 @@
 //! Frozen rules (each test prints every violated rule with its observation):
 //!   T0 GUARD (Pi 1.6.0 and 1.5.2): native fullscreen, no UI-altering argv/env, exactly one `-e` extension (the Team
 //!      MCP `team-mcp.ts`), no other extension source file created, scratch `~/.pi` byte-identical outside
-//!      `agent/sessions`, no project `.pi` created.
+//!      `agent/sessions` (Pi's own auth/models stores and managed fd/rg excepted), no project `.pi` created.
 //!   T1 (1.6.0) idle + human draft with the cursor inside it: the draft and the cursor position are untouched, the
 //!      draft is never submitted, the message is its own user turn, and the reply is `accepted:true`.
 //!   T2 (1.6.0) busy + draft: the reply is `submission:native_pending`. While busy, nothing is in Pi's
@@ -1074,15 +1074,22 @@ fn run_t0_native_mode_guard(version: &str) {
         "T0 Team Agent must not create any extension source file besides the leader's team-mcp.ts",
         format!("{scripts:?}"),
     );
-    // Pi itself creates its empty credential/model stores on first start (pi-ai AuthStorage/models-store).
+    // Pi itself creates its empty credential/model stores on first start (pi-ai AuthStorage/models-store),
+    // and its tools-manager (`ensureTool`) downloads fd/rg into agent/bin when they are not on PATH.
+    const PI_OWNED: [&str; 4] = [
+        "added agent/auth.json",
+        "added agent/models-store.json",
+        "added agent/bin/fd",
+        "added agent/bin/rg",
+    ];
     let changes: Vec<String> = rig
         .pi_tree_changes()
         .into_iter()
-        .filter(|c| c != "added agent/auth.json" && c != "added agent/models-store.json")
+        .filter(|c| !PI_OWNED.contains(&c.as_str()))
         .collect();
     rig.check(
         changes.is_empty(),
-        "T0 the user's ~/.pi must stay untouched (every existing file byte-identical, settings.json never modified, no new file outside agent/sessions except Pi's own auth.json/models-store.json)",
+        "T0 the user's ~/.pi must stay untouched (every existing file byte-identical, settings.json never modified, no new file outside agent/sessions except Pi's own auth.json/models-store.json and its managed agent/bin/fd, agent/bin/rg)",
         format!("{changes:?}"),
     );
     rig.check(
