@@ -512,10 +512,6 @@ fn plan_with_observer(
     let has_state = crate::state::persist::runtime_state_path(&runtime_workspace).is_file();
     if has_state {
         plan.scope.workspace = runtime_workspace;
-        if plan.scope.team.is_none() {
-            plan.intent.team = crate::state::selector::calling_leader_team(&plan.scope.workspace);
-            plan.scope.team = plan.intent.team.clone();
-        }
     }
     if !has_state {
         let runtime = plan.scope.workspace.join(".team/runtime");
