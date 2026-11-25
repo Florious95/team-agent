@@ -1,11 +1,167 @@
 // The Rust materializer prepends teamMcpDefinition and teamMcpReceiptRoot as JSON.
 // No package discovery, private extension events, settings writes or factory calls.
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, createReadStream, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, watch, writeFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// The sender atomically publishes a ready record only after storing the inbox
+// entry. Do not touch the editor or Pi's steer/follow-up queues, even if a run
+// starts between isIdle() and prompt preflight: omitting deliverAs fails closed.
+async function installLeaderDelivery(pi) {
+  const env = teamMcpDefinition.env;
+  const owner = process.env.TEAM_AGENT_LEADER_SESSION_UUID;
+  if (env.TEAM_AGENT_ID !== "leader" || !owner || typeof pi.sendUserMessage !== "function") return;
+  // The extension loader maps this public SDK to the running host, not the
+  // next executable on PATH. Older hosts may not expose this module at all.
+  let version;
+  try { ({ VERSION: version } = await import("@earendil-works/pi-coding-agent")); } catch { return; }
+  if (typeof version !== "string" || !/^1\.6\.(0|[1-9]\d*)$/.test(version)) return;
+  const dir = join(teamMcpReceiptRoot, `native-${createHash("sha256").update(owner).digest("hex")}`);
+  const accepted = join(dir, "accepted");
+  const capability = join(dir, "capability.json"), generation = randomUUID();
+  let watcher, bindingTimer, ctx, current, confirmation, dispatchDeadline;
+  const spoolName = /^\d{20}-[a-f0-9]{64}\.(ready|held)$/;
+  const matches = (text, message) => message?.role === "user" && message.content?.length === 1 && message.content[0].text === text;
+
+  // Verify the native JSONL, not just a message event (Pi may not flush a new
+  // file until its first reply). Only scan bytes appended after submission.
+  async function reconcile(item) {
+    if (!item.file || ctx?.sessionManager.getSessionFile() !== item.file) return false;
+    let stream;
+    try {
+      stream = createReadStream(item.file, { start: item.offset });
+      for await (const line of createInterface({ input: stream, crlfDelay: Infinity })) {
+        let entry;
+        try { entry = JSON.parse(line); } catch { continue; }
+        if (entry.type !== "message" || !entry.id || !matches(item.text, entry.message)) continue;
+        const tmp = join(accepted, `${item.key}.${randomUUID()}.tmp`);
+        writeFileSync(tmp, JSON.stringify({id:item.id, entry:entry.id, session:item.session}), {flag:"wx", mode:0o600});
+        renameSync(tmp, join(accepted, item.key));
+        unlinkSync(join(dir, `${item.key}.claim`));
+        return true;
+      }
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    finally { stream?.destroy(); }
+    return false;
+  }
+
+  function drain() {
+    if (!ctx || current || !ctx.isIdle()) return;
+    const names = readdirSync(dir).filter((f) => spoolName.test(f) && f.endsWith(".ready")).sort();
+    if (!names.length) return;
+    const receiver = activeReceiver();
+    if (!receiver) return;
+    let request;
+    const name = names.find((name) => {
+      request = JSON.parse(readFileSync(join(dir, name), "utf8"));
+      return request.epoch === receiver.owner_epoch && request.pane === receiver.pane_id;
+    });
+    if (!name) return;
+    const session = ctx.sessionManager.getSessionId();
+    const file = ctx.sessionManager.getSessionFile();
+    if (!file) return; // no persistent transcript => no verifiable receipt
+    let offset = 0;
+    try { offset = statSync(file).size; } catch (error) { if (error.code !== "ENOENT") throw error; }
+    const key = name.slice(0, -6);
+    const item = {key, session, file, offset, id:request.id, text:`${request.text}\n\n[Team Agent delivery: ${key}]`};
+    // A crash beyond this point is uncertain. Never replay a claim blindly.
+    renameSync(join(dir, name), join(dir, `${key}.claim`));
+    current = item;
+    // The extension API returns void, including on asynchronous preflight rejection.
+    // A call which never starts a turn will never produce an agent_settled event.
+    dispatchDeadline = setTimeout(async () => {
+      if (current === item && ctx?.isIdle()) { await retire(item); wake(); }
+    }, 5000);
+    dispatchDeadline.unref();
+    try { pi.sendUserMessage(item.text); }
+    catch (error) { abandon(item); setImmediate(wake); throw error; }
+  }
+  function wake() {
+    if (!ctx) return;
+    try { drain(); } catch (error) { console.error(`Pi inbox pending: ${error.code ?? "delivery unavailable"}`); }
+  }
+  function confirm() {
+    const item = current;
+    if (!item) return;
+    return confirmation ??= reconcile(item).then((found) => {
+      if (found && current === item) { clearTimeout(dispatchDeadline); current = undefined; }
+    }).catch((error) => console.error(`Pi inbox confirmation pending: ${error.code ?? "transcript unavailable"}`))
+      .finally(() => { confirmation = undefined; });
+  }
+  function abandon(item) {
+    if (!item || current !== item) return;
+    clearTimeout(dispatchDeadline);
+    current = undefined;
+    // Unconfirmed does not mean unsubmitted. Fence this record against replay,
+    // without blocking later messages in this session or a replacement one.
+    try { renameSync(join(dir, `${item.key}.claim`), join(dir, `${item.key}.uncertain`)); }
+    catch (error) { console.error(`Pi inbox claim retained: ${error.code}`); }
+  }
+  async function retire(item) {
+    if (!item || current !== item) return;
+    await confirm();
+    if (current === item) await confirm(); // message_end may have preceded Pi's final flush
+    abandon(item);
+  }
+  function activeReceiver() {
+    const state = JSON.parse(readFileSync(join(env.TEAM_AGENT_WORKSPACE, ".team/runtime/state.json"), "utf8"));
+    const receiver = (state.teams?.[env.TEAM_AGENT_OWNER_TEAM_ID] ?? state).leader_receiver;
+    if (receiver?.leader_session_uuid === owner && receiver.status === "attached" &&
+        receiver.pane_id === process.env.TMUX_PANE && receiver.owner_epoch > 0) return receiver;
+  }
+  function advertise() {
+    // claim_leader can publish its state just after session_start.
+    try {
+      const receiver = activeReceiver();
+      if (!receiver) return;
+      const tmp = `${capability}.${randomUUID()}.tmp`;
+      writeFileSync(tmp, JSON.stringify({protocol:1, version, owner, generation, epoch:receiver.owner_epoch,
+        pane:receiver.pane_id, attached:receiver.attached_at, pid:process.pid}), {flag:"wx", mode:0o600});
+      renameSync(tmp, capability);
+      clearInterval(bindingTimer);
+    } catch { /* No handshake: sender continues using direct_tmux. */ }
+  }
+  pi.on("session_start", (_event, context) => {
+    if (typeof context.isIdle !== "function" || typeof context.sessionManager?.getSessionFile !== "function") return;
+    ctx = context;
+    mkdirSync(accepted, {recursive:true, mode:0o700});
+    watcher = watch(dir, (_event, name) => { if (!name || name.endsWith(".ready")) wake(); });
+    watcher.unref();
+    bindingTimer = setInterval(advertise, 200);
+    bindingTimer.unref();
+    advertise();
+    wake();
+  });
+  pi.on("message_end", () => { if (current) void confirm(); });
+  pi.on("agent_settled", (event) => {
+    if (!ctx) return;
+    // Freeze just the snapshot pending at Escape, not the receiver. New ready
+    // records remain eligible; a normal settlement releases the frozen cohort.
+    const [from, to] = event.aborted ? ["ready", "held"] : ["held", "ready"];
+    for (const name of readdirSync(dir)) {
+      if (spoolName.test(name) && name.endsWith(`.${from}`)) {
+        renameSync(join(dir, name), join(dir, `${name.slice(0, -from.length)}${to}`));
+      }
+    }
+    const item = current;
+    setImmediate(async () => { await retire(item); wake(); });
+  });
+  pi.on("session_shutdown", async () => {
+    clearInterval(bindingTimer);
+    watcher?.close();
+    try { if (JSON.parse(readFileSync(capability, "utf8")).generation === generation) unlinkSync(capability); }
+    catch { /* no capability to withdraw */ }
+    clearTimeout(dispatchDeadline);
+    const retiring = retire(current); // take a last transcript reading using the old context
+    ctx = undefined;
+    await retiring;
+  });
+}
+
 export default function teamAgentMcp(pi) {
+  const deliveryReady = installLeaderDelivery(pi);
   // Keep full UUID entropy and all three native tool names below Pi's 64-character limit.
   const alias = `team_${randomUUID().replaceAll("-", "")}`;
   const wanted = teamMcpDefinition.includeTools;
@@ -222,4 +378,5 @@ export default function teamAgentMcp(pi) {
       publish(failure ? "Failed" : frame.stage, { shutdown: true });
     } catch (error) { throw fail(ctx, "shutdown", error); }
   });
+  return deliveryReady;
 }

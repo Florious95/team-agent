@@ -197,6 +197,12 @@ pub(crate) fn protected_target(
     })
 }
 
+/// Reject PID reuse when a live receiver presents a handshake written by an
+/// earlier process. Unknown OS evidence cannot establish a native capability.
+pub(crate) fn process_started_at(pid: u32) -> Option<DateTime<Utc>> {
+    birth_time(&birth_identity(pid)?, boot_time())
+}
+
 fn birth_time(birth: &str, boot: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
     let parts: Vec<_> = birth.split(':').collect();
     match parts.as_slice() {
