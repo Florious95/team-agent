@@ -27,6 +27,12 @@
 //! - D7 (live run #3 finding): a leader's bare lifecycle commands never claim, register or
 //!   unregister a peer team, and never touch its owner, receiver or workers, even after the
 //!   peer leader's provider has exited.
+//!   This also holds after the leader has stopped its own team (its registry entry is gone):
+//!   it never falls back to the top-level peer team for claim, status or start (r23).
+//! - M1.4 (live run #4 finding): concurrent bare starts from two leaders each stay in their own
+//!   team: own tmux session, own start-source, own `session_name`, and a state row equal to the live pane (r24).
+//! - D4 defense in depth (live run #4 MS11 finding): a team stop never signals a process, pane
+//!   or session of a peer team, even when its own `session_name` is corrupted to the peer's session (r25).
 //! - K1: a stored-only send keeps its exit-0 JSON contract and says so in plain text.
 //! - K2: every leader provider gets a per-launch team MCP binding; inherited identity is
 //!   scrubbed.
@@ -1364,4 +1370,203 @@ fn r22_lifecycle_commands_never_claim_or_touch_a_peer_team_whose_leader_exited()
     assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
     assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's lifecycle commands must not touch the peer team's worker {}", w2.id);
     assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
+}
+
+/// Probe p01 on c05c4606 (the r22 fix): once a leader has stopped its own team, its registry
+/// entry is gone, so its caller-team lookup returns nothing. A later bare command from the same
+/// leader pane then fell back to the top-level (peer) team: it evaluated a claim on it, and its
+/// refusal told the caller to run `claim-leader --confirm` against the peer team. Its bare status
+/// listed the peer team's roster.
+#[test]
+fn r23_after_its_own_team_stop_a_leader_never_falls_back_to_the_exited_peer_team() {
+    let rig = Rig::new("r23");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    ok(&rig.start_fake(&l1, "worker", None), "L1 bare start worker");
+    rig.wait_worker_ready(&l1.socket, "current", "worker");
+    // L2 writes last, so its team becomes the top-level projection.
+    ok(&rig.start_fake(&l2, "w2", None), "L2 bare start w2");
+    let w2 = rig.wait_worker_ready(&l2.socket, &t2, "w2");
+    ok(&rig.as_leader(&l1, &["stop", "--json"]), "L1 bare team stop");
+    assert!(wait_until("L1 team panes gone", SETTLE, || rig.agent_pane(&l1.socket, "current", "worker").is_none()),
+        "fixture: L1's bare team stop must stop its own team");
+    rig.kill_provider(&l2);
+    wait_until("L2 observed as exited", SETTLE, || {
+        rig.leaders().1.iter().all(|e| e["pane_id"].as_str() != Some(l2.pane.as_str()) || e["status"] != "LIVE")
+    });
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "M6.3: the exit of L2's provider must not kill its team's worker {}", w2.id);
+    let team_before = rig.state()["teams"][&t2].clone();
+    let registry_before = registry_entries(&rig, &t2);
+    let mark = rig.events().len();
+    // Any mention of the peer team key or the peer leader's uuid means the command resolved to the peer team.
+    let names_peer = |out: &Out| out.all().contains(&t2) || out.all().contains(&l2.uuid());
+
+    let stop = rig.as_leader(&l1, &["stop", "--json"]);
+    assert!(!names_peer(&stop),
+        "D7: after its own team stop, L1's bare `stop` must stay on its own team; it must never resolve to the peer team \
+         {t2} (p01 on c05c4606: owner gate refusal with the peer's team_owner and `claim-leader --confirm`): {stop:?}");
+    let status = rig.as_leader(&l1, &["status", "--json"]);
+    let listed = serde_json::from_str::<Value>(status.stdout.trim()).ok()
+        .and_then(|v| v["nodes"].as_array().cloned()).unwrap_or_default()
+        .iter().filter_map(|n| n["name"].as_str().map(str::to_string)).collect::<BTreeSet<_>>();
+    assert!(!listed.contains("w2") && !names_peer(&status),
+        "D4/D7: after its own team stop, L1's bare `status` must not list the peer team {t2}'s roster: {status:?}");
+    let mut args = vec!["start", "helper"];
+    args.extend_from_slice(FAKE);
+    args.push("--json");
+    let start = rig.as_leader(&l1, &args);
+    assert!(!names_peer(&start),
+        "D7: after its own team stop, L1's bare `start` must never resolve to the peer team {t2}: {start:?}");
+    if !start.refused() {
+        assert_eq!(start.json()["scope"]["team"], json!("current"), "D7: L1's bare start stays on its own team: {}", start.stdout);
+    }
+    std::thread::sleep(Duration::from_secs(2));
+
+    let stray = receiver_events_for(&events_since(&rig, mark), &t2);
+    assert!(stray.is_empty(),
+        "D7: after its own team stop, L1's bare stop/status/start must never evaluate, claim, rebind, register or \
+         unregister the exited peer team {t2}'s leader receiver: {stray:?}");
+    let team_after = rig.state()["teams"][&t2].clone();
+    assert_eq!(team_after["team_owner"], team_before["team_owner"], "D7: the exited peer's team_owner must stay unchanged");
+    assert_eq!(team_after["leader_receiver"], team_before["leader_receiver"], "D7: the exited peer's leader_receiver must stay unchanged");
+    assert!(team_after["agents"].get("helper").is_none(), "D7: L1's start must never admit a seat into the peer team: {}", team_after["agents"]);
+    assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's commands must not touch the peer team's worker {}", w2.id);
+    assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
+}
+
+// ───────────────────────────── RED: concurrent starts from two leaders (live run #4 finding) ─────────────────────────────
+
+/// Live run #4 (c05c4606): L2's bare `start bravo` and L1's bare `start alpha` overlapped. L1's
+/// alpha kept its row in `teams.current`, but it was spawned in the PEER's tmux session from the
+/// peer's start-source, and `teams.current.session_name` was overwritten with the peer's session.
+/// L1's own worker then became unobservable (`stop worker` failed with "unknown physical
+/// identity"). Probe p02 reproduced it hermetically: concurrent bare starts left
+/// `teams.current.session_name` empty or set to a leader session, spawned workers into that leader
+/// session, and some starts failed.
+#[test]
+fn r24_concurrent_bare_starts_from_two_leaders_stay_in_their_own_team_session_and_start_source() {
+    let rig = Rig::new("r24");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    let start_bypass = |leader: &Leader, agent: &str| {
+        rig.as_leader(leader, &["start", agent, "--provider", "fake", "--model", "fake", "--bypass", "true", "--json"])
+    };
+    let mut bad: Vec<String> = Vec::new();
+    for round in 0..3 {
+        let pair = [(l1.clone(), "current".to_string(), format!("a{round}")), (l2.clone(), t2.clone(), format!("b{round}"))];
+        let barrier = std::sync::Barrier::new(2);
+        let outs: Vec<Out> = std::thread::scope(|s| {
+            let handles: Vec<_> = pair.iter().map(|(leader, _, agent)| {
+                let barrier = &barrier;
+                let start_bypass = &start_bypass;
+                s.spawn(move || {
+                    barrier.wait();
+                    start_bypass(leader, agent)
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for ((_, team, agent), out) in pair.iter().zip(&outs) {
+            let body = serde_json::from_str::<Value>(out.stdout.trim()).unwrap_or(Value::Null);
+            if out.code != 0 || body["ok"] != json!(true) || body["scope"]["team"].as_str() != Some(team.as_str()) {
+                bad.push(format!("round {round}: {team}/{agent}: concurrent bare start must succeed in its own team: exit={} body={body}", out.code));
+            }
+        }
+        for (leader, team, agent) in &pair {
+            let marker = format!("TEAM_AGENT_FAKE_READY agent={agent}");
+            let mut pane = None;
+            wait_until(&format!("{team}/{agent} ready in its own session"), SETTLE, || {
+                pane = rig.agent_pane(&leader.socket, team, agent).filter(|p| rig.pane_text(&leader.socket, &p.id).contains(&marker));
+                pane.is_some()
+            });
+            let elsewhere: Vec<String> = rig.panes(&leader.socket).into_iter()
+                .filter(|p| p.window == *agent && !p.session.ends_with(&format!("-{team}"))).map(|p| p.session).collect();
+            let row = rig.row(team, agent);
+            match &pane {
+                None => bad.push(format!("round {round}: {team}/{agent}: no live ready pane in a `-{team}` session; panes elsewhere={elsewhere:?} row={row}")),
+                Some(p) if row["pane_id"].as_str() != Some(p.id.as_str()) =>
+                    bad.push(format!("round {round}: {team}/{agent}: state row names {} but the live pane is {}", row["pane_id"], p.id)),
+                Some(_) => {}
+            }
+            if !elsewhere.is_empty() {
+                bad.push(format!("round {round}: {team}/{agent}: a window was spawned outside its own team session: {elsewhere:?}"));
+            }
+        }
+        let state = rig.state();
+        for team in ["current", t2.as_str()] {
+            let session = state["teams"][team]["session_name"].as_str().unwrap_or_default();
+            if !session.ends_with(&format!("-{team}")) || session.starts_with("team-agent-leader-") {
+                bad.push(format!("round {round}: teams.{team}.session_name must stay that team's own worker session, got {session:?}"));
+            }
+        }
+    }
+    for e in rig.events() {
+        let agent = e["agent_id"].as_str().unwrap_or_default();
+        let team = if agent.starts_with('a') && agent.len() == 2 { "current" } else if agent.starts_with('b') && agent.len() == 2 { t2.as_str() } else { continue };
+        if e["event"] == "worker.spawn_dangerously_skip_permissions" {
+            let path = e["spec_source_path"].as_str().unwrap_or_default();
+            if !path.is_empty() && !path.contains(&format!("/start-source/{team}/")) {
+                bad.push(format!("{team}/{agent}: bypass spec_source_path names another team's start-source: {path}"));
+            }
+        }
+        if e["event"] == "start_agent.agent_start" {
+            if let Some(session) = e["session"].as_str() {
+                if !session.ends_with(&format!("-{team}")) {
+                    bad.push(format!("{team}/{agent}: start_agent.agent_start session is not the team's own session: {session}"));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(),
+        "M1.4/D4: concurrent bare starts from two leaders must each stay in their own team (own tmux session, own \
+         start-source, own session_name, state row = live pane); live run #4 on c05c4606 spawned L1's seat in the peer's \
+         session and overwrote teams.current.session_name:\n{}", bad.join("\n"));
+}
+
+// ───────────────────────────── RED: team stop process-tree scope (live run #4 MS11 finding) ─────────────────────────────
+
+/// Live run #4 MS11 (c05c4606): with `teams.current.session_name` corrupted to the peer team's
+/// session (the r24 defect), L1's bare team `stop` spared the peer's tmux session, but its
+/// `shutdown.process_tree` step still signalled 5 child processes under the PEER's worker
+/// panes (`transport.pre_kill_audit team=current owner_evidence=argv+cwd+state_pid_tree`).
+/// Defense in depth: whatever the projection says, a team stop must never target a process
+/// that belongs to another team's pane.
+#[test]
+fn r25_team_stop_never_signals_a_process_of_a_peer_team_pane_even_with_a_corrupted_session_name() {
+    let rig = Rig::new("r25");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    ok(&rig.start_fake(&l1, "worker", None), "L1 bare start worker");
+    rig.wait_worker_ready(&l1.socket, "current", "worker");
+    ok(&rig.start_fake(&l2, "w2", None), "L2 bare start w2");
+    let w2 = rig.wait_worker_ready(&l2.socket, &t2, "w2");
+    // Corrupt the projection exactly as live run #4 left it.
+    let path = rig.ws.join(".team/runtime/state.json");
+    let mut state = rig.state();
+    let peer_session = state["teams"][&t2]["session_name"].as_str().unwrap_or_default().to_string();
+    assert!(peer_session.ends_with(&format!("-{t2}")), "fixture: peer session recorded: {}", state["teams"][&t2]);
+    state["teams"]["current"]["session_name"] = json!(peer_session.clone());
+    fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let peer_tree: BTreeSet<u32> = descendants(w2.pid).into_iter().collect();
+    let mark = rig.events().len();
+
+    let stop = rig.as_leader(&l1, &["stop", "--json"]);
+    std::thread::sleep(Duration::from_secs(3));
+
+    let peer_ids: BTreeSet<String> = peer_tree.iter().map(u32::to_string)
+        .chain([peer_session.clone(), w2.id.clone()]).collect();
+    let audits: Vec<Value> = events_since(&rig, mark).into_iter()
+        .filter(|e| e["event"] == "transport.pre_kill_audit")
+        .filter(|e| e["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|t| peer_ids.contains(t)))
+        .collect();
+    assert!(audits.is_empty(),
+        "D4 defense in depth: L1's team stop must never target a process, pane or session of the peer team {t2} \
+         (peer pane {} tree {peer_tree:?}, session {peer_session}) even when teams.current.session_name is corrupted \
+         (live run #4: shutdown.process_tree signalled the peer workers' children): {audits:?} stop={stop:?}", w2.id);
+    let dead: Vec<u32> = peer_tree.iter().copied()
+        .filter(|pid| Command::new("kill").args(["-0", &pid.to_string()]).output().is_ok_and(|o| !o.status.success())).collect();
+    assert!(dead.is_empty(), "D4: every process of the peer worker pane {} must survive L1's team stop; gone: {dead:?} stop={stop:?}", w2.id);
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "D4: the peer worker pane {} must survive L1's team stop", w2.id);
+    assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D4: the peer worker row stays running: {}", rig.row(&t2, "w2"));
 }
