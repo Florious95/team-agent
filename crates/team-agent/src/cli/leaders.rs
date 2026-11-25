@@ -66,16 +66,8 @@ pub fn cmd_leaders(args: &LeadersArgs) -> Result<CmdResult, CliError> {
     let rows = classified
         .into_iter()
         .map(|(entry, status, reason)| {
-            let ambiguous = status == "LIVE"
-                && active_candidates
-                    .get(&entry.delivery_name)
-                    .is_some_and(|candidates| candidates.len() > 1);
-            let status = if ambiguous { "AMBIGUOUS" } else { status };
-            let stale_reason = if ambiguous {
-                Some(crate::leader::registry::REASON_AMBIGUOUS.to_string())
-            } else {
-                reason
-            };
+            // Short-name conflicts are address diagnostics, not receiver liveness.
+            let stale_reason = reason;
             let send_hint = if status == "STALE" {
                 "-".to_string()
             } else {
@@ -129,7 +121,15 @@ fn send_hint(entry: &LeaderRegistryEntry) -> String {
 }
 
 fn row_json(row: &LeaderRow) -> Value {
+    let state = crate::state::persist::load_runtime_state_without_migrations(&row.entry.workspace).ok();
+    let receiver = state.as_ref().and_then(|v| v["teams"][&row.entry.team_key].get("leader_receiver"));
+    let locator = |key: &str| receiver.and_then(|r| r.get(key));
     json!({
+        "pane_id": locator("pane_id"),
+        "tmux_endpoint": locator("tmux_socket").or_else(|| locator("tmux_endpoint")),
+        "tmux_socket": locator("tmux_socket"),
+        "provider": locator("provider"),
+        "leader_session_uuid": locator("leader_session_uuid"),
         "name": row.entry.delivery_name,
         "delivery_name": row.entry.delivery_name,
         "qualified_name": row.entry.qualified_name,

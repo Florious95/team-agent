@@ -33,6 +33,14 @@ pub struct SelectedTeam {
     pub spec_path: Option<PathBuf>,
 }
 
+pub(crate) fn calling_leader_team(workspace: &Path) -> Option<String> {
+    if let Some((socket, pane)) = crate::tmux_backend::socket_name_from_tmux_env()
+        .zip(std::env::var("TMUX_PANE").ok()) {
+        return crate::direct_delivery::leader_directory_for_terminal(workspace, &socket, &pane)?.team;
+    }
+    crate::direct_delivery::leader_directory_for_ancestors(workspace)?.team
+}
+
 pub fn resolve_active_team(
     input: &Path,
     team: Option<&str>,

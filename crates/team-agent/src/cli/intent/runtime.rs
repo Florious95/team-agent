@@ -512,6 +512,10 @@ fn plan_with_observer(
     let has_state = crate::state::persist::runtime_state_path(&runtime_workspace).is_file();
     if has_state {
         plan.scope.workspace = runtime_workspace;
+        if plan.scope.team.is_none() {
+            plan.intent.team = crate::state::selector::calling_leader_team(&plan.scope.workspace);
+            plan.scope.team = plan.intent.team.clone();
+        }
     }
     if !has_state {
         let runtime = plan.scope.workspace.join(".team/runtime");
@@ -616,7 +620,10 @@ fn plan_with_observer(
                 plan.expected.insert(id.as_str().into(), expected);
             }
             let description = checked(crate::lifecycle::seat_start::describe_resolved(&request, selected.as_ref(), live, &declaration))?;
-            if description.op == "already_running" {
+            let repair = description.op == "already_running" && selected.as_ref().is_some_and(|s|
+                s.state["agents"][id.as_str()]["status"] != "running" || !s.state["agents"][id.as_str()]["pane_id"].is_string()
+                    && !has_native_incarnation(&s.state["agents"][id.as_str()]));
+            if description.op == "already_running" && !repair {
                 plan.skipped.push(json!({"agent":id.as_str(),"reason":"already_running",
                     "declaration":description.declaration,"defaulted":description.defaulted}));
             } else {

@@ -306,6 +306,8 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
     // command: when the workspace has 2+ alive teams and no --team was passed,
     // refuse instead of silently defaulting to the active team. Uses the
     // read-only CommandScope helper so the gate cannot migrate/write state.
+    let bound = team.is_none().then(|| crate::state::selector::calling_leader_team(&args.workspace)).flatten();
+    let team = team.or(bound.as_deref());
     if team.is_none() {
         let scope = crate::state::paths::CommandScope::resolve_readonly(&args.workspace, None);
         if scope.is_ambiguous() {

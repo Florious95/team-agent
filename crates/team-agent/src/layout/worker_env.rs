@@ -263,7 +263,7 @@ pub(crate) fn isolate_worker_spawn_env(
         .collect::<std::collections::BTreeSet<_>>();
     // Clear any stale values held by the tmux server before the scoped provider
     // invocation assigns the fresh context. The inert shell tail must not retain it.
-    for key in [CALLER_PROVIDER_ENV, CALLER_PANE_ENV, CALLER_ENDPOINT_ENV] {
+    for key in [CALLER_PROVIDER_ENV, CALLER_PANE_ENV, CALLER_ENDPOINT_ENV, "PI_SESSION_FILE", "PI_SESSION_ID", "PI_MODEL"] {
         env.remove(key);
         env_unset.insert(key.to_string());
     }

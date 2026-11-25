@@ -452,9 +452,14 @@ pub(crate) fn incept_launched_leader(
     let team = identity.team_id.as_str();
     let mut state = if raw.get("teams").and_then(|teams| teams.get(team)).is_some() {
         crate::state::projection::project_top_level_view(&raw, team)
+    } else if raw.get("teams").and_then(Value::as_object).is_some_and(|teams| !teams.is_empty()) {
+        // A second leader starts an empty canonical team. Never adopt the active
+        // sibling's workers, source, or binding just because it is at root.
+        json!({"team_key":team,"workspace":workspace,"agents":{},"teams":raw["teams"]})
     } else { raw };
     let reentry = get_path_str(&state, &["leader_receiver", "pane_id"]).as_deref() == Some(observed.pane_id.as_str())
         && state_records_pane_endpoint(&state, observed.pane_id.as_str(), endpoint);
+    state["team_key"] = json!(team);
     state["active_team_key"] = json!(team);
     state["is_external_leader"] = json!(external);
     state["leader_client"] = json!({
@@ -490,8 +495,8 @@ pub(crate) fn incept_launched_leader(
     );
     let publication = receipt.map(|receipt| InceptionRegistryPublication { receipt, previous });
     let result = result.and_then(|result| {
-        if result.ok || matches!(result.reason,
-            Some(LeaseReason::PreviousOwnerAliveRefused | LeaseReason::ForceConfirmRequired)) {
+        if result.ok || (identity.leader_session_uuid_source != super::LeaderSessionUuidSource::Generated
+            && matches!(result.reason, Some(LeaseReason::PreviousOwnerAliveRefused | LeaseReason::ForceConfirmRequired))) {
             Ok(())
         } else {
             Err(LeaderError::Start(format!("leader inception refused: {:?}", result.reason)))
@@ -1333,7 +1338,7 @@ fn tmux_endpoints_match(bound: &str, current: &str) -> bool {
 
 /// Observe the recorded owner's socket, never a same-numbered caller pane on
 /// another server. A proven worker is not a live old leader; a nonce is optional.
-fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError> {
+pub(super) fn observed_bound_leader_live(state: &Value) -> Result<Option<bool>, LeaderError> {
     let Some(pane) = bound_pane(state) else { return Ok(Some(false)); };
     let receiver = state.get("leader_receiver").unwrap_or(&Value::Null);
     let Some((endpoint, _)) = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(Some(receiver))
@@ -2356,7 +2361,7 @@ fn save_claim_team_scoped_state(
         == Some("converged");
     let mut merged = if existing_primary_key
         .as_deref()
-        .is_none_or(|key| key == target_key)
+        .map_or(!had_existing_teams, |key| key == target_key)
         || updates_active_team
         || writes_endpoint_convergence
     {

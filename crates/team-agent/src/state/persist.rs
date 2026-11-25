@@ -168,7 +168,11 @@ pub(crate) struct RuntimeLock {
 
 impl RuntimeLock {
     fn acquire(workspace: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
-        let lock_path = runtime_dir(workspace).join(format!("{name}.lock"));
+        Self::acquire_at(&runtime_dir(workspace), name, timeout)
+    }
+
+    fn acquire_at(dir: &Path, name: &str, timeout: f64) -> Result<Self, StateError> {
+        let lock_path = dir.join(format!("{name}.lock"));
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -206,6 +210,15 @@ impl Drop for RuntimeLock {
         // Best-effort unlock. OS releases on handle close if this fails.
         let _ = crate::platform::file_lock::unlock(&self.file);
     }
+}
+
+/// Serialize team allocation through receiver publication, not the interactive
+/// client lifetime. Planning must not create artifacts in the workspace.
+pub(crate) fn reserve_leader_launch(workspace: &Path) -> Result<RuntimeLock, StateError> {
+    let dir = crate::leader::registry::registry_dir().or_else(|| std::env::home_dir()
+        .map(|home| home.join(".team-agent/leaders"))).ok_or_else(|| StateError::TeamSelect("no leader registry home".into()))?;
+    let key = format!("launch-{}", crate::leader::registry::workspace_hash(workspace));
+    RuntimeLock::acquire_at(&dir, &key, 15.0)
 }
 
 #[cfg(test)]
@@ -888,7 +901,9 @@ fn apply_persist_merge_contract_with_fork_target_preservation(
             // the mutable alive view. A change to either CURRENT_TEAM_ALIAS
             // mapping must evaluate the other. The legacy physical alias gets
             // active-team authority; every real sibling remains self-scoped.
-            let authority_team = if team == CURRENT_TEAM_ALIAS {
+            let canonical_current = incoming_entry.get("team_key").and_then(Value::as_str) == Some(CURRENT_TEAM_ALIAS)
+                || latest_entry.get("team_key").and_then(Value::as_str) == Some(CURRENT_TEAM_ALIAS);
+            let authority_team = if team == CURRENT_TEAM_ALIAS && !canonical_current {
                 top_level_team.as_deref()
             } else {
                 Some(team.as_str())

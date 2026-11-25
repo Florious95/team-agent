@@ -90,6 +90,56 @@ pub(crate) fn observe(
     id: &str,
     row: &Value,
 ) -> Result<SeatObservation, LifecycleError> {
+    if live_station_row(selected, id, row)?.is_some() { return Ok(SeatObservation::Live); }
+    observe_row(selected, id, row)
+}
+
+/// Recover only a station-projected incarnation independently verified as the live
+/// carrier. Never adopt a pane on name alone, or sweep history from the inbox.
+pub(super) fn live_station_row(selected: &SelectedTeam, id: &str, row: &Value) -> Result<Option<Value>, LifecycleError> {
+    if !row.is_object() || row["status"] == "running" && row["pane_id"].is_string() && row["explicit_stop"] != true {
+        return Ok(None);
+    }
+    let Some(seat) = checked(crate::station::projection::target(&selected.run_workspace, &selected.team_key, id))? else { return Ok(None) };
+    let Some(endpoint) = seat.endpoint.as_ref().filter(|_| seat.phase == "ready" && seat.desired == "running") else { return Ok(None) };
+    let Some(candidate) = seat.extra.get("legacy_row") else { return Ok(None) };
+    if candidate["station_instance_id"] != seat.instance_id || endpoint["binding"] != seat.instance_id
+        || !candidate["pane_birth_identity"].is_string() || candidate["pane_id"] != endpoint["pane_id"]
+        || candidate["pane_pid"] != endpoint["pane_pid"] || candidate["pane_birth_identity"] != endpoint["pane_birth_identity"]
+        || candidate == row { return Ok(None); }
+    match observe_row(selected, id, candidate)? {
+        SeatObservation::Live => return Ok(Some(candidate.clone())),
+        SeatObservation::StoppedVerified => (),
+        _ => return Ok(None),
+    }
+    // Both compatibility ledgers can predate the running pane (legacy restart).
+    // A pane name alone isn't authority: require an independent seat-scoped
+    // MCP receipt whose live ancestry proves this exact pane's carrier.
+    #[cfg(unix)] {
+        let backend = checked(super::restart::lifecycle_worker_tmux_backend_selection_for_state(
+            &selected.run_workspace, &selected.state))?.backend;
+        let mut recovered = None;
+        for pane in checked(backend.list_targets())? {
+            if candidate["window"] != pane.window_name.as_ref().map(|w| w.as_str()).unwrap_or("")
+                || selected.state["session_name"] != pane.session.as_str() { continue; }
+            let Some(pid) = pane.pane_pid else { continue };
+            if !crate::mcp_server::readiness::scoped_carrier(&selected.run_workspace, &selected.team_key, id, pid) { continue; }
+            let mut current = candidate.clone();
+            current["pane_id"] = Value::from(pane.pane_id.as_str());
+            let obj = current.as_object_mut().ok_or_else(|| refusal("invalid station cohort"))?;
+            super::carrier::record(obj, Some(pid));
+            if observe_row(selected, id, &current)? == SeatObservation::Live {
+                if recovered.is_some() { return Err(refusal("multiple verified live seat carriers; refusing recovery")); }
+                recovered = Some(current);
+            }
+        }
+        Ok(recovered)
+    }
+    #[cfg(not(unix))]
+    Ok(None)
+}
+
+fn observe_row(selected: &SelectedTeam, id: &str, row: &Value) -> Result<SeatObservation, LifecycleError> {
     if !row.is_object()
         || row
             .get("provider")

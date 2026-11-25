@@ -888,6 +888,15 @@ pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleEr
                         status_command(request)
                     )));
                 }
+                if let Some(live) = super::seat_observation::live_station_row(current, request.agent.as_str(), &current.state["agents"][request.agent.as_str()])? {
+                    let mut repaired = current.clone();
+                    repaired.state["agents"][request.agent.as_str()] = live;
+                    crate::station::projection::publish(&current.run_workspace, &mut repaired.state, &current.team_key,
+                        &[request.agent.as_str()]).map_err(rejected)?;
+                    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(
+                        &current.run_workspace, &repaired.state, &current.team_key, &[request.agent.as_str()]).map_err(rejected)?;
+                    return converge(request, Some(&repaired), false);
+                }
                 converge(request, Some(current), false)
             })
         }
@@ -967,6 +976,10 @@ fn converge(
                         })
                     });
                 if carrier_gone && unchanged {
+                    if crate::station::projection::target(&selected.run_workspace, &selected.team_key, request.agent.as_str())
+                        .map_err(rejected)?.is_some_and(|seat| seat.phase == "ready" && seat.desired == "running") {
+                        return Err(refused("station/aggregate conflict: a live pane remains; refusing orphan removal without verified seat identity"));
+                    }
                     super::restart::require_safe_carrier_targets(
                         &selected.state,
                         &transport,

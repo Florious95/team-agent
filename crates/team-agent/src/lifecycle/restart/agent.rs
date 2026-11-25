@@ -531,7 +531,7 @@ pub(crate) fn start_agent_at_paths_with_session(
                     .unwrap_or_default(),
                 "trigger": "start-agent",
                 "spec_source_path": crate::lifecycle::launch::agent_id_spec_source_path(
-                    workspace, agent_id.as_str(),
+                    workspace, &team_key, agent_id.as_str(),
                 ),
             }),
         );
@@ -566,6 +566,18 @@ pub(crate) fn start_agent_at_paths_with_session(
         &skip_capture_backfill,
         &[agent_id.as_str()],
     )?;
+    // A physical spawn is not a published seat. A newer manifest may have
+    // won the generation CAS; never advertise an unaddressable pane as ready.
+    let published = crate::state::projection::resolve_runtime_team_scope_readonly(workspace, Some(&team_key))
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let row = &published.state["agents"][agent_id.as_str()];
+    let seat = crate::station::projection::target(workspace, &team_key, agent_id.as_str())
+        .map_err(LifecycleError::StatePersist)?;
+    if row["pane_id"].as_str() != Some(spawn.spawn.pane_id.as_str()) || row["explicit_stop"] == true
+        || !seat.is_some_and(|s| s.phase == "ready" && row["station_instance_id"] == s.instance_id
+            && s.endpoint.as_ref().is_some_and(|e| e["pane_id"] == row["pane_id"])) {
+        return Err(LifecycleError::StatePersist(format!("seat publication conflict for {team_key}/{agent_id}: spawned pane was not committed")));
+    }
     write_start_agent_start_event(
         workspace,
         agent_id,

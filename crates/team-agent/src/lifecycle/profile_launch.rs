@@ -566,7 +566,9 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
         Provider::Copilot => {}
         // Grok has no provider-specific environment to unset.
         Provider::Grok => {}
-        Provider::Pi => {}
+        Provider::Pi => {
+            unsets.extend(["PI_SESSION_FILE", "PI_SESSION_ID", "PI_MODEL"].map(str::to_owned));
+        }
         Provider::Fake => {}
     }
     unsets

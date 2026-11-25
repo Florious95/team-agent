@@ -124,6 +124,7 @@ pub enum LeaseStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaderSessionUuidSource {
+    Generated,
     Derived,
     Override,
     Env,

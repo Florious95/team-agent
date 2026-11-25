@@ -153,7 +153,7 @@ pub mod lifecycle_port {
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let prepared = match crate::leader::start::prepare_leader_start_with_nested_attach(
+        let mut prepared = match crate::leader::start::prepare_leader_start_with_nested_attach(
             provider,
             provider_args,
             cwd,
@@ -174,7 +174,7 @@ pub mod lifecycle_port {
                 return Err(CliError::Runtime(error.to_string()));
             }
         };
-        let outcome = match crate::leader::start::execute_prepared_leader_start(&prepared, cwd) {
+        let outcome = match crate::leader::start::execute_prepared_leader_start(&mut prepared, cwd) {
             Ok(outcome) => outcome,
             Err(crate::leader::LeaderError::Prompt(error)) => return Ok(error.report()),
             Err(error) => return Err(CliError::Runtime(error.to_string())),

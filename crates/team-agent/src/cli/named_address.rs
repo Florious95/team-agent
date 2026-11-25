@@ -41,7 +41,7 @@ impl NamedAddressErrorKind {
             Self::LeaderNotAttached => "leader_not_attached",
             Self::NameNotResolvable => "name_not_resolvable",
             Self::NameNotLive => "name_not_live",
-            Self::NameAmbiguous => "name_ambiguous",
+            Self::NameAmbiguous => crate::leader::registry::REASON_AMBIGUOUS,
         }
     }
 }

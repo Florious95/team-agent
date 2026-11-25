@@ -667,6 +667,9 @@ fn classify_loaded(entry: &LeaderRegistryEntry, state: &Value) -> (&'static str,
     // the receiver is stale even though the state hasn't been updated.
     let pane_id = receiver.get("pane_id").and_then(|v| v.as_str());
     let socket = receiver.get("tmux_socket").and_then(|v| v.as_str());
+    if receiver.get("status").and_then(Value::as_str).is_some_and(|s| s == "exited") {
+        return ("STALE", Some("leader_pane_dead".into()));
+    }
     if let (Some(pane), Some(sock)) = (pane_id, socket) {
         if !tmux_pane_live(sock, pane) {
             return ("STALE", Some("leader_pane_dead".to_string()));
@@ -681,7 +684,8 @@ fn tmux_pane_live(socket: &str, pane_id: &str) -> bool {
     // send never routes through a socket we could not verify.
     let backend = crate::transport_factory::tmux_endpoint_transport(socket);
     match backend.list_targets() {
-        Ok(targets) => targets.iter().any(|t| t.pane_id.as_str() == pane_id),
+        Ok(targets) => targets.iter().any(|t| t.pane_id.as_str() == pane_id)
+            && matches!(backend.provider_exit_status(&crate::transport::PaneId::new(pane_id)), Ok(None)),
         Err(_) => false,
     }
 }

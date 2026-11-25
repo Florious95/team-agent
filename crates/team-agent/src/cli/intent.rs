@@ -749,7 +749,11 @@ fn execute_plan(
         pending |= success
             && (receipt.get("ready").and_then(Value::as_bool) == Some(false)
                 || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
-        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
+        // Owner CAS evidence is for the post-handler topology check, not the
+        // worker receipt (and may contain the leader's private pane nonce).
+        let mut public_receipt = receipt.clone();
+        if let Some(fields) = public_receipt.as_object_mut() { fields.remove("leader_claim_receipt"); }
+        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":public_receipt}));
         if let Step::UnifiedStart { description, .. } = step {
             if let Some(result) = results.last_mut() {
                 result["op"] = receipt.get("op").cloned().unwrap_or(json!(description.op));
