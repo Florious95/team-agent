@@ -178,7 +178,15 @@ impl Drop for Rig {
         }
         let _ = Command::new(&self.tmux).arg("-S").arg(&self.outer).arg("kill-server").output();
         if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
-            let _ = fs::remove_dir_all(&self.root);
+            // Processes that lost their tmux server may still flush a last write into the
+            // root; retry until the tree is really gone (bounded).
+            for _ in 0..50 {
+                let _ = fs::remove_dir_all(&self.root);
+                if !self.root.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 }
@@ -295,14 +303,22 @@ impl Rig {
         );
         let n = self.windows.fetch_add(1, Ordering::SeqCst);
         let window = format!("L{n}");
+        // The outer "user terminal" server is hermetic too: it never inherits the test
+        // runner's HOME, TMUX_TMPDIR, TMUX or TEAM_AGENT_* identity.
         let mut cmd = Command::new(&self.tmux);
+        cmd.env_clear()
+            .env("HOME", &self.home)
+            .env("TMUX_TMPDIR", &self.tmux_tmpdir)
+            .env("PATH", env.get("PATH").cloned().unwrap_or_default())
+            .env("LANG", "en_US.UTF-8")
+            .env("TERM", "xterm-256color");
         cmd.arg("-S").arg(&self.outer);
         if n == 0 {
             cmd.args(["-f", "/dev/null", "new-session", "-d", "-s", "user", "-n", &window, "-x", "200", "-y", "50", "-c"]);
         } else {
             cmd.args(["new-window", "-d", "-t", "user", "-n", &window, "-c"]);
         }
-        let out = cmd.arg(workspace).arg(&command).env_remove("TMUX").env_remove("TMUX_PANE").output().unwrap();
+        let out = cmd.arg(workspace).arg(&command).output().unwrap();
         assert!(out.status.success(), "outer terminal {window} failed: {out:?}");
         let workspace_text = workspace.display().to_string();
         let mut found: Option<PathBuf> = None;
