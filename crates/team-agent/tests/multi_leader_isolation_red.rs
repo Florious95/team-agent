@@ -31,6 +31,8 @@
 //!   it never falls back to the top-level peer team for claim, status or start (r23).
 //! - M1.4 (live run #4 finding): concurrent bare starts from two leaders each stay in their own
 //!   team: own tmux session, own start-source, own `session_name`, and a state row equal to the live pane (r24).
+//! - D4 defense in depth (live run #4 MS11 finding): a team stop never signals a process, pane
+//!   or session of a peer team, even when its own `session_name` is corrupted to the peer's session (r25).
 //! - K1: a stored-only send keeps its exit-0 JSON contract and says so in plain text.
 //! - K2: every leader provider gets a per-launch team MCP binding; inherited identity is
 //!   scrubbed.
@@ -1520,4 +1522,51 @@ fn r24_concurrent_bare_starts_from_two_leaders_stay_in_their_own_team_session_an
         "M1.4/D4: concurrent bare starts from two leaders must each stay in their own team (own tmux session, own \
          start-source, own session_name, state row = live pane); live run #4 on c05c4606 spawned L1's seat in the peer's \
          session and overwrote teams.current.session_name:\n{}", bad.join("\n"));
+}
+
+// ───────────────────────────── RED: team stop process-tree scope (live run #4 MS11 finding) ─────────────────────────────
+
+/// Live run #4 MS11 (c05c4606): with `teams.current.session_name` corrupted to the peer team's
+/// session (the r24 defect), L1's bare team `stop` spared the peer's tmux session, but its
+/// `shutdown.process_tree` step still signalled 5 child processes under the PEER's worker
+/// panes (`transport.pre_kill_audit team=current owner_evidence=argv+cwd+state_pid_tree`).
+/// Defense in depth: whatever the projection says, a team stop must never target a process
+/// that belongs to another team's pane.
+#[test]
+fn r25_team_stop_never_signals_a_process_of_a_peer_team_pane_even_with_a_corrupted_session_name() {
+    let rig = Rig::new("r25");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    ok(&rig.start_fake(&l1, "worker", None), "L1 bare start worker");
+    rig.wait_worker_ready(&l1.socket, "current", "worker");
+    ok(&rig.start_fake(&l2, "w2", None), "L2 bare start w2");
+    let w2 = rig.wait_worker_ready(&l2.socket, &t2, "w2");
+    // Corrupt the projection exactly as live run #4 left it.
+    let path = rig.ws.join(".team/runtime/state.json");
+    let mut state = rig.state();
+    let peer_session = state["teams"][&t2]["session_name"].as_str().unwrap_or_default().to_string();
+    assert!(peer_session.ends_with(&format!("-{t2}")), "fixture: peer session recorded: {}", state["teams"][&t2]);
+    state["teams"]["current"]["session_name"] = json!(peer_session.clone());
+    fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    let peer_tree: BTreeSet<u32> = descendants(w2.pid).into_iter().collect();
+    let mark = rig.events().len();
+
+    let stop = rig.as_leader(&l1, &["stop", "--json"]);
+    std::thread::sleep(Duration::from_secs(3));
+
+    let peer_ids: BTreeSet<String> = peer_tree.iter().map(u32::to_string)
+        .chain([peer_session.clone(), w2.id.clone()]).collect();
+    let audits: Vec<Value> = events_since(&rig, mark).into_iter()
+        .filter(|e| e["event"] == "transport.pre_kill_audit")
+        .filter(|e| e["targets"].as_array().into_iter().flatten().filter_map(Value::as_str).any(|t| peer_ids.contains(t)))
+        .collect();
+    assert!(audits.is_empty(),
+        "D4 defense in depth: L1's team stop must never target a process, pane or session of the peer team {t2} \
+         (peer pane {} tree {peer_tree:?}, session {peer_session}) even when teams.current.session_name is corrupted \
+         (live run #4: shutdown.process_tree signalled the peer workers' children): {audits:?} stop={stop:?}", w2.id);
+    let dead: Vec<u32> = peer_tree.iter().copied()
+        .filter(|pid| Command::new("kill").args(["-0", &pid.to_string()]).output().is_ok_and(|o| !o.status.success())).collect();
+    assert!(dead.is_empty(), "D4: every process of the peer worker pane {} must survive L1's team stop; gone: {dead:?} stop={stop:?}", w2.id);
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "D4: the peer worker pane {} must survive L1's team stop", w2.id);
+    assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D4: the peer worker row stays running: {}", rig.row(&t2, "w2"));
 }
