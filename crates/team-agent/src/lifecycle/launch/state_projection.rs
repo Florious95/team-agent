@@ -65,32 +65,27 @@ pub(super) fn persist_spawn_agent_state(
     transport: &dyn Transport,
     started: &[StartedAgent],
 ) -> Result<(), LifecycleError> {
-    let state_path = crate::state::persist::runtime_state_path(workspace);
-    let mut state = match crate::state::repository::StateRepository::new(workspace)
-        .load_workspace_if_exists_without_migrations()
-    {
-        Ok(Some(state)) => state,
-        Ok(None) => serde_json::json!({"agents": {}}),
-        Err(crate::state::StateError::Io(error)) => {
-            return Err(LifecycleError::StatePersist(format!(
-                "{}: {error}",
-                state_path.display()
-            )))
-        }
-        Err(crate::state::StateError::Json(error)) => {
-            return Err(LifecycleError::StatePersist(format!(
-                "{}: {error}",
-                state_path.display()
-            )))
-        }
-        Err(error) => {
-            return Err(LifecycleError::StatePersist(format!(
-                "{}: {error}",
-                state_path.display()
-            )))
-        }
-    };
     let team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
+    let mut state = crate::state::persist::with_runtime_state_lock_without_migrations(workspace, |raw| {
+        let state = raw.unwrap_or_else(|| serde_json::json!({"agents": {}}));
+        if state["teams"].as_object().is_some_and(|teams| !teams.is_empty()) {
+            if !state["teams"][&team_id].is_object() {
+                return Err(LifecycleError::StatePersist(format!("missing team projection for {team_id}")));
+            }
+            let mut selected = crate::state::projection::project_top_level_view(&state, &team_id);
+            if selected["session_name"].as_str().is_some_and(|name| !name.is_empty() && name != session_name.as_str()) {
+                return Err(LifecycleError::StatePersist(format!("spawn session differs from team {team_id}")));
+            }
+            selected["session_name"] = serde_json::json!(session_name.as_str());
+            return Ok(selected);
+        }
+        // A legacy single-team state may predate canonical keys; an explicit
+        // different key is not a legacy fallback.
+        if state["team_key"].as_str().is_some_and(|key| !key.is_empty() && key != team_id) {
+            return Err(LifecycleError::StatePersist(format!("launch projection belongs to another team, not {team_id}")));
+        }
+        Ok(state)
+    }).map_err(|error| LifecycleError::StatePersist(format!("{}: {error}", crate::state::persist::runtime_state_path(workspace).display())))??;
     let worker_tmux_socket = launched_worker_tmux_socket(transport, workspace);
     drop_worker_pane_seeded_owner(&mut state, &team_id, started, worker_tmux_socket.as_deref());
     // Only persist running state for agents whose spawn still has a live target.

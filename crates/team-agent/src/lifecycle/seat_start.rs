@@ -888,6 +888,18 @@ pub fn start(request: &StartRequest, dry_run: bool) -> Result<Value, LifecycleEr
                         status_command(request)
                     )));
                 }
+                if let Some(live) = super::seat_observation::live_station_row(current, request.agent.as_str(), &current.state["agents"][request.agent.as_str()])? {
+                    let mut repaired = current.clone();
+                    repaired.state["agents"][request.agent.as_str()] = live;
+                    crate::station::projection::publish(&current.run_workspace, &mut repaired.state, &current.team_key,
+                        &[request.agent.as_str()]).map_err(rejected)?;
+                    crate::state::repository::StateRepository::new(&current.run_workspace)
+                        .commit(crate::state::repository::StateWriteIntent::StartAgent {
+                            team_key: &current.team_key, agent_id: request.agent.as_str(),
+                        }, |state| state["agents"][request.agent.as_str()] = repaired.state["agents"][request.agent.as_str()].clone())
+                        .map_err(rejected)?;
+                    return converge(request, Some(&repaired), false);
+                }
                 converge(request, Some(current), false)
             })
         }
@@ -967,6 +979,26 @@ fn converge(
                         })
                     });
                 if carrier_gone && unchanged {
+                    if let Some(seat) = crate::station::projection::target(&selected.run_workspace, &selected.team_key, request.agent.as_str())
+                        .map_err(rejected)?.filter(|seat| seat.phase == "ready" && seat.desired == "running") {
+                        // A clean team shutdown retains the previous manifest.
+                        // If its exact carrier is gone, a new uncommitted pane
+                        // cannot be that incumbent. Otherwise preserve the seat.
+                        let old = seat.extra.get("legacy_row");
+                        let expired = selected.state["status"] == "shutdown"
+                            && row["station_instance_id"] == seat.instance_id
+                            && seat.endpoint.as_ref().zip(old).is_some_and(|(ep, old)| {
+                                ep["binding"] == seat.instance_id && ep["session_name"] == orphan.session.as_str()
+                                    && ep["tmux_endpoint"].as_str().zip(transport.tmux_endpoint().as_deref())
+                                        .is_some_and(|(a, b)| crate::topology::same_endpoint(a, b))
+                                    && ep["pane_id"] == old["pane_id"] && ep["pane_pid"] == old["pane_pid"]
+                                    && old["pane_birth_identity"].is_string() && ep["pane_birth_identity"] == old["pane_birth_identity"]
+                                    && super::carrier::pane_pid(old).is_some_and(|pid| super::carrier::observe(old, pid).state.gone())
+                            });
+                        if !expired {
+                            return Err(refused("station/aggregate conflict: a live pane remains; refusing orphan removal without verified seat identity"));
+                        }
+                    }
                     super::restart::require_safe_carrier_targets(
                         &selected.state,
                         &transport,

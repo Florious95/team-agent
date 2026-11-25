@@ -186,11 +186,7 @@ pub fn launch_with_transport_in_workspace(
             transport,
             &started,
         )?;
-        let owner_team = load_runtime_state(workspace)
-            .ok()
-            .map(|state| crate::state::projection::team_state_key(&state))
-            .filter(|team| !team.is_empty())
-            .unwrap_or_else(|| session_name.as_str().to_string());
+        let owner_team = identity::runtime_team_key_for_spec(spec_path, &spec, &session_name);
         let generation = started
             .first()
             .map(|agent| agent.spawned_at.as_str())

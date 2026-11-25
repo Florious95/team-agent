@@ -330,7 +330,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     if checked.help {
         return Ok(CmdResult::human(help(command)));
     }
-    let intent = lifecycle_intent(
+    let mut intent = lifecycle_intent(
         command,
         verb,
         &checked.tokens,
@@ -342,6 +342,16 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
         if matches!(intent.subject, Subject::Team { .. }) && intent.session == SessionPolicy::Fresh {
             return Err(usage("--session fresh requires an explicit agent; team start preserves stopped seats"));
         }
+    }
+    // Pin the physical caller before any claim, recovery or migration. A bare
+    // selector would otherwise address the last writer's root projection.
+    let caller_team = if !intent.pinned_workspace || crate::state::persist::runtime_state_path(&intent.workspace).is_file() {
+        crate::state::selector::lifecycle_caller_team(&intent.workspace)?
+    } else {
+        None
+    };
+    if intent.team.is_none() {
+        intent.team.clone_from(&caller_team);
     }
     if !intent.dry_run && std::env::var_os("TEAM_AGENT_ID").is_none() {
         if let Ok(selected) = crate::state::selector::resolve_active_team_readonly(
@@ -358,6 +368,10 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
                 if serde_json::from_str::<Value>(&reason).ok()
                     .is_some_and(|refusal| refusal["reason"] == "team_owner_mismatch")
                 {
+                    if caller_team.as_deref().is_some_and(|own| own != selected.team_key) {
+                        // An explicit foreign selector grants no takeover authority.
+                        return Err(refusal(reason));
+                    }
                     // Reuse the endpoint-aware, non-forcing claim CAS. Planning
                     // rereads ownership and still refuses if the claim failed.
                     let _ = crate::leader::claim_leader(&selected.run_workspace, Some(&selected.team_key), false);
@@ -749,7 +763,11 @@ fn execute_plan(
         pending |= success
             && (receipt.get("ready").and_then(Value::as_bool) == Some(false)
                 || receipt.get("status").and_then(Value::as_str) == Some("pending_tool_load"));
-        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":receipt}));
+        // Owner CAS evidence is for the post-handler topology check, not the
+        // worker receipt (and may contain the leader's private pane nonce).
+        let mut public_receipt = receipt.clone();
+        if let Some(fields) = public_receipt.as_object_mut() { fields.remove("leader_claim_receipt"); }
+        results.push(json!({"action":step.name(),"agent":step.agent(),"ok":success,"phase":if stop_unconfirmed {"stop_not_confirmed"} else {"handler"},"mode":receipt.get("start_mode").or_else(||receipt.get("mode")).cloned().unwrap_or(json!("unknown")),"receipt":public_receipt}));
         if let Step::UnifiedStart { description, .. } = step {
             if let Some(result) = results.last_mut() {
                 result["op"] = receipt.get("op").cloned().unwrap_or(json!(description.op));

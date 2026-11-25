@@ -66,6 +66,7 @@ impl OwnerEpoch {
 pub struct LeaderSessionUuid(String);
 
 impl LeaderSessionUuid {
+    pub(crate) fn new(value: String) -> Self { Self(value) }
     const SEP: char = '\0';
 
     /// `sha256(NUL.join([fp, ws, user, team]).encode("utf-8")).hexdigest()[:32]`。

@@ -57,7 +57,8 @@ pub(super) fn spawn_agents(
 ) -> Result<(Vec<StartedAgent>, Vec<AgentId>), LifecycleError> {
     // E5 解耦:team_dir(角色定义 + profiles 所在)≠ spec_path.parent()(spec 已迁出到 .team/runtime)。
     // 优先取 state.team_dir(角色目录),回落 spec_path.parent()(legacy 同目录布局)。
-    let team_dir_buf = crate::state::persist::load_runtime_state(workspace)
+    let team = runtime_team_key_for_spec(spec_path, spec, session_name);
+    let team_dir_buf = crate::state::projection::select_runtime_state(workspace, Some(&team))
         .ok()
         .and_then(|state| {
             state
@@ -381,7 +382,7 @@ pub(super) fn spawn_agents(
                             .unwrap_or_default(),
                         "provider": provider,
                         "trigger": "launch",
-                        "spec_source_path": agent_id_spec_source_path(workspace, agent_id_raw),
+                        "spec_source_path": agent_id_spec_source_path(workspace, &mcp_team_id, agent_id_raw),
                     }),
                 );
             }
@@ -452,8 +453,8 @@ pub(super) fn spawn_agents(
 /// returns: state 里有 team_dir 时用它下的 agents 目录，否则退到 workspace 下的当前团队目录
 /// ---
 /// 0.5.66 bypass 单源 §2.7:审计事件里角色 md 的 spec 来源路径(尽力解析,失败空串)。
-pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> String {
-    let team_dir = crate::state::persist::load_runtime_state(workspace)
+pub(crate) fn agent_id_spec_source_path(workspace: &Path, team: &str, agent_id: &str) -> String {
+    let team_dir = crate::state::projection::select_runtime_state(workspace, Some(team))
         .ok()
         .and_then(|state| {
             state
@@ -466,7 +467,7 @@ pub(crate) fn agent_id_spec_source_path(workspace: &Path, agent_id: &str) -> Str
         .map(|dir| dir.join("agents").join(format!("{agent_id}.md")))
         .unwrap_or_else(|| {
             workspace
-                .join(".team/current/agents")
+                .join(".team/start-source").join(team).join("agents")
                 .join(format!("{agent_id}.md"))
         })
         .display()

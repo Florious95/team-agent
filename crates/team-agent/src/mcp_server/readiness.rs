@@ -413,16 +413,32 @@ fn validate_receipt(
         .ok_or("mcp_handshake_carrier_missing")?;
     let carrier_birth =
         process_birth_identity(carrier).map_err(|_| "mcp_handshake_carrier_missing")?;
-    if sample_process(&receipt.server) != ProcessState::Alive {
-        return Err("mcp_handshake_server_not_live");
+    if sample_process(&receipt.server) != ProcessState::Alive { return Err("mcp_handshake_server_not_live"); }
+    if !live_server_descends_from(&receipt, carrier) {
+        return Err("mcp_handshake_ancestry");
     }
+    Ok(Admission { server: receipt.server })
+}
+
+/// Disaster recovery, not a send prerequisite. The seat-specific journal and
+/// the live server's verified process ancestry must agree on this exact pane.
+pub(crate) fn scoped_carrier(workspace: &Path, owner: &str, agent: &str, carrier: u32) -> bool {
+    receipt_paths(workspace, owner, agent).unwrap_or_default().iter().any(|p| {
+        let Some(receipt) = read_json(p, true).ok().and_then(|v| serde_json::from_value::<Handshake>(v).ok()) else { return false };
+        receipt.schema == 1 && receipt.workspace == workspace && receipt.owner == owner && receipt.agent == agent
+            && live_server_descends_from(&receipt, carrier)
+    })
+}
+
+fn live_server_descends_from(receipt: &Handshake, carrier: u32) -> bool {
+    if sample_process(&receipt.server) != ProcessState::Alive { return false; }
     let mut parent = receipt.server.parent;
     let mut matched = false;
     for ancestor in receipt.ancestors.iter().take(MAX_NATIVE_PARENT_HOPS) {
         if ancestor.pid != parent
             || process_birth_identity(parent).ok().as_deref() != Some(ancestor.birth.as_str())
         {
-            return Err("mcp_handshake_ancestry");
+            return false;
         }
         if parent == carrier {
             matched = true;
@@ -430,12 +446,7 @@ fn validate_receipt(
         }
         parent = crate::platform::argv::parent_pid(parent).unwrap_or(0);
     }
-    if !matched || sample_process(&receipt.server) != ProcessState::Alive {
-        return Err("mcp_handshake_ancestry");
-    }
-    Ok(Admission {
-        server: receipt.server,
-    })
+    matched && sample_process(&receipt.server) == ProcessState::Alive
 }
 
 // Test construction stays in the MCP process-evidence owner, not messaging.

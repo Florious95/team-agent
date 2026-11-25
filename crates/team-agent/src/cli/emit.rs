@@ -36,6 +36,11 @@ fn emit_with_json_order(
                     serde_json::to_string_pretty(&sort_json(&value)).ok()
                 };
             }
+            if value["stored"] == true && value["live"] == false && value.get("delivery_error").is_some() {
+                let recipient = value["recipient"].as_str().unwrap_or("recipient");
+                return Some(format!("stored in inbox only — NOT delivered live: {}\nNext Action: check {recipient}'s status, then start it if stopped and explicitly resend if still needed.",
+                    human_value(&value["delivery_error"])));
+            }
             if let Value::Object(obj) = value {
                 let lines: Vec<String> = obj
                     .iter()
@@ -1325,6 +1330,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     if normalized.deprecation.is_some() {
         eprintln!("Warning: legacy send settings are deprecated. Use team-agent send <agent> 'task message'; add --mailbox for storage without injection.");
     }
+    let team = parsed.team.or_else(|| crate::state::selector::calling_leader_team(&workspace));
     Ok(SendArgs {
         target,
         message: parsed
@@ -1335,7 +1341,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
             .collect(),
         targets: parsed.targets,
         workspace,
-        team: parsed.team,
+        team,
         task: parsed.task,
         sender,
         no_ack: false,

@@ -43,6 +43,7 @@ use super::{
 pub(crate) struct PreparedLeaderStart {
     plan: LeaderStartPlan,
     ambient_authority: Option<VerifiedAmbientPaneAuthority>,
+    reservation: Option<crate::state::persist::RuntimeLock>,
 }
 
 #[derive(Clone, Copy)]
@@ -91,6 +92,12 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
         } else {
             managed_launcher_ambient_route(provider, provider_args, workspace, allow_nested_attach)?
         };
+    // Allocate before rendering argv/MCP; serialize cold starts until the
+    // first receiver exists, then release the reservation before attaching.
+    let independent = !explicit_external_path && !managed_exec_provider;
+    let reservation = if independent {
+        Some(crate::state::persist::reserve_leader_launch(workspace).map_err(LeaderError::from)?)
+    } else { None };
     let plan = leader_start_plan_with_ambient_authority(
         provider,
         provider_args,
@@ -103,10 +110,12 @@ pub(crate) fn prepare_leader_start_with_nested_attach(
         managed_client_attach_mode,
         managed_exec_provider,
         allow_nested_attach,
+        independent,
     )?;
     Ok(PreparedLeaderStart {
         plan,
         ambient_authority,
+        reservation,
     })
 }
 
@@ -138,6 +147,7 @@ pub(crate) fn leader_start_plan_after_ambient_authority_check(
         managed_client_attach_mode,
         false,
         false,
+        false,
     )
 }
 
@@ -153,6 +163,7 @@ fn leader_start_plan_with_ambient_authority(
     managed_client_attach_mode: Option<ManagedClientAttachMode>,
     managed_exec_provider: bool,
     allow_nested_attach: bool,
+    independent: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -177,8 +188,30 @@ fn leader_start_plan_with_ambient_authority(
     if !state.is_object() {
         return Err(LeaderError::Start("runtime state must be a JSON object".into()));
     }
+    let bound = managed_exec_provider.then(|| crate::state::selector::calling_leader_team(workspace)).flatten();
+    let projected = bound.as_ref().map(|team| crate::state::projection::project_top_level_view(&state, team));
+    let mut identity = leader_identity_context(workspace, bound.as_deref(), Some(projected.as_ref().unwrap_or(&state)))?;
+    if independent {
+        let raw = &state;
+        let teams = raw.get("teams").and_then(serde_json::Value::as_object);
+        let first_key = teams.filter(|t| t.len() == 1 && !t.contains_key("current"))
+            .and_then(|t| t.keys().next()).map(String::as_str).unwrap_or("current");
+        let primary = teams.and_then(|t| t.get(first_key)).unwrap_or(raw);
+        let owner_live = primary["team_owner"]["pane_id"].is_string()
+            && super::lease::observed_bound_leader_live(primary)? != Some(false);
+        let (uuid, team) = loop {
+            let uuid = crate::station::seat_store::random_instance().map_err(LeaderError::Start)?;
+            if !owner_live && !first_key.starts_with("leader-") {
+                break (uuid, first_key.to_owned());
+            }
+            let team = format!("leader-{}", &uuid[..16]);
+            if !teams.is_some_and(|rows| rows.contains_key(&team)) { break (uuid, team); }
+        };
+        identity.team_id = crate::model::ids::TeamKey::new(team);
+        identity.leader_session_uuid = crate::model::ids::LeaderSessionUuid::new(uuid);
+        identity.leader_session_uuid_source = super::LeaderSessionUuidSource::Generated;
+    }
     let state = Some(state);
-    let identity = leader_identity_context(workspace, None, state.as_ref())?;
     let external_path = external_leader
         || attach_existing
         || attach_session.is_some()
@@ -244,18 +277,23 @@ fn leader_start_plan_with_ambient_authority(
     };
     let mut pi_routed_argv = None;
     let mut session_capture = None;
+    let leader_mcp_config = || -> Result<crate::provider::McpConfig, LeaderError> {
+        let config = adapter.mcp_config(crate::model::enums::AuthMode::Subscription)
+            .map_err(|e| LeaderError::Start(e.to_string()))?;
+        let team = identity.team_id.as_str();
+        let mut config = crate::lifecycle::launch::resolve_mcp_config(config, workspace, "leader", team);
+        let env = &mut config.raw["team_orchestrator"]["env"];
+        env["TEAM_AGENT_TEAM_ID"] = serde_json::json!(team);
+        env["TEAM_AGENT_OWNER_TEAM_ID"] = serde_json::json!(team);
+        env["TEAM_AGENT_ID"] = serde_json::json!("leader");
+        env["TEAM_AGENT_WORKSPACE"] = serde_json::json!(workspace);
+        env["TEAM_AGENT_MCP_LEADER_UUID"] = serde_json::json!(identity.leader_session_uuid.as_str());
+        Ok(config)
+    };
     let mut provider_argv = if provider == Provider::Pi && mode != LeaderStartMode::AttachExisting {
         let parsed = crate::lifecycle::launch::pi_mcp::parse_pi_leader_args(provider_args)
             .map_err(|error| LeaderError::Start(error.to_string()))?;
-        let mcp_config = adapter
-            .mcp_config(crate::model::enums::AuthMode::Subscription)
-            .map_err(|error| LeaderError::Start(error.to_string()))?;
-        let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
-            mcp_config,
-            workspace,
-            "leader",
-            identity.team_id.as_str(),
-        );
+        let mcp_config = leader_mcp_config()?;
         let contract = crate::lifecycle::worker_command_context::compile_pi_leader_system_prompt();
         let prompt = if let Some(stored) = configured_prompt.as_ref() {
             // Read route once and validate conflicts before creating any Pi MCP artifacts.
@@ -316,6 +354,26 @@ fn leader_start_plan_with_ambient_authority(
             }
             if let Some(stored) = configured_prompt.as_ref() {
                 super::prompt::inject(provider, &mut provider_argv, &stored.text, &stored.path)?;
+            }
+        }
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode | Provider::Codex) {
+            let config = leader_mcp_config()?;
+            let server = &config.raw["team_orchestrator"];
+            if provider == Provider::Codex {
+                let mut overrides = Vec::new();
+                for field in ["command", "args"] {
+                    overrides.extend(["-c".to_string(), format!("mcp_servers.team_orchestrator.{field}={}", server[field])]);
+                }
+                if let Some(env) = server["env"].as_object() {
+                    for (key,value) in env {
+                        overrides.extend(["-c".to_string(), format!("mcp_servers.team_orchestrator.env.{key}={value}")]);
+                    }
+                }
+                provider_argv.splice(1..1, overrides);
+            } else {
+                // Claude accepts inline JSON as one argv item. Planning needn't
+                // write a file, and a concurrent launch can't replace this binding.
+                provider_argv.splice(1..1, ["--mcp-config".into(), serde_json::json!({"mcpServers":config.raw}).to_string()]);
             }
         }
     }
@@ -400,9 +458,14 @@ pub(crate) fn leader_env_for_identity(
 }
 
 pub(crate) fn execute_prepared_leader_start(
-    prepared: &PreparedLeaderStart,
+    prepared: &mut PreparedLeaderStart,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
+    let reservation = prepared.reservation.take();
+    if reservation.is_some() && matches!(prepared.plan.mode, LeaderStartMode::ManagedTmuxClient | LeaderStartMode::NewTmuxSession) {
+        return execute_managed_leader_plan_attempt(&prepared.plan, workspace, true, reservation);
+    }
+    drop(reservation);
     execute_leader_plan_after_ambient_authority(
         &prepared.plan,
         workspace,
@@ -1046,13 +1109,14 @@ fn execute_managed_leader_plan(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
-    execute_managed_leader_plan_attempt(plan, workspace, true)
+    execute_managed_leader_plan_attempt(plan, workspace, true, None)
 }
 
 fn execute_managed_leader_plan_attempt(
     plan: &LeaderStartPlan,
     workspace: &Path,
     allow_attach_recovery: bool,
+    reservation: Option<crate::state::persist::RuntimeLock>,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
     let Some(session) = plan.session_name.as_ref() else {
         return Err(LeaderError::Start(
@@ -1112,6 +1176,7 @@ fn execute_managed_leader_plan_attempt(
             return Err(error);
         }
     };
+    drop(reservation);
     spawn_managed_provider_startup_prompt_handler(
         plan.provider,
         workspace.to_path_buf(),
@@ -1177,7 +1242,7 @@ fn execute_managed_leader_plan_attempt(
         let failure = LeaderError::Start(leader_launcher_failure(&process));
         if allow_attach_recovery {
             if let Ok(retry_plan) = managed_leader_attach_recovery_plan(plan, workspace) {
-                return execute_managed_leader_plan_attempt(&retry_plan, workspace, false);
+                return execute_managed_leader_plan_attempt(&retry_plan, workspace, false, None);
             }
         }
         return Err(failure);
@@ -1347,6 +1412,11 @@ fn clear_managed_leader_receiver_pane(workspace: &Path, pane_id: &str) {
                 if apply_clear_to_leader_receiver(recv, pane_id) {
                     changed = true;
                 }
+            }
+            // Dedicated launch owners are historical identity, not a delivery
+            // endpoint. Detach the receiver but retain the exact owner tuple.
+            if team_obj.get("team_key").and_then(serde_json::Value::as_str).is_some_and(|k| k.starts_with("leader-")) {
+                continue;
             }
             if let Some(owner) = team_obj
                 .get_mut("team_owner")

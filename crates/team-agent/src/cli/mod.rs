@@ -153,7 +153,7 @@ pub mod lifecycle_port {
             .attach_session
             .as_ref()
             .map(|name| crate::transport::SessionName::new(name.clone()));
-        let prepared = match crate::leader::start::prepare_leader_start_with_nested_attach(
+        let mut prepared = match crate::leader::start::prepare_leader_start_with_nested_attach(
             provider,
             provider_args,
             cwd,
@@ -174,7 +174,7 @@ pub mod lifecycle_port {
                 return Err(CliError::Runtime(error.to_string()));
             }
         };
-        let outcome = match crate::leader::start::execute_prepared_leader_start(&prepared, cwd) {
+        let outcome = match crate::leader::start::execute_prepared_leader_start(&mut prepared, cwd) {
             Ok(outcome) => outcome,
             Err(crate::leader::LeaderError::Prompt(error)) => return Ok(error.report()),
             Err(error) => return Err(CliError::Runtime(error.to_string())),
@@ -1712,23 +1712,34 @@ pub mod lifecycle_port {
         let mut protected = shutdown_protection_set(&entry_table);
         extend_protection_with_leader_panes(&mut protected, transport, &state, &entry_table);
         extend_protection_with_native_failures(&mut protected, &native_receipts, transport, &entry_table);
-        let protected = protected;
         let reap_scope = if team.is_some() {
             ShutdownReapScope::ScopedTeam
         } else {
             ShutdownReapScope::Workspace
         };
         deadline.check("process_roots")?;
+        let panes = transport.list_targets();
+        let owned = session_name.as_ref().zip(panes.as_ref().ok()).is_some_and(|(session, targets)|
+            session_ownership(&run_workspace, &state, transport, session, targets) == SessionOwnership::Owned);
+        let scoped = matches!(reap_scope, ShutdownReapScope::ScopedTeam);
+        if scoped { protect_sibling_carriers(&mut protected, &state, &entry_table); }
+        // Whole-session ownership and process-tree ownership are separate:
+        // an unregistered shell in an owned session is not a process root.
+        let mut process_protection = protected.clone();
+        if scoped {
+            protect_unverified_panes(&mut process_protection, &state, &entry_table, panes.as_deref().unwrap_or_default(), owned);
+        }
         let mut root_pids = state_process_roots(&state, reap_scope)
             .into_iter()
-            .filter(|pid| !protected.contains_pid(*pid))
+            .filter(|pid| (!scoped || panes.is_ok()) && !process_protection.contains_pid(*pid))
             .collect::<Vec<_>>();
         let pane_pids = session_name
             .as_ref()
+            .filter(|_| owned)
             .map(|session| {
-                pane_pids_for_session(transport, session)
+                pane_pids_for_session(panes.as_deref().unwrap_or_default(), session)
                     .into_iter()
-                    .filter(|pid| !protected.contains_pid(*pid))
+                    .filter(|pid| !process_protection.contains_pid(*pid))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -1742,7 +1753,7 @@ pub mod lifecycle_port {
             &state,
             reap_scope,
             &root_pids,
-            &protected,
+            &process_protection,
             &entry_table,
             &process_event_log,
         );
@@ -1898,6 +1909,7 @@ pub mod lifecycle_port {
             reap_scope,
             &mut probe_degraded,
             &native_receipts,
+            &process_protection,
         );
         if team.is_none() {
             deadline.check("shared_socket_cleanup")?;
@@ -1966,7 +1978,7 @@ pub mod lifecycle_port {
             &run_workspace,
             &state,
             &root_pids,
-            &protected,
+            &process_protection,
             reap_scope,
             &verify_table,
         );
@@ -2668,13 +2680,10 @@ pub mod lifecycle_port {
     }
 
     fn pane_pids_for_session(
-        transport: &dyn crate::transport::Transport,
+        panes: &[crate::transport::PaneInfo],
         session: &crate::transport::SessionName,
     ) -> Vec<u32> {
-        transport
-            .list_targets()
-            .unwrap_or_default()
-            .into_iter()
+        panes.iter()
             .filter(|pane| pane.session.as_str() == session.as_str())
             .filter_map(|pane| pane.pane_pid)
             .collect()
@@ -2936,10 +2945,19 @@ pub mod lifecycle_port {
         scope: ShutdownReapScope,
         probe_degraded: &mut bool,
         native_receipts: &[Value],
+        entry_protection: &ShutdownProtection,
     ) {
         for _ in 0..5 {
             let round_table = shutdown_table_snapshot(workspace, probe_degraded, "residual_round");
             let mut protected = shutdown_protection_set(&round_table);
+            protected.pids.extend(entry_protection.pids.iter().copied());
+            protected.pgids.extend(entry_protection.pgids.iter().copied());
+            if matches!(scope, ShutdownReapScope::ScopedTeam) {
+                let Ok(panes) = transport.list_targets() else { return };
+                let owned = state["session_name"].as_str().is_some_and(|name| session_ownership(
+                    workspace, state, transport, &crate::transport::SessionName::new(name), &panes) == SessionOwnership::Owned);
+                protect_unverified_panes(&mut protected, state, &round_table, &panes, owned);
+            }
             extend_protection_with_leader_panes(&mut protected, transport, state, &round_table);
             extend_protection_with_native_failures(&mut protected, native_receipts, transport, &round_table);
             let residuals =
@@ -3351,6 +3369,33 @@ pub mod lifecycle_port {
             {
                 out.insert(socket.to_string());
             }
+        }
+    }
+
+    // A workspace cwd is not a team boundary. Protect every observed pane
+    // tree without both the native session marker and a matching seat carrier.
+    fn protect_sibling_carriers(protected: &mut ShutdownProtection, state: &Value, table: &[ProcessInfo]) {
+        let team = crate::state::projection::team_state_key(state);
+        for (_, peer) in state["teams"].as_object().into_iter().flatten().filter(|(key,_)| *key != &team) {
+            for row in peer["agents"].as_object().into_iter().flat_map(|rows| rows.values()) {
+                if let Some(pid) = crate::lifecycle::carrier::pane_pid(row) {
+                    extend_protection_with_process_root(protected, pid, table);
+                }
+            }
+        }
+    }
+
+    fn protect_unverified_panes(
+        protected: &mut ShutdownProtection, state: &Value, table: &[ProcessInfo],
+        panes: &[crate::transport::PaneInfo], session_owned: bool,
+    ) {
+        for pane in panes {
+            let Some(pid) = pane.pane_pid else { continue };
+            let own = session_owned && state["session_name"] == pane.session.as_str()
+                && state["agents"].as_object().is_some_and(|rows| rows.values().any(|row|
+                    row["pane_id"] == pane.pane_id.as_str() && crate::lifecycle::carrier::pane_pid(row) == Some(pid)
+                    && crate::lifecycle::carrier::observe(row, pid).state == crate::lifecycle::carrier::CarrierState::Possible));
+            if !own { extend_protection_with_process_root(protected, pid, table); }
         }
     }
 

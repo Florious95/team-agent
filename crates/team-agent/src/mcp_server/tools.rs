@@ -45,6 +45,8 @@ pub struct TeamOrchestratorTools {
     agent_id: Option<AgentId>,
     /// `TEAM_AGENT_OWNER_TEAM_ID` — the scope anchor (`None` → legacy single-team).
     owner_team_id: Option<TeamKey>,
+    /// Present only in a managed leader's per-launch MCP declaration.
+    leader_uuid: Option<String>,
 }
 
 impl TeamOrchestratorTools {
@@ -59,7 +61,11 @@ impl TeamOrchestratorTools {
             .ok()
             .and_then(|s| non_empty_string(&s).map(ToString::to_string))
             .map(TeamKey::new);
-        Self::with_identity(workspace, agent_id, owner_team_id)
+        let mut tools = Self::with_identity(workspace, agent_id, owner_team_id);
+        if tools.agent_id.as_ref().is_some_and(|id| id.as_str() == "leader") {
+            tools.leader_uuid = std::env::var("TEAM_AGENT_MCP_LEADER_UUID").ok().filter(|s| !s.is_empty());
+        }
+        tools
     }
 
     /// Test/explicit-injection constructor: bind identity/scope directly instead of
@@ -73,6 +79,7 @@ impl TeamOrchestratorTools {
             workspace: std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
             agent_id,
             owner_team_id,
+            leader_uuid: None,
         }
     }
 
@@ -195,10 +202,9 @@ impl TeamOrchestratorTools {
         let normalized = crate::messaging::presentation::normalize_send_presentation(mailbox, presentation)
             .map_err(tool_runtime_error)?;
         let sender = self.require_captured_identity("send_message")?.as_str();
-        // A leader's MCP server may predate the teams it creates or adopts. Like
-        // native CLI send, resolve its targets at call time instead of freezing
-        // it into a worker seat in the launch team.
-        let owner_team = if sender == "leader" { None } else { self.canonical_owner_team_key()? };
+        // Keep explicit qualified leader addresses, but resolve bare names in
+        // the captured team. An old unbound server still uses legacy addressing.
+        let owner_team = if sender == "leader" && self.leader_uuid.is_none() { None } else { self.canonical_owner_team_key()? };
         // Source metadata must not turn the leader's native addressing into a
         // seat scope or prevent sends when its launch team is no longer present.
         let leader_source = self.owner_team_id.as_ref().filter(|_| sender == "leader")
@@ -445,6 +451,15 @@ impl TeamOrchestratorTools {
         // through state::projection::resolve_owner_team_id to the runtime team key.
         // Unresolved/ambiguous owner scope emits mcp.scope_refused; never fallback
         // to active/top-level/sibling teams in a multi-team state.
+        if let Some(expected) = &self.leader_uuid {
+            let owner = self.owner_team_id.as_ref().ok_or_else(|| self.scope_refused("managed leader team missing"))?;
+            let state = crate::direct_delivery::snapshot(&self.workspace).map_err(|e| self.scope_unverifiable(&e))?;
+            let receiver = &state["teams"][owner.as_str()]["leader_receiver"];
+            if receiver["leader_session_uuid"].as_str() != Some(expected.as_str()) || receiver["status"] != "attached" {
+                return Err(self.scope_refused("managed leader binding changed"));
+            }
+            return Ok(Some(owner.clone()));
+        }
         let state = crate::direct_delivery::owner_scope_snapshot(&self.workspace,
             self.owner_team_id.as_ref().map(TeamKey::as_str))
             .map_err(|error| self.scope_unverifiable(&error))?;
