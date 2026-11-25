@@ -29,6 +29,8 @@
 //!   peer leader's provider has exited.
 //!   This also holds after the leader has stopped its own team (its registry entry is gone):
 //!   it never falls back to the top-level peer team for claim, status or start (r23).
+//! - M1.4 (live run #4 finding): concurrent bare starts from two leaders each stay in their own
+//!   team: own tmux session, own start-source, own `session_name`, and a state row equal to the live pane (r24).
 //! - K1: a stored-only send keeps its exit-0 JSON contract and says so in plain text.
 //! - K2: every leader provider gets a per-launch team MCP binding; inherited identity is
 //!   scrubbed.
@@ -1429,4 +1431,93 @@ fn r23_after_its_own_team_stop_a_leader_never_falls_back_to_the_exited_peer_team
     assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
     assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's commands must not touch the peer team's worker {}", w2.id);
     assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
+}
+
+// ───────────────────────────── RED: concurrent starts from two leaders (live run #4 finding) ─────────────────────────────
+
+/// Live run #4 (c05c4606): L2's bare `start bravo` and L1's bare `start alpha` overlapped. L1's
+/// alpha kept its row in `teams.current`, but it was spawned in the PEER's tmux session from the
+/// peer's start-source, and `teams.current.session_name` was overwritten with the peer's session.
+/// L1's own worker then became unobservable (`stop worker` failed with "unknown physical
+/// identity"). Probe p02 reproduced it hermetically: concurrent bare starts left
+/// `teams.current.session_name` empty or set to a leader session, spawned workers into that leader
+/// session, and some starts failed.
+#[test]
+fn r24_concurrent_bare_starts_from_two_leaders_stay_in_their_own_team_session_and_start_source() {
+    let rig = Rig::new("r24");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    let start_bypass = |leader: &Leader, agent: &str| {
+        rig.as_leader(leader, &["start", agent, "--provider", "fake", "--model", "fake", "--bypass", "true", "--json"])
+    };
+    let mut bad: Vec<String> = Vec::new();
+    for round in 0..3 {
+        let pair = [(l1.clone(), "current".to_string(), format!("a{round}")), (l2.clone(), t2.clone(), format!("b{round}"))];
+        let barrier = std::sync::Barrier::new(2);
+        let outs: Vec<Out> = std::thread::scope(|s| {
+            let handles: Vec<_> = pair.iter().map(|(leader, _, agent)| {
+                let barrier = &barrier;
+                let start_bypass = &start_bypass;
+                s.spawn(move || {
+                    barrier.wait();
+                    start_bypass(leader, agent)
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for ((_, team, agent), out) in pair.iter().zip(&outs) {
+            let body = serde_json::from_str::<Value>(out.stdout.trim()).unwrap_or(Value::Null);
+            if out.code != 0 || body["ok"] != json!(true) || body["scope"]["team"].as_str() != Some(team.as_str()) {
+                bad.push(format!("round {round}: {team}/{agent}: concurrent bare start must succeed in its own team: exit={} body={body}", out.code));
+            }
+        }
+        for (leader, team, agent) in &pair {
+            let marker = format!("TEAM_AGENT_FAKE_READY agent={agent}");
+            let mut pane = None;
+            wait_until(&format!("{team}/{agent} ready in its own session"), SETTLE, || {
+                pane = rig.agent_pane(&leader.socket, team, agent).filter(|p| rig.pane_text(&leader.socket, &p.id).contains(&marker));
+                pane.is_some()
+            });
+            let elsewhere: Vec<String> = rig.panes(&leader.socket).into_iter()
+                .filter(|p| p.window == *agent && !p.session.ends_with(&format!("-{team}"))).map(|p| p.session).collect();
+            let row = rig.row(team, agent);
+            match &pane {
+                None => bad.push(format!("round {round}: {team}/{agent}: no live ready pane in a `-{team}` session; panes elsewhere={elsewhere:?} row={row}")),
+                Some(p) if row["pane_id"].as_str() != Some(p.id.as_str()) =>
+                    bad.push(format!("round {round}: {team}/{agent}: state row names {} but the live pane is {}", row["pane_id"], p.id)),
+                Some(_) => {}
+            }
+            if !elsewhere.is_empty() {
+                bad.push(format!("round {round}: {team}/{agent}: a window was spawned outside its own team session: {elsewhere:?}"));
+            }
+        }
+        let state = rig.state();
+        for team in ["current", t2.as_str()] {
+            let session = state["teams"][team]["session_name"].as_str().unwrap_or_default();
+            if !session.ends_with(&format!("-{team}")) || session.starts_with("team-agent-leader-") {
+                bad.push(format!("round {round}: teams.{team}.session_name must stay that team's own worker session, got {session:?}"));
+            }
+        }
+    }
+    for e in rig.events() {
+        let agent = e["agent_id"].as_str().unwrap_or_default();
+        let team = if agent.starts_with('a') && agent.len() == 2 { "current" } else if agent.starts_with('b') && agent.len() == 2 { t2.as_str() } else { continue };
+        if e["event"] == "worker.spawn_dangerously_skip_permissions" {
+            let path = e["spec_source_path"].as_str().unwrap_or_default();
+            if !path.is_empty() && !path.contains(&format!("/start-source/{team}/")) {
+                bad.push(format!("{team}/{agent}: bypass spec_source_path names another team's start-source: {path}"));
+            }
+        }
+        if e["event"] == "start_agent.agent_start" {
+            if let Some(session) = e["session"].as_str() {
+                if !session.ends_with(&format!("-{team}")) {
+                    bad.push(format!("{team}/{agent}: start_agent.agent_start session is not the team's own session: {session}"));
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(),
+        "M1.4/D4: concurrent bare starts from two leaders must each stay in their own team (own tmux session, own \
+         start-source, own session_name, state row = live pane); live run #4 on c05c4606 spawned L1's seat in the peer's \
+         session and overwrote teams.current.session_name:\n{}", bad.join("\n"));
 }
