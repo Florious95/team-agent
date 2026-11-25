@@ -584,6 +584,19 @@ fn persist_runtime_state_with_merge_options_and_expected(
         }
     }
     if let Some(latest) = latest.as_ref() {
+        // A scoped lifecycle/lease writer cannot replace an independently
+        // advancing canonical sibling with a pre-lock snapshot. Leave legacy
+        // aliases to the existing compatibility merge.
+        if let Some(team) = topology_update_team_key.or(receiver_update_team_key) {
+            if let (Some(rows), Some(on_disk)) = (migrated.get_mut("teams").and_then(Value::as_object_mut),
+                latest["teams"].as_object()) {
+                for (key, entry) in on_disk {
+                    if key != team && entry["team_key"].as_str() == Some(key.as_str()) {
+                        rows.insert(key.clone(), entry.clone());
+                    }
+                }
+            }
+        }
         let deleted = deleted_agent_ids
             .iter()
             .copied()

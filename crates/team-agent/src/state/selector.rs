@@ -41,6 +41,42 @@ pub(crate) fn calling_leader_team(workspace: &Path) -> Option<String> {
     crate::direct_delivery::leader_directory_for_ancestors(workspace)?.team
 }
 
+/// Shutdown removes delivery capability, not the identity of the invoking
+/// leader. Keep this lifecycle-only: retained ownership never authorizes send.
+pub(crate) fn lifecycle_caller_team(workspace: &Path) -> Result<Option<String>, StateError> {
+    if let Some(team) = calling_leader_team(workspace) { return Ok(Some(team)); }
+    if std::env::var_os("TEAM_AGENT_ID").is_some() { return Ok(None); }
+    let workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|error| StateError::TeamSelect(error.to_string()))?;
+    if !runtime_state_path(&workspace).is_file() { return Ok(None); }
+    let state = crate::state::persist::load_runtime_state_without_migrations(&workspace)?;
+    let socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let pane = std::env::var("TMUX_PANE").ok();
+    let uuid = std::env::var("TEAM_AGENT_LEADER_SESSION_UUID").ok().filter(|s| !s.is_empty());
+    let launch_workspace = std::env::var_os("TEAM_AGENT_WORKSPACE").and_then(|p| std::fs::canonicalize(p).ok());
+    let mut retained = None;
+    for (key, row) in state["teams"].as_object().into_iter().flatten() {
+        let owner = &row["team_owner"];
+        if row["status"] != "shutdown" || !owner.is_object() { continue; }
+        let same_pane = pane.as_deref().zip(owner["pane_id"].as_str()).is_some_and(|(a,b)| a == b)
+            && socket.as_deref().zip(owner["tmux_socket"].as_str()).is_some_and(|(a,b)| crate::topology::same_endpoint(a,b));
+        let same_launch = uuid.as_deref().zip(owner["leader_session_uuid"].as_str()).is_some_and(|(a,b)| a == b)
+            && launch_workspace.as_ref() == Some(&workspace);
+        if same_launch && (same_pane || pane.is_none()) { return Ok(Some(key.clone())); }
+        if same_pane && uuid.is_none() {
+            // Legacy callers lack a launch UUID. Pin the routing scope only;
+            // the normal owner gate still decides whether the command is allowed.
+            if retained.replace(key.clone()).is_some() {
+                return Err(StateError::TeamSelect("stopped leader pane has ambiguous team scope".into()));
+            }
+        }
+    }
+    if uuid.is_some() && launch_workspace.as_ref() == Some(&workspace) {
+        return Err(StateError::TeamSelect("leader scope could not be verified; no team selected".into()));
+    }
+    Ok(retained)
+}
+
 pub fn resolve_active_team(
     input: &Path,
     team: Option<&str>,

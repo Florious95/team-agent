@@ -346,7 +346,7 @@ fn run_canonical(command: &str, args: &[String], cwd: &Path) -> Result<CmdResult
     // Pin the physical caller before any claim, recovery or migration. A bare
     // selector would otherwise address the last writer's root projection.
     let caller_team = if !intent.pinned_workspace || crate::state::persist::runtime_state_path(&intent.workspace).is_file() {
-        crate::state::selector::calling_leader_team(&intent.workspace)
+        crate::state::selector::lifecycle_caller_team(&intent.workspace)?
     } else {
         None
     };

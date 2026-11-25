@@ -368,21 +368,9 @@ pub(super) fn annotate_persisted_team_depth(
     parent_team_key: Option<&str>,
     team_depth: u64,
 ) -> Result<(), LifecycleError> {
-    let mut state = crate::state::persist::load_runtime_state(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let Some(team) = state
-        .get_mut("teams")
-        .and_then(serde_json::Value::as_object_mut)
-        .and_then(|teams| teams.get_mut(team_key))
-    else {
-        return Ok(());
-    };
-    annotate_team_depth(team, parent_team_key, team_depth);
     crate::state::repository::StateRepository::new(workspace)
-        .save(
-            crate::state::repository::StateWriteIntent::AnnotateTeamDepth,
-            &state,
-        )
+        .commit(crate::state::repository::StateWriteIntent::AnnotateTeamDepth { team_key },
+            |team| annotate_team_depth(team, parent_team_key, team_depth))
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
 }

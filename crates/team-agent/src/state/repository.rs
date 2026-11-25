@@ -134,7 +134,8 @@ impl<'a> StateRepository<'a> {
                 _ => (Vec::new(), None),
             };
         let team_key = match intent {
-            StateWriteIntent::ForkAgent { team_key, .. }
+            StateWriteIntent::AnnotateTeamDepth { team_key }
+            | StateWriteIntent::ForkAgent { team_key, .. }
             | StateWriteIntent::StartAgent { team_key, .. }
             | StateWriteIntent::RestartTeam { team_key, .. } => Some(team_key),
             _ => {
@@ -286,7 +287,7 @@ pub enum StateWriteIntent<'a> {
         team_key: &'a str,
         agent_id: &'a str,
     },
-    AnnotateTeamDepth,
+    AnnotateTeamDepth { team_key: &'a str },
     ShutdownTeam {
         team_key: Option<&'a str>,
         clean: bool,
@@ -375,7 +376,19 @@ fn route_direct(
     match intent {
         // LaunchTeam -> the launch writer path uses the root helper today
         // (`save_runtime_state` at lifecycle/launch.rs:996).
-        StateWriteIntent::LaunchTeam => helper_write_root(workspace, state),
+        StateWriteIntent::LaunchTeam => {
+            if let Some(team) = state["team_key"].as_str().filter(|key| state["teams"][*key].is_object()) {
+                // Publish the selected launch as the compatibility root; all
+                // siblings come from the lock-held workspace, never this snapshot.
+                super::persist::update_runtime_state(workspace, |latest| {
+                    let mut launched = state.clone();
+                    let mut teams = latest["teams"].as_object().cloned().unwrap_or_default();
+                    teams.insert(team.to_owned(), state["teams"][team].clone());
+                    launched["teams"] = Value::Object(teams);
+                    Ok(launched)
+                }).map(|_| ())
+            } else { helper_write_root(workspace, state) }
+        },
         StateWriteIntent::AddAgent { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
@@ -385,7 +398,7 @@ fn route_direct(
             )
         }
         // AnnotateTeamDepth also lives on the root save path.
-        StateWriteIntent::AnnotateTeamDepth => helper_write_root(workspace, state),
+        StateWriteIntent::AnnotateTeamDepth { .. } => Err(StateError::SaveFailed("team depth requires a bounded delta".into())),
         // ShutdownTeam: scoped clean shutdown uses `save_team_scoped_state`;
         // bare (non-scoped) shutdown uses `save_runtime_state`. The
         // `team_key` presence encodes the same clean-vs-bare split as the
