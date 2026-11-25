@@ -24,6 +24,9 @@
 //! - D5: a bare relaunch after a leader exit is a new leader and a new team. It never
 //!   hijacks the old one.
 //! - D6: a split-brain projection is repaired by `start` without replaying stored history.
+//! - D7 (live run #3 finding): a leader's bare lifecycle commands never claim, register or
+//!   unregister a peer team, and never touch its owner, receiver or workers, even after the
+//!   peer leader's provider has exited.
 //! - K1: a stored-only send keeps its exit-0 JSON contract and says so in plain text.
 //! - K2: every leader provider gets a per-launch team MCP binding; inherited identity is
 //!   scrubbed.
@@ -1277,4 +1280,88 @@ fn r21_worker_spawn_never_inherits_the_leader_pi_session_identity() {
             assert!(!env.contains(value), "M2.10: worker process {pid} inherited the leader's Pi identity ({value})");
         }
     }
+}
+
+// ───────────────────────────── RED: cross-team claim hazard (live run #3 finding) ─────────────────────────────
+
+/// Leader-receiver, claim and leader-registry audit events that name `team`
+/// (by `team_id`, `team_key`, `team`, or the registry file path `..__<team>.json`).
+fn receiver_events_for(events: &[Value], team: &str) -> Vec<Value> {
+    let suffix = format!("__{team}.json");
+    events.iter().filter(|e| {
+        let name = e["event"].as_str().unwrap_or_default();
+        let names_team = ["team_id", "team_key", "team"].iter().any(|k| e[*k].as_str() == Some(team))
+            || e["path"].as_str().is_some_and(|p| p.ends_with(&suffix));
+        names_team && (name.starts_with("leader_receiver.") || name.starts_with("leader_registry.") || name.contains("claim"))
+    }).cloned().collect()
+}
+
+fn events_since(rig: &Rig, mark: usize) -> Vec<Value> {
+    rig.events().into_iter().skip(mark).collect()
+}
+
+fn registry_entries(rig: &Rig, team: &str) -> BTreeMap<String, String> {
+    let suffix = format!("__{team}.json");
+    fs::read_dir(rig.home.join(".team-agent/leaders")).into_iter().flatten().flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)))
+        .map(|p| (p.display().to_string(), fs::read_to_string(&p).unwrap_or_default()))
+        .collect()
+}
+
+/// Live run #3 (c59f5f46): every bare `start`/`stop` from one leader evaluated a leader claim on
+/// the PEER team (`leader_receiver.claim_refused reason=previous_owner_alive_refused`, team_id =
+/// peer, new_pane_id = caller). It was refused only because the peer leader was alive. Phase B
+/// repeats it after the peer leader's provider has exited (GraphEngineering `%100` shape) while
+/// its team's worker is still up, where a stray claim would no longer be refused.
+#[test]
+fn r22_lifecycle_commands_never_claim_or_touch_a_peer_team_whose_leader_exited() {
+    let rig = Rig::new("r22");
+    let (l1, l2) = rig.dual_pi();
+    let t2 = assert_auto_leader_team(&l1, &l2);
+    ok(&rig.start_fake(&l1, "worker", None), "L1 bare start worker");
+    rig.wait_worker_ready(&l1.socket, "current", "worker");
+
+    // Phase 0: L2 (peer of `current`) writes last, so its team becomes the top-level projection.
+    let mark = rig.events().len();
+    ok(&rig.start_fake(&l2, "w2", None), "L2 bare start w2");
+    let w2 = rig.wait_worker_ready(&l2.socket, &t2, "w2");
+    let phase0 = receiver_events_for(&events_since(&rig, mark), "current");
+
+    // Phase A: both leaders alive; L1 acts on its own team.
+    let mark = rig.events().len();
+    let start = ok(&rig.start_fake(&l1, "helper", None), "D7: L1 bare start helper");
+    assert_eq!(start["scope"]["team"], json!("current"), "D7: L1's bare start stays on its own team: {start}");
+    rig.wait_worker_ready(&l1.socket, "current", "helper");
+    let phase_a = receiver_events_for(&events_since(&rig, mark), &t2);
+
+    // Phase B: L2's provider exits while T2's worker stays up; L1 keeps acting on its own team.
+    rig.kill_provider(&l2);
+    wait_until("L2 observed as exited", SETTLE, || {
+        rig.leaders().1.iter().all(|e| e["pane_id"].as_str() != Some(l2.pane.as_str()) || e["status"] != "LIVE")
+    });
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "M6.3: the exit of L2's provider must not kill its team's worker {}", w2.id);
+    let team_before = rig.state()["teams"][&t2].clone();
+    let registry_before = registry_entries(&rig, &t2);
+    let mark = rig.events().len();
+    ok(&rig.as_leader(&l1, &["stop", "helper", "--json"]), "D7: L1 bare stop helper");
+    let team_stop = ok(&rig.as_leader(&l1, &["stop", "--json"]), "D7: L1 bare team stop");
+    assert!(wait_until("L1 team panes gone", SETTLE, || rig.agent_pane(&l1.socket, "current", "worker").is_none()),
+        "D7: L1's bare team stop must stop its own team: {team_stop}");
+    std::thread::sleep(Duration::from_secs(2));
+    let phase_b = receiver_events_for(&events_since(&rig, mark), &t2);
+
+    assert!(phase0.is_empty() && phase_a.is_empty() && phase_b.is_empty(),
+        "D7: a leader's bare lifecycle commands must never evaluate, claim, rebind, register or unregister the PEER \
+         team's leader receiver (live run #3: `leader_receiver.claim_refused` team_id=<peer> new_pane_id=<caller> on every \
+         start/stop):\n  L2 start -> events naming `current`: {phase0:?}\n  L1 start, peer alive -> events naming {t2}: \
+         {phase_a:?}\n  L1 stop + team stop, peer exited -> events naming {t2}: {phase_b:?}");
+    let team_after = rig.state()["teams"][&t2].clone();
+    assert_eq!(team_after["team_owner"], team_before["team_owner"],
+        "D7: the exited peer's team_owner must stay unchanged (no cross-team claim)");
+    assert_eq!(team_after["leader_receiver"], team_before["leader_receiver"],
+        "D7: the exited peer's leader_receiver must stay unchanged");
+    assert_eq!(registry_entries(&rig, &t2), registry_before, "D7: the peer team's leader registry entry must stay unchanged");
+    assert!(rig.pane_alive(&l2.socket, &w2.id), "D7: L1's lifecycle commands must not touch the peer team's worker {}", w2.id);
+    assert_eq!(rig.row(&t2, "w2")["status"], json!("running"), "D7: the peer team's worker row stays running: {}", rig.row(&t2, "w2"));
 }
