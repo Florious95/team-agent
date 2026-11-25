@@ -492,6 +492,28 @@ fn send_one(
             return Ok(result);
         }
     };
+    let text = if framing == Framing::Bare { req.content.to_owned() }
+        else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
+    // Presence of leader_receiver alone predates the native protocol. It is
+    // not a capability: a running pre-upgrade Pi must still receive via tmux.
+    let observe_sender = || {
+        let local = match authority {
+            Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
+                && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
+            _ => String::new(),
+        };
+        crate::provider::session::capture::observe_physical_delivery(
+            &directory.workspace, directory.team.as_deref(), &directory.state, &local, recipient,
+        )
+    };
+    if let Some((receiver, dir)) = pi_native_receiver(directory, recipient) {
+        if let Err(error) = pi_leader_delivery(directory, receiver, &dir, &submission, &stored, &text, &mut result) {
+            result["delivery_error"] = json!(error);
+        } else if result["accepted"] == true {
+            if let Err(error) = observe_sender() { result["session_observation_warning"] = json!(error); }
+        }
+        return Ok(result);
+    }
     result["submission"] = json!(submission.phase);
     if submission.phase != "not_attempted" {
         if framing == Framing::Bare {
@@ -507,8 +529,6 @@ fn send_one(
         result["delivery_error"] = json!(error);
         return Ok(result);
     }
-    let text = if framing == Framing::Bare { req.content.to_owned() }
-        else { render(&sender_label(sender, origin.as_ref().map(|(ws, team)| (ws.as_path(), team.as_str())), &directory.workspace, directory.team.as_deref()), req.content, id, req.envelope.is_some()) };
     match directory.send_with_framing(recipient, &text, framing, || {
         if req.envelope.is_none() {
             if let Some(task) = req.task_id {
@@ -527,16 +547,9 @@ fn send_one(
             result["live"] = json!(true);
             result["delivery"] = json!("physical");
             result["submission"] = json!("physical");
-            let observed_sender = match authority {
-                Authority::Seat { team, .. } if directory.team.as_deref() == Some(team)
-                    && same_workspace(req.workspace, &directory.workspace) => sender_in_directory(authority, directory),
-                _ => String::new(),
-            };
             if framing == Framing::Bare {
                 result["session_binding"] = json!("not_reobserved");
-            } else if let Err(error) = crate::provider::session::capture::observe_physical_delivery(
-                &directory.workspace, directory.team.as_deref(), &directory.state, &observed_sender, recipient,
-            ) {
+            } else if let Err(error) = observe_sender() {
                 result["session_observation_warning"] = json!(error);
             }
             for key in ["pane_id", "dialect"] {
@@ -600,6 +613,75 @@ mod retry_tests {
         let stored = crate::inbox_store::store(&root, "worker", &record).unwrap();
         assert_eq!(Submission::lock(&root, "worker", Some("team"), &stored).unwrap().phase, "unknown");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn pi_native_receiver<'a>(directory: &'a crate::direct_delivery::Directory, recipient: &str) -> Option<(&'a Value, std::path::PathBuf)> {
+    if recipient != "leader" { return None; }
+    let receiver = directory.state.get("leader_receiver")?;
+    if receiver["provider"] != "pi" || receiver["status"] != "attached" { return None; }
+    let team = directory.team.as_deref()?;
+    let owner = receiver["leader_session_uuid"].as_str().filter(|v| !v.is_empty())?;
+    let dir = crate::lifecycle::launch::pi_mcp::pi_seat_paths(&directory.workspace, team, "leader").runtime_root
+        .join(format!("native-{:x}", Sha256::digest(owner.as_bytes())));
+    let capability = dir.join("capability.json");
+    let cap = super::seat_store::read_json(&capability, 4096).ok()??;
+    let patch = cap["version"].as_str()?.strip_prefix("1.6.")?;
+    let pid = u32::try_from(cap["pid"].as_u64()?).ok().filter(|v| *v > 0 && *v <= i32::MAX as u32)?;
+    if patch.is_empty() || !patch.bytes().all(|b| b.is_ascii_digit()) || (patch.len() > 1 && patch.starts_with('0'))
+        || cap["protocol"] != 1 || cap["owner"] != owner || cap["epoch"].as_u64()? == 0
+        || cap["epoch"] != receiver["owner_epoch"] || cap["pane"].as_str()? != receiver["pane_id"].as_str()?
+        || cap["carrierBirth"].as_str()? != receiver["pane_birth_identity"].as_str()? { return None; }
+    // A reused PID isn't the Pi that advertised this capability. Require a
+    // live process born before registration, under the original pane carrier.
+    use crate::lifecycle::carrier;
+    let stamped: chrono::DateTime<chrono::Utc> = capability.metadata().ok()?.modified().ok()?.into();
+    let pane = carrier::pane_pid(receiver)?;
+    if carrier::process_started_at(pid)? > stamped
+        || carrier::birth_identity(pane)? != receiver["pane_birth_identity"].as_str()?
+        || (pid != pane && !crate::platform::process::process_tree(pane).ok()?.contains(&pid)) { return None; }
+    Some((receiver, dir))
+}
+
+// The inbox is authoritative. This private spool is only the handoff to the Pi
+// instance which owns the addressed seat. A timeout is not permission to replay.
+fn pi_leader_delivery(directory: &crate::direct_delivery::Directory, receiver: &Value, dir: &Path, submission: &Submission,
+    stored: &crate::inbox_store::StoredRecord, text: &str, result: &mut Value) -> Result<(), String> {
+    let key = format!("{:020}-{:x}", stored.reference.seq, Sha256::digest(stored.reference.token().as_bytes()));
+    let id = &stored.record["message_id"];
+    result["submission"] = json!(submission.phase);
+    if submission.phase != "not_attempted" && submission.phase != "native_pending" { return Ok(()); }
+    if submission.phase == "not_attempted" {
+        if stored.record["envelope"].is_null() {
+            if let Some(task) = stored.record["task_id"].as_str() {
+                remember_task(directory, "leader", task, id.as_str().ok_or("missing message ID")?)?;
+            }
+        }
+        submission.save("native_pending")?;
+        super::seat_store::write_json(&dir.join(format!("{key}.ready")), &json!({
+            "id":id, "text":text, "epoch":receiver["owner_epoch"], "pane":receiver["pane_id"]
+        }), 512 * 1024)?;
+    }
+    result["submission"] = json!("native_pending");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let ack = dir.join("accepted").join(&key);
+    loop {
+        if let Some(proof) = super::seat_store::read_json(&ack, 4096)? {
+            if proof["id"] != *id || proof["entry"].as_str().is_none() { return Err("invalid pi receipt".into()); }
+            result["accepted"] = json!(true);
+            result["live"] = json!(true);
+            result["status"] = json!(if stored.record["kind"] == "result" { "reported" } else { "sent" });
+            result["submission"] = json!("accepted");
+            result["delivery"] = json!("native");
+            return Ok(());
+        }
+        if dir.join(format!("{key}.uncertain")).try_exists().map_err(|e| e.to_string())? {
+            result["submission"] = json!("uncertain");
+            result["retry_allowed"] = json!(false);
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline { return Ok(()); }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
