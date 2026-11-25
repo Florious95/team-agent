@@ -588,6 +588,16 @@ fn persist_runtime_state_with_merge_options_and_expected(
         // advancing canonical sibling with a pre-lock snapshot. Leave legacy
         // aliases to the existing compatibility merge.
         if let Some(team) = topology_update_team_key.or(receiver_update_team_key) {
+            let root_key = team_state_key(&migrated);
+            if root_key != team && latest["teams"][&root_key]["team_key"] == root_key
+                && migrated["teams"][team]["team_key"] == team
+            {
+                // This writer submitted a sibling's old root mirror along
+                // with its own team. Rebase only its team on the lock-held
+                // document; neither the sibling roster nor primary may revert.
+                migrated = super::projection::merge_committed_team(latest, &migrated["teams"][team], team);
+                crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut migrated);
+            }
             if let (Some(rows), Some(on_disk)) = (migrated.get_mut("teams").and_then(Value::as_object_mut),
                 latest["teams"].as_object()) {
                 for (key, entry) in on_disk {
