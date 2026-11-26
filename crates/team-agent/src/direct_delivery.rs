@@ -481,7 +481,7 @@ impl Directory {
                     let team = self.team.as_deref().ok_or("target_not_ready")?;
                     let ready = crate::lifecycle::launch::pi_mcp::pi_runtime_root(&self.workspace, team, agent)
                         .join("editor-submit-ready");
-                    wait_for_pi_editor(&ready, expected, deadline)?;
+                    wait_for_pi_editor(&ready, expected, &endpoint, deadline)?;
                 }
                 self.verify_endpoint_with_client(agent, &endpoint, deadline, &mut client)
             }).map_err(|error| {
@@ -512,7 +512,9 @@ pub(crate) fn leader_target_is_sender(
         && sender_socket.is_some_and(|socket| crate::topology::same_endpoint(socket, &target.socket))
 }
 
-fn wait_for_pi_editor(path: &Path, generation: &str, deadline: Instant) -> Result<(), String> {
+fn wait_for_pi_editor(path: &Path, generation: &str, endpoint: &Endpoint, deadline: Instant) -> Result<(), String> {
+    let start = Instant::now();
+    let mut health_after = Duration::from_secs(2);
     let mut pause = Duration::from_millis(25);
     while Instant::now() < deadline {
         match std::fs::read(path) {
@@ -520,6 +522,12 @@ fn wait_for_pi_editor(path: &Path, generation: &str, deadline: Instant) -> Resul
             Ok(_) => {} // Previous incarnation.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => break,
+        }
+        // The shell can outlive a crashed Pi. Its tmux option records the exit.
+        // No hot probe; at most four display-message calls (2, 6, 14, 30s).
+        if start.elapsed() >= health_after {
+            pane_identity(&endpoint.socket, &endpoint.pane_id, deadline)?;
+            health_after = health_after * 2 + Duration::from_secs(2);
         }
         std::thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
         pause = (pause * 2).min(Duration::from_millis(500));
