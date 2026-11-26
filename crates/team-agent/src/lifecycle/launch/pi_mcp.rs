@@ -75,13 +75,12 @@ pub(crate) fn pi_cleanup_plan(action: PiCleanupAction, paths: &PiSeatPaths) -> P
 /// purpose: 计算一个 Pi 席位唯一的 Team-owned runtime 路径
 /// returns: runtime root、wrapper 与 sessions 路径
 /// ---
+pub(crate) fn pi_runtime_root(workspace: &Path, team_id: &str, agent_id: &str) -> PathBuf {
+    workspace.join(".team/runtime/pi").join(team_id).join(agent_id)
+}
+
 pub(crate) fn pi_seat_paths(workspace: &Path, team_id: &str, agent_id: &str) -> PiSeatPaths {
-    let runtime_root = workspace
-        .join(".team")
-        .join("runtime")
-        .join("pi")
-        .join(team_id)
-        .join(agent_id);
+    let runtime_root = pi_runtime_root(workspace, team_id, agent_id);
     let workspace = workspace
         .canonicalize()
         .unwrap_or_else(|_| workspace.to_path_buf());
@@ -274,7 +273,7 @@ fn candidate_from_mcp_config(config: &McpConfig) -> Result<PathBuf, ProviderErro
     Ok(command)
 }
 
-fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderError> {
+fn render_pi_wrapper(request: &PiWrapperRequest<'_>, editor_generation: Option<&str>) -> Result<String, ProviderError> {
     let allowed = request.include_tools.iter().copied().collect::<BTreeSet<_>>();
     if allowed.is_empty()
         || allowed.len() != request.include_tools.len()
@@ -298,6 +297,9 @@ fn render_pi_wrapper(request: &PiWrapperRequest<'_>) -> Result<String, ProviderE
         )));
     }
     let mut server = team_server(request.mcp_config)?;
+    if let Some(generation) = editor_generation {
+        server.insert("editorSubmitGeneration".into(), generation.into());
+    }
     server.insert(
         "command".to_string(),
         serde_json::Value::String(expected.to_string_lossy().into_owned()),
@@ -391,15 +393,25 @@ pub(crate) fn validate_pi_wrapper_source(
 /// returns: 最终 wrapper 路径
 /// errors: identity、序列化、目录、写盘或 rename 失败时返回 ProviderError
 /// ---
+#[cfg(test)]
 pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf, ProviderError> {
     write_pi_wrapper_with_publish(request, |from, to| std::fs::rename(from, to))
 }
 
+#[cfg(test)]
 pub(crate) fn write_pi_wrapper_with_publish(
     request: PiWrapperRequest<'_>,
     publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<PathBuf, ProviderError> {
-    let source = render_pi_wrapper(&request)?;
+    write_pi_wrapper_for_launch(request, None, publish)
+}
+
+fn write_pi_wrapper_for_launch(
+    request: PiWrapperRequest<'_>,
+    editor_generation: Option<&str>,
+    publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<PathBuf, ProviderError> {
+    let source = render_pi_wrapper(&request, editor_generation)?;
     validate_pi_wrapper_source(&source, request.candidate_executable)?;
     let parent = request.destination.parent().ok_or_else(|| {
         ProviderError::Io("Pi wrapper destination has no parent directory".to_string())
@@ -754,7 +766,7 @@ fn materialize_pi_plan_with_session(
     request: PiMaterializeRequest<'_>,
     resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
-    let (_chain, catalog) = resolve_pi_executable_chain()?;
+    let (chain, catalog) = resolve_pi_executable_chain()?;
     let model = request
         .model
         .map(|model| select_exact_pi_model(&catalog, model))
@@ -817,7 +829,15 @@ fn materialize_pi_plan_with_session(
         None
     };
     let candidate = candidate_from_mcp_config(request.mcp_config)?;
-    let wrapper = write_pi_wrapper(PiWrapperRequest {
+    // Only Pi 1.6's stable hosts have this verified editor/session_start ordering.
+    // A resumed Pi can keep its native session UUID across distinct launches.
+    let pi_16 = chain.pi_version.strip_prefix("1.6.").is_some_and(|patch| {
+        !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit())
+            && (patch == "0" || !patch.starts_with('0'))
+    });
+    let pi_editor_generation = (request.agent_id != "leader" && pi_16)
+        .then(crate::provider::adapter::next_session_token);
+    let wrapper = write_pi_wrapper_for_launch(PiWrapperRequest {
         destination: &paths.wrapper,
         candidate_executable: &candidate,
         mcp_config: request.mcp_config,
@@ -825,7 +845,7 @@ fn materialize_pi_plan_with_session(
         agent_id: request.agent_id,
         workspace: request.workspace,
         include_tools: request.team_mcp_tools,
-    })?;
+    }, pi_editor_generation.as_deref(), |from, to| std::fs::rename(from, to))?;
     let (argv, expected_session_id) = if let Some((_session_id, exact_path)) = resume {
         let argv = build_pi_command_argv(PiCommandRequest {
             extension: &wrapper,
@@ -858,5 +878,6 @@ fn materialize_pi_plan_with_session(
         expected_session_id,
         provider_projects_root: session_dir.map(Path::to_path_buf),
         managed_mcp_config: false,
+        pi_editor_generation,
     })
 }

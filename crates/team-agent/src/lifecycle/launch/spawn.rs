@@ -432,6 +432,7 @@ pub(super) fn spawn_agents(
                 .clone()
                 .or_else(|| profile_launch.claude_projects_root.clone()),
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
+            pi_editor_generation: plan.pi_editor_generation,
         });
         if has_contract && contract_started.is_empty() && started.len() == 1 {
             // A native seat following the first legacy seat must be able to

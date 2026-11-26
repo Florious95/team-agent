@@ -263,6 +263,7 @@ pub struct StartedAgent {
     pub claude_config_dir: Option<PathBuf>,
     pub provider_projects_root: Option<PathBuf>,
     pub managed_mcp_config: bool,
+    pub pi_editor_generation: Option<String>,
 }
 
 /// 路由决策(`routing.decision` 事件 / launch `routes[]`)。

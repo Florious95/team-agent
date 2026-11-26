@@ -29,6 +29,7 @@ serial-envelope-fidelity = { max-threads = 1 }
 serial-doctor-comms = { max-threads = 1 }
 serial-msgroute-rm = { max-threads = 1 }
 serial-stage3-excision = { max-threads = 1 }
+serial-pi-worker-startup = { max-threads = 1 }
 
 [profile.default]
 retries = 0
@@ -94,6 +95,10 @@ test-group = 'serial-msgroute-rm'
 [[profile.default.overrides]]
 filter = 'binary(=stage3_excision_red)'
 test-group = 'serial-stage3-excision'
+
+[[profile.default.overrides]]
+filter = 'binary(=pi_worker_startup_ready_red)'
+test-group = 'serial-pi-worker-startup'
 
 # Parallel tier: everything outside the exclusive set.
 [profile.ci]

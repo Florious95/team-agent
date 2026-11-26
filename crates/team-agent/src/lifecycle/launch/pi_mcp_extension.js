@@ -6,6 +6,10 @@ import { createInterface } from "node:readline";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// Launch metadata is private to this extension, not an MCP registration option.
+const editorSubmitGeneration = teamMcpDefinition.editorSubmitGeneration;
+delete teamMcpDefinition.editorSubmitGeneration;
+
 // The sender atomically publishes a ready record only after storing the inbox
 // entry. Do not touch the editor or Pi's steer/follow-up queues, even if a run
 // starts between isIdle() and prompt preflight: omitting deliverAs fails closed.
@@ -254,6 +258,14 @@ export default function teamAgentMcp(pi) {
     if (starting || backend || failure || stopped) return;
     starting = true;
     try {
+      // Pi installs the real editor submit handler before emitting session_start.
+      // Do not wait for MCP: discovery may be unavailable on a healthy input surface.
+      if (editorSubmitGeneration) {
+        const ready = join(teamMcpReceiptRoot, "editor-submit-ready");
+        const temp = `${ready}.${editorSubmitGeneration}.tmp`;
+        writeFileSync(temp, editorSubmitGeneration, { flag: "wx", mode: 0o600 });
+        renameSync(temp, ready);
+      }
       publish("ExecutableCatalogReady");
       const native = typeof pi.registerMcpServer === "function" && typeof pi.unregisterMcpServer === "function";
       const commands = typeof pi.getCommands === "function" ? pi.getCommands() : [];

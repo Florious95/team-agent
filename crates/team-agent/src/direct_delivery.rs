@@ -465,14 +465,23 @@ impl Directory {
             else { info.get("pane_pid").or_else(|| info.get("pid")).or_else(|| info.get("native_pid")) };
         let expected_pid = expected_pid.and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
             .and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0);
-        // Send is physical tmux delivery. Peer startup/MCP evidence is diagnostic,
-        // never a precondition for pasting into a live, identity-verified pane.
+        // Only newly managed Pi workers advertise this per-launch editor contract.
+        // Older seats and other providers retain physical-only delivery.
+        let mut generation = info["pi_editor_generation"].as_str().filter(|_| {
+            agent != "leader" && framing == Framing::Framed && info["provider"] == "pi"
+        });
         direct_send_checked(&endpoint.socket, &endpoint.pane_id, &endpoint.dialect, text, expected_pid, true, framing, submitted,
             |deadline| {
                 if agent == "leader" && leader_target_is_sender(&endpoint,
                     crate::tmux_backend::socket_name_from_tmux_env().as_deref(),
                     std::env::var("TMUX_PANE").ok().as_deref()) {
                     return Err("leader_identity_self_collision: target is the sender's own pane".into());
+                }
+                if let Some(expected) = generation.take() {
+                    let team = self.team.as_deref().ok_or("target_not_ready")?;
+                    let ready = crate::lifecycle::launch::pi_mcp::pi_runtime_root(&self.workspace, team, agent)
+                        .join("editor-submit-ready");
+                    wait_for_pi_editor(&ready, expected, &endpoint, deadline)?;
                 }
                 self.verify_endpoint_with_client(agent, &endpoint, deadline, &mut client)
             }).map_err(|error| {
@@ -501,6 +510,29 @@ pub(crate) fn leader_target_is_sender(
 ) -> bool {
     sender_pane == Some(target.pane_id.as_str())
         && sender_socket.is_some_and(|socket| crate::topology::same_endpoint(socket, &target.socket))
+}
+
+fn wait_for_pi_editor(path: &Path, generation: &str, endpoint: &Endpoint, deadline: Instant) -> Result<(), String> {
+    let start = Instant::now();
+    let mut health_after = Duration::from_secs(2);
+    let mut pause = Duration::from_millis(25);
+    while Instant::now() < deadline {
+        match std::fs::read(path) {
+            Ok(bytes) if bytes == generation.as_bytes() => return Ok(()),
+            Ok(_) => {} // Previous incarnation.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => break,
+        }
+        // The shell can outlive a crashed Pi. Its tmux option records the exit.
+        // No hot probe; at most four display-message calls (2, 6, 14, 30s).
+        if start.elapsed() >= health_after {
+            pane_identity(&endpoint.socket, &endpoint.pane_id, deadline)?;
+            health_after = health_after * 2 + Duration::from_secs(2);
+        }
+        std::thread::sleep(pause.min(deadline.saturating_duration_since(Instant::now())));
+        pause = (pause * 2).min(Duration::from_millis(500));
+    }
+    Err("target_not_ready".into())
 }
 
 fn canonical_dialect(name: &str) -> String {

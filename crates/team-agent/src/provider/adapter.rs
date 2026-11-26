@@ -394,6 +394,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     expected_session_id: Some(SessionId::new(expected)),
                     provider_projects_root: projects_root,
                     managed_mcp_config: managed,
+                    pi_editor_generation: None,
                 })
             }
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
@@ -417,6 +418,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     expected_session_id: Some(SessionId::new(expected)),
                     provider_projects_root: None,
                     managed_mcp_config: false,
+                    pi_editor_generation: None,
                 })
             }
             Provider::Codex | Provider::Grok => {
@@ -719,6 +721,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     expected_session_id: Some(SessionId::new(expected)),
                     provider_projects_root: projects_root,
                     managed_mcp_config: managed,
+                    pi_editor_generation: None,
                 })
             }
             Provider::Copilot => {
@@ -764,6 +767,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     expected_session_id: Some(expected),
                     provider_projects_root: Some(root),
                     managed_mcp_config: profile.managed_mcp_config,
+                    pi_editor_generation: None,
                 })
             }
             _ => self

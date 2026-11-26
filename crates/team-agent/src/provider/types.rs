@@ -205,6 +205,8 @@ pub struct CommandPlan {
     pub expected_session_id: Option<SessionId>,
     pub provider_projects_root: Option<PathBuf>,
     pub managed_mcp_config: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pi_editor_generation: Option<String>,
 }
 
 impl CommandPlan {
@@ -214,6 +216,7 @@ impl CommandPlan {
             expected_session_id: None,
             provider_projects_root: None,
             managed_mcp_config: false,
+            pi_editor_generation: None,
         }
     }
 }
