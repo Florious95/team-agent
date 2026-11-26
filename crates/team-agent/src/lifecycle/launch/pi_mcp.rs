@@ -766,7 +766,7 @@ fn materialize_pi_plan_with_session(
     request: PiMaterializeRequest<'_>,
     resume: Option<(&SessionId, &Path, &Path)>,
 ) -> Result<CommandPlan, ProviderError> {
-    let (_chain, catalog) = resolve_pi_executable_chain()?;
+    let (chain, catalog) = resolve_pi_executable_chain()?;
     let model = request
         .model
         .map(|model| select_exact_pi_model(&catalog, model))
@@ -829,8 +829,14 @@ fn materialize_pi_plan_with_session(
         None
     };
     let candidate = candidate_from_mcp_config(request.mcp_config)?;
+    // Only Pi 1.6's stable hosts have this verified editor/session_start ordering.
     // A resumed Pi can keep its native session UUID across distinct launches.
-    let pi_editor_generation = (request.agent_id != "leader").then(crate::provider::adapter::next_session_token);
+    let pi_16 = chain.pi_version.strip_prefix("1.6.").is_some_and(|patch| {
+        !patch.is_empty() && patch.bytes().all(|b| b.is_ascii_digit())
+            && (patch == "0" || !patch.starts_with('0'))
+    });
+    let pi_editor_generation = (request.agent_id != "leader" && pi_16)
+        .then(crate::provider::adapter::next_session_token);
     let wrapper = write_pi_wrapper_for_launch(PiWrapperRequest {
         destination: &paths.wrapper,
         candidate_executable: &candidate,
