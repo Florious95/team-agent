@@ -393,10 +393,12 @@ pub(crate) fn validate_pi_wrapper_source(
 /// returns: 最终 wrapper 路径
 /// errors: identity、序列化、目录、写盘或 rename 失败时返回 ProviderError
 /// ---
+#[cfg(test)]
 pub(crate) fn write_pi_wrapper(request: PiWrapperRequest<'_>) -> Result<PathBuf, ProviderError> {
     write_pi_wrapper_with_publish(request, |from, to| std::fs::rename(from, to))
 }
 
+#[cfg(test)]
 pub(crate) fn write_pi_wrapper_with_publish(
     request: PiWrapperRequest<'_>,
     publish: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
