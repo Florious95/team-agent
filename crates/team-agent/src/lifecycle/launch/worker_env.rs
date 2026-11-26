@@ -430,6 +430,9 @@ pub(super) fn persist_started_agent_plan_state(
     state: &mut serde_json::Map<String, serde_json::Value>,
     started_agent: &StartedAgent,
 ) {
+    if let Some(generation) = &started_agent.pi_editor_generation {
+        state.insert("pi_editor_generation".into(), serde_json::json!(generation));
+    }
     if let Some(session_id) = started_agent.pending_session_id.as_ref() {
         state.insert(
             "_pending_session_id".to_string(),
@@ -471,6 +474,11 @@ pub(crate) fn persist_command_plan_state(
     plan: &crate::provider::CommandPlan,
     profile_launch: &crate::provider::ProviderProfileLaunch,
 ) {
+    if let Some(generation) = &plan.pi_editor_generation {
+        state.insert("pi_editor_generation".into(), serde_json::json!(generation));
+    } else {
+        state.remove("pi_editor_generation");
+    }
     if let Some(session_id) = plan.expected_session_id.as_ref() {
         state.insert(
             "_pending_session_id".to_string(),

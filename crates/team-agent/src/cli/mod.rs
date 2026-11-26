@@ -4582,6 +4582,7 @@ pub mod lifecycle_port {
                         claude_config_dir: None,
                         provider_projects_root: None,
                         managed_mcp_config: false,
+                        pi_editor_generation: None,
                     }],
                     contract_started: Vec::new(),
                     dry_run: false,
