@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::enums::Provider;
 
-
-
 /// Carrier birth and framework pane nonce, not a claim of native executable admission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeInputBinding {
@@ -19,11 +17,6 @@ pub struct NativeInputBinding {
     pub window: String,
 }
 
-
-
-
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputFrame {
     pub composer: String,
@@ -33,7 +26,6 @@ pub struct InputFrame {
     pub busy: bool,
     pub capsule: Option<String>,
 }
-
 
 pub(crate) fn supports_input_observation(provider: Provider) -> bool {
     provider == Provider::Pi
@@ -179,7 +171,6 @@ mod tests {
         super::inspect_input(provider, text, 120)
     }
 
-
     #[test]
     fn native_input_pi_requires_editor_and_footer_not_startup_echo() {
         let marker = "[team-agent-token:msg_one]";
@@ -189,12 +180,23 @@ mod tests {
         );
         let frame = inspect_input(Provider::Pi, &draft).unwrap();
         assert!(!frame.composer.trim().is_empty());
-        assert!((frame.composer.lines().map(str::trim).collect::<String>().matches(marker).count() == 1));
+        assert!(
+            (frame
+                .composer
+                .lines()
+                .map(str::trim)
+                .collect::<String>()
+                .matches(marker)
+                .count()
+                == 1)
+        );
         assert!(!frame.busy);
         assert!(inspect_input(Provider::Pi, &format!("Warning: startup\n{marker}")).is_none());
         assert!(inspect_input(Provider::Pi, &pi("", "old history"))
             .unwrap()
-            .composer.trim().is_empty());
+            .composer
+            .trim()
+            .is_empty());
         let busy = pi("draft", "history").replace(
             "──────────────── ↑ 20 more ─ runner-luna ─",
             "── ⠋ Working ─────────────────────",
@@ -212,7 +214,10 @@ mod tests {
     #[test]
     fn native_input_pi_r6_idle_update_notice_preserves_empty_editor() {
         assert_eq!(
-            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(PI_R6_IDLE.as_bytes())),
+            format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(PI_R6_IDLE.as_bytes())
+            ),
             "40f31e7476f628a471113c89b76a1ace0246e69f53fb7238999205f62b5d20fa"
         );
         let frame = super::inspect_input(Provider::Pi, PI_R6_IDLE, 24).unwrap();
@@ -230,7 +235,16 @@ mod tests {
         let draft = PI_R6_IDLE.replace(top, &format!(" pi-target ─\nforeign draft\n{marker}\n"));
         let frame = super::inspect_input(Provider::Pi, &draft, 24).unwrap();
         assert!(!frame.composer.trim().is_empty());
-        assert!((frame.composer.lines().map(str::trim).collect::<String>().matches(marker).count() == 1));
+        assert!(
+            (frame
+                .composer
+                .lines()
+                .map(str::trim)
+                .collect::<String>()
+                .matches(marker)
+                .count()
+                == 1)
+        );
         let busy = PI_R6_IDLE.replace(
             "──────────────────────────────────────────────────────────────────── pi-target ─",
             "── ⠋ Working ──────────────────────────────────────────────────────────────────",
@@ -264,14 +278,26 @@ mod tests {
     #[test]
     fn native_input_pi_r7_capsule_is_current_composer_not_history() {
         assert_eq!(
-            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(PI_R7_FOLDED.as_bytes())),
+            format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(PI_R7_FOLDED.as_bytes())
+            ),
             "b7ea6992c3303743b50714fb55ffc8b91ac5ad168e0acd015428ca5af538ed0e"
         );
         let frame = super::inspect_input(Provider::Pi, PI_R7_FOLDED, 24).unwrap();
         assert!(!frame.composer.trim().is_empty());
         assert!(!frame.busy);
         assert_eq!(frame.capsule.as_deref(), Some("[paste #1 +30 lines]"));
-        assert!(!(frame.composer.lines().map(str::trim).collect::<String>().matches("[team-agent-token:msg_one]").count() == 1));
+        assert!(
+            !(frame
+                .composer
+                .lines()
+                .map(str::trim)
+                .collect::<String>()
+                .matches("[team-agent-token:msg_one]")
+                .count()
+                == 1)
+        );
         let history = format!("[paste #1 +30 lines]\n{PI_R6_IDLE}");
         let frame = super::inspect_input(Provider::Pi, &history, 24).unwrap();
         assert!(frame.composer.trim().is_empty());

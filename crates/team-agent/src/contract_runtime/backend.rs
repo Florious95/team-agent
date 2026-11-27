@@ -784,6 +784,10 @@ pub(super) fn observe_activity(binding: &Binding, seat: &SeatRecord) -> Result<O
 }
 
 fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRecord) -> Result<SeatRecord, BackendError> {
+    validate_existing_for(backend, role, record, false)
+}
+
+fn validate_existing_for(backend: &Backend, role: &RoleConfig, record: &OperationRecord, before_stop: bool) -> Result<SeatRecord, BackendError> {
     let current = backend.store.assert_current(&record.target.identity)?;
     if current.evidence_kind != EvidenceKind::Native || current.provider != role.provider
         || current.status == SeatStatus::Unknown
@@ -793,10 +797,13 @@ fn validate_existing(backend: &Backend, role: &RoleConfig, record: &OperationRec
     let target = current.physical.as_ref().ok_or(BackendError::Metadata)?;
     let clock = RealClock::new();
     let deadline = Duration::from_secs(5);
-    let mut host = TmuxHost::restore_owned(target.clone(), current_tmux()?,
-        settings(&backend.binding, registry::provider(current.provider.as_str())?).limits,
-        RealCommandRunner::default(), &clock, deadline)?;
-    host.validate_target(target, &clock, deadline)?;
+    let limits = settings(&backend.binding, registry::provider(current.provider.as_str())?).limits;
+    if before_stop {
+        TmuxHost::preflight_stop(target, current_tmux()?, limits, RealCommandRunner::default(), &clock, deadline)?;
+    } else {
+        let mut host = TmuxHost::restore_owned(target.clone(), current_tmux()?, limits, RealCommandRunner::default(), &clock, deadline)?;
+        host.validate_target(target, &clock, deadline)?;
+    }
     Ok(current)
 }
 
@@ -875,6 +882,10 @@ pub(crate) fn start_needs_reconciliation(workspace: &Path, team: &str, seat: &Se
 
 /// Read-only preflight, reused by the CLI before any role write or stop.
 pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConfig) -> Result<bool, BackendError> {
+    preflight_role(workspace, team, role, false)
+}
+
+pub(crate) fn preflight_role(workspace: &Path, team: &str, role: &RoleConfig, before_stop: bool) -> Result<bool, BackendError> {
     let backend = Backend::open_readonly(workspace, team)?;
     match existing_start(&backend, &role.id)? {
         Some(ExistingStart::Committed(record))
@@ -885,7 +896,7 @@ pub(crate) fn preflight_start_role(workspace: &Path, team: &str, role: &RoleConf
             prepare_resume(workspace, team, &role.id, Some(role))?;
         },
         Some(ExistingStart::FinishReceipt(record)) if record.target.identity.seat != role.id => return Ok(false),
-        Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing(&backend, role, &record)?; },
+        Some(ExistingStart::Committed(record) | ExistingStart::FinishReceipt(record)) => { validate_existing_for(&backend, role, &record, before_stop)?; },
         Some(ExistingStart::Resume(_)) => { prepare_resume(workspace, team, &role.id, Some(role))?; },
         // The mutating start reconciles interrupted work under the seat flock.
         // Read-only preflight must not wedge that path.

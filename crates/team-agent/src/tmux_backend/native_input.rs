@@ -14,7 +14,6 @@ use crate::transport::native_input::{inspect_input, InputFrame, NativeInputBindi
 #[path = "native_input_tests.rs"]
 mod tests;
 
-
 fn refused(reason: &str) -> TransportError {
     TransportError::NativeInputNotReady {
         reason: reason.to_string(),

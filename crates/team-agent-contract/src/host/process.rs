@@ -590,6 +590,15 @@ pub fn sample_spawn_birth(pid: u32, expected_birth: Option<&str>) -> ProcessStat
     }
 }
 
+#[cfg(target_os = "macos")]
+mod darwin_stop;
+
+/// Stronger image proof for a stop actuator; never grants delivery authority.
+#[cfg(target_os = "macos")]
+pub(crate) fn sample_for_stop(expected: &ProcessStamp) -> ProcessState { darwin_stop::sample(expected) }
+#[cfg(not(target_os = "macos"))]
+pub(crate) use sample_process as sample_for_stop;
+
 pub fn sample_process(expected: &ProcessStamp) -> ProcessState {
     #[cfg(unix)]
     {
@@ -650,6 +659,27 @@ mod ancestry_tests {
         stamp.identity.birth_identity = process_birth_identity(pid).unwrap();
         stamp.parent = parent.wrapping_add(1);
         assert_eq!(sample_process(&stamp), ProcessState::Replaced);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stop_requires_same_birth_parent_and_image() {
+        let pid = std::process::id();
+        let (parent, birth, path, _, _) = identity_parts(pid).unwrap();
+        let mut stamp = ProcessStamp {
+            image: image_stamp(&std::fs::metadata(&path).unwrap()), inputs: vec![], parent,
+            identity: ProcessIdentity { pid, birth_identity: birth.clone(), executable: path,
+                executable_sha256: super::super::digest(b"not-used-by-stop") },
+        };
+        assert_eq!(sample_for_stop(&stamp), ProcessState::Alive);
+        stamp.identity.birth_identity.push_str("-reused");
+        assert_eq!(sample_for_stop(&stamp), ProcessState::Replaced);
+        stamp.identity.birth_identity = birth;
+        stamp.parent += 1;
+        assert_eq!(sample_for_stop(&stamp), ProcessState::Replaced);
+        stamp.parent = parent;
+        stamp.image.inode ^= 1;
+        assert_eq!(sample_for_stop(&stamp), ProcessState::Replaced);
     }
 
     #[test]

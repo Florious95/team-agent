@@ -709,8 +709,18 @@ pub(crate) fn preflight(
             )
             .map_err(rejected)?
             .ok_or_else(|| refused("native role is missing from its team declaration"))?;
-            crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
             let row = &selected.state["agents"][request.agent.as_str()];
+            // Discovery runs provider commands. Do not pay their timeout for a
+            // fresh start that cannot displace this incumbent in the first place.
+            if request.session == SessionPolicy::Fresh && row["contract_instance"].is_string()
+                && row["status"] != "stopped" {
+                use super::seat_observation::{observe, SeatObservation};
+                if let observation @ (SeatObservation::NativeReconcile | SeatObservation::Unknown) =
+                    observe(selected, request.agent.as_str(), row)? {
+                    return Err(refused(unverified_start_guidance(request, row, observation)));
+                }
+            }
+            crate::contract_runtime::backend::preflight(&config).map_err(rejected)?;
             if row.is_object()
                 && row["contract_instance"].is_null()
                 && same_provider(
