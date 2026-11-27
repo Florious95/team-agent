@@ -351,8 +351,14 @@ pub fn restore_entry_if_current_matches(
         if receipt.path.parent() != Some(dir) {
             return Err(RegistryRollbackError::InvalidReceipt);
         }
-        let current =
-            std::fs::read(&receipt.path).map_err(|_| RegistryRollbackError::ReadFailed)?;
+        let current = match std::fs::read(&receipt.path) {
+            Ok(bytes) => bytes,
+            // A clean stop can unregister this entry. Do not resurrect its preimage.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RegistryRollback::Superseded);
+            }
+            Err(_) => return Err(RegistryRollbackError::ReadFailed),
+        };
         if current != receipt.bytes {
             return Ok(RegistryRollback::Superseded);
         }
