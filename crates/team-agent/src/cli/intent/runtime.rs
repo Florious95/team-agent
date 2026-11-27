@@ -343,7 +343,11 @@ fn admit_seat_preflight(plan: &mut Plan, id: &str, team: bool, result: Result<()
     }
 }
 
-fn preflight_start(
+fn preflight_start(selected: &SelectedTeam, id: &str, row: &Value, session_policy: SessionPolicy) -> Result<(), CliError> {
+    preflight_transition(selected, id, row, session_policy, false)
+}
+
+fn preflight_transition(
     selected: &SelectedTeam,
     id: &str,
     row: &Value,
@@ -899,7 +903,9 @@ fn plan_with_observer(
                 if !same_provider(provider(row), provider(&compiled)) {
                     return Err(refusal("registered provider cannot change"));
                 }
-                let admission = preflight_start(&selected, &id, row, plan.intent.session, actions.first() == Some(&"stop"));
+                let admission = if actions.first() == Some(&"stop") {
+                    preflight_transition(&selected, &id, row, plan.intent.session, true)
+                } else { preflight_start(&selected, &id, row, plan.intent.session) };
                 if !admit_seat_preflight(&mut plan, &id, team, admission)? {
                     continue;
                 }
