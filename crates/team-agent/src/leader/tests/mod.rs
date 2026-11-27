@@ -96,6 +96,7 @@ mod basics;
 mod byte_findings;
 mod identity;
 mod idle;
+mod issue448_rollback_on_stop_red;
 mod lease_api;
 mod lease_claim;
 mod leader_inception_root_mirror_drift_red;
