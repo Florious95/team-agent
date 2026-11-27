@@ -44,7 +44,11 @@ impl Fixture {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let backend =
             TmuxBackend::with_runner_for_workspace(Box::new(Runner(calls.clone())), &path);
-        Self { path, backend, calls }
+        Self {
+            path,
+            backend,
+            calls,
+        }
     }
 }
 impl Drop for Fixture {
@@ -70,16 +74,26 @@ fn native_input_runtime_endpoint_factory_preserves_workspace_and_native_capabili
                 &f.path,
                 Some(&state),
             );
-        assert_eq!(selection.backend.event_workspace.as_deref(), Some(f.path.as_path()));
-        assert_eq!(selection.tmux_endpoint_used.as_deref(), Some("/tmp/owned-test.sock"));
+        assert_eq!(
+            selection.backend.event_workspace.as_deref(),
+            Some(f.path.as_path())
+        );
+        assert_eq!(
+            selection.tmux_endpoint_used.as_deref(),
+            Some("/tmp/owned-test.sock")
+        );
         // Native observation survives; the injection/acceptance engine does not.
-        let frame = selection.backend.observe_native_input(&target, Provider::Pi)
-            .unwrap().expect("current Pi input observation");
+        let frame = selection
+            .backend
+            .observe_native_input(&target, Provider::Pi)
+            .unwrap()
+            .expect("current Pi input observation");
         assert!(frame.composer.is_empty());
         assert!(!frame.busy);
         let calls = f.calls.lock().unwrap();
         assert_eq!(calls.len(), 3, "binding, capture, binding revalidation");
-        assert!(calls.iter().all(|argv| argv.windows(2)
+        assert!(calls.iter().all(|argv| argv
+            .windows(2)
             .any(|pair| pair == ["-S", "/tmp/owned-test.sock"])));
     }
 }
@@ -91,11 +105,13 @@ fn native_input_required_lock_contention_or_missing_workspace_is_zero_effect() {
         workspace: Some(&f.path),
         target_key: "%1",
         operation: "fixture",
-    }).unwrap();
+    })
+    .unwrap();
     // Retain the current send_keys lock guarantee, not retired inject-only checks.
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            assert!(f.backend
+            assert!(f
+                .backend
                 .send_keys(&Target::Pane(PaneId::new("%1")), &[Key::Enter])
                 .is_err())
         });
