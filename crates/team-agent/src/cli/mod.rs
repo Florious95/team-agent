@@ -2075,12 +2075,12 @@ pub mod lifecycle_port {
             degraded: verification_degraded,
         });
         // A spared or unverified session must retain its live seat registrations.
+        let mut partial_worker_stops = Vec::new();
         if clean_stop { mark_agents_stopped(&mut state); }
         else if !killed_worker_panes.is_empty() {
             // One refused native seat must not erase the outcomes of confirmed
             // sibling closes. Fence both the actual pane/PID effect and its death.
             let key = crate::state::projection::team_state_key(&state);
-            let mut stopped = Vec::new();
             if let Some(agents) = state["agents"].as_object_mut() {
                 for (id, row) in agents {
                     #[cfg(unix)]
@@ -2089,16 +2089,16 @@ pub mod lifecycle_port {
                     if row["pane_id"].as_str().is_some_and(|pane| killed_worker_panes.contains(&(pane.to_owned(), pid)))
                         && crate::lifecycle::carrier::observe(row, pid).state.gone() {
                         row["status"] = json!("stopped");
-                        stopped.push(id.clone());
+                        partial_worker_stops.push(id.clone());
                     }
                 }
             }
-            let ids = stopped.iter().map(String::as_str).collect::<Vec<_>>();
+            let ids = partial_worker_stops.iter().map(String::as_str).collect::<Vec<_>>();
             crate::station::projection::publish(&run_workspace, &mut state, &key, &ids)
                 .map_err(crate::state::StateError::SaveConflict)?;
-            for id in stopped {
-                if state["teams"][&key]["agents"][&id].is_object() {
-                    state["teams"][&key]["agents"][&id] = state["agents"][&id].clone();
+            for id in &partial_worker_stops {
+                if state["teams"][&key]["agents"][id].is_object() {
+                    state["teams"][&key]["agents"][id] = state["agents"][id].clone();
                 }
             }
         }
@@ -2234,6 +2234,9 @@ pub mod lifecycle_port {
                 "stop_reason": coordinator_stop_reason,
             },
         });
+        if !partial_worker_stops.is_empty() {
+            response["effects"] = json!({ "worker_seats_stopped": partial_worker_stops });
+        }
         if !native_receipts.is_empty() {
             response["native_receipts"] = json!(native_receipts);
         }

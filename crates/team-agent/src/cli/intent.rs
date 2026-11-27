@@ -727,10 +727,12 @@ fn execute_plan(
                 .get("worker_panes_started")
                 .and_then(Value::as_array)
                 .is_some_and(|workers| !workers.is_empty());
+            let stopped = effect.get("worker_seats_stopped").and_then(Value::as_array)
+                .is_some_and(|seats| !seats.is_empty());
             let coordinator = effect.get("coordinator_start").and_then(Value::as_str);
-            handler_effect_confirmed |= workers || coordinator == Some("running_confirmed");
+            handler_effect_confirmed |= stopped || workers || coordinator == Some("running_confirmed");
             partial_effect |=
-                workers || matches!(coordinator, Some("running_confirmed" | "attempted_unknown"));
+                stopped || workers || matches!(coordinator, Some("running_confirmed" | "attempted_unknown"));
             effects.push(json!({"action": step.name(), "agent": step.agent(), "effects": effect}));
         }
         let stop_unconfirmed = plan.intent.verb == Verb::Restart
