@@ -53,7 +53,11 @@ impl Drop for OwnedFixtureServer {
 fn case(label: &str, seat: &str, workspace: &str, new_session: bool) {
     let tmux = tmux_binary();
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = PathBuf::from("/tmp").join(format!("tac-naming-{}-{}", std::process::id(), nonce % 1_000_000_000));
+    // Cases run on parallel test threads and the macOS clock has microsecond resolution:
+    // a per-process sequence keeps each case's root (and so its tmux server) distinct.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = PathBuf::from("/tmp").join(format!("tac-naming-{}-{}-{seq}", std::process::id(), nonce % 1_000_000_000));
     let mut identity = owner();
     identity.seat = SeatId::new(seat).unwrap();
     identity.instance = InstanceId::new(format!("naming-{nonce}")).unwrap();
