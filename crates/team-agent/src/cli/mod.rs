@@ -1763,6 +1763,7 @@ pub mod lifecycle_port {
             .or_else(|| (!unverified_carriers.is_empty())
                 .then(|| format!("unverified carrier identity: {}", unverified_carriers.join("; "))));
         let mut killed_sessions = Vec::new();
+        let mut killed_worker_panes = std::collections::BTreeSet::new();
         let mut spared_sessions = Vec::new();
         let mut target_listing_known = false;
         let mut listed_target_gone = false;
@@ -1863,10 +1864,12 @@ pub mod lifecycle_port {
                                 .get_or_insert_with(|| format!("pre-kill audit failed: {error}"));
                             continue;
                         }
-                        if let Err(error) = transport.kill_pane(pane) {
-                            if !tmux_absent_error(&error.to_string()) {
-                                kill_error.get_or_insert_with(|| error.to_string());
-                            }
+                        match transport.kill_pane(pane) {
+                            Ok(()) => if let Some(pid) = live_targets_now.iter().find(|p| p.pane_id == *pane).and_then(|p| p.pane_pid) {
+                                killed_worker_panes.insert((pane.as_str().to_owned(), pid));
+                            },
+                            Err(error) if !tmux_absent_error(&error.to_string()) => { kill_error.get_or_insert_with(|| error.to_string()); },
+                            Err(_) => (),
                         }
                     }
                     cleanup_owned_team_windows(&run_workspace, transport, &state, session, &protected_panes);
@@ -1895,6 +1898,8 @@ pub mod lifecycle_port {
                         }
                     } else {
                         push_unique_session(&mut killed_sessions, session.clone());
+                        killed_worker_panes.extend(live_targets_now.iter().filter(|p| p.session == *session)
+                            .filter_map(|p| Some((p.pane_id.as_str().to_owned(), p.pane_pid?))));
                     }
                     cleanup_owned_team_windows(&run_workspace, transport, &state, session, &protected_panes);
                 }
@@ -2071,6 +2076,32 @@ pub mod lifecycle_port {
         });
         // A spared or unverified session must retain its live seat registrations.
         if clean_stop { mark_agents_stopped(&mut state); }
+        else if !killed_worker_panes.is_empty() {
+            // One refused native seat must not erase the outcomes of confirmed
+            // sibling closes. Fence both the actual pane/PID effect and its death.
+            let key = crate::state::projection::team_state_key(&state);
+            let mut stopped = Vec::new();
+            if let Some(agents) = state["agents"].as_object_mut() {
+                for (id, row) in agents {
+                    #[cfg(unix)]
+                    if crate::contract_runtime::framework::is_contract(row) { continue; }
+                    let Some(pid) = crate::lifecycle::carrier::pane_pid(row) else { continue; };
+                    if row["pane_id"].as_str().is_some_and(|pane| killed_worker_panes.contains(&(pane.to_owned(), pid)))
+                        && crate::lifecycle::carrier::observe(row, pid).state.gone() {
+                        row["status"] = json!("stopped");
+                        stopped.push(id.clone());
+                    }
+                }
+            }
+            let ids = stopped.iter().map(String::as_str).collect::<Vec<_>>();
+            crate::station::projection::publish(&run_workspace, &mut state, &key, &ids)
+                .map_err(crate::state::StateError::SaveConflict)?;
+            for id in stopped {
+                if state["teams"][&key]["agents"][&id].is_object() {
+                    state["teams"][&key]["agents"][&id] = state["agents"][&id].clone();
+                }
+            }
+        }
         restore_native_rows(&mut state);
         let team_shutdown_status = "shutdown";
         deadline.check("save_state")?;

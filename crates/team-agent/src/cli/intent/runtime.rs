@@ -348,6 +348,7 @@ fn preflight_start(
     id: &str,
     row: &Value,
     session_policy: SessionPolicy,
+    before_stop: bool,
 ) -> Result<(), CliError> {
     #[cfg(unix)]
     if crate::contract_runtime::framework::is_contract(row) {
@@ -366,10 +367,11 @@ fn preflight_start(
         if crate::contract_runtime::framework::is_paused_unstarted(row) {
             checked(crate::contract_runtime::backend::preflight(&config))?;
         } else {
-            if checked(crate::contract_runtime::backend::preflight_start_role(
+            if checked(crate::contract_runtime::backend::preflight_role(
                 &selected.run_workspace,
                 &selected.team_key,
                 role,
+                before_stop,
             ))? {
                 checked(crate::contract_runtime::backend::preflight(&config))?;
             }
@@ -897,7 +899,7 @@ fn plan_with_observer(
                 if !same_provider(provider(row), provider(&compiled)) {
                     return Err(refusal("registered provider cannot change"));
                 }
-                let admission = preflight_start(&selected, &id, row, plan.intent.session);
+                let admission = preflight_start(&selected, &id, row, plan.intent.session, actions.first() == Some(&"stop"));
                 if !admit_seat_preflight(&mut plan, &id, team, admission)? {
                     continue;
                 }

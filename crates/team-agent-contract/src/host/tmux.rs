@@ -407,6 +407,7 @@ pub struct TmuxHost<R: CommandRunner> {
     limits: HostLimits,
     runner: R,
     target: Option<TargetReceipt>,
+    stop_scope: bool,
     sequence: u64,
     buffers: BTreeMap<String, PasteMode>,
 }
@@ -458,6 +459,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             limits,
             runner,
             target: None,
+            stop_scope: false,
             sequence: 0,
             buffers: BTreeMap::new(),
         })
@@ -473,6 +475,23 @@ impl<R: CommandRunner> TmuxHost<R> {
         runner: R,
         clock: &dyn Clock,
         deadline: Duration,
+    ) -> Result<Self, HostError> {
+        Self::restore_scoped(target, executable, limits, runner, clock, deadline, false)
+    }
+
+    /// Validate an incumbent before a planned stop without exposing a delivery handle.
+    pub fn preflight_stop(
+        target: &TargetReceipt, executable: PathBuf, limits: HostLimits, runner: R,
+        clock: &dyn Clock, deadline: Duration,
+    ) -> Result<(), HostError> {
+        Self::restore_scoped(target.clone(), executable, limits, runner, clock, deadline, true)?
+            .check_bound(target, clock, deadline, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_scoped(
+        target: TargetReceipt, executable: PathBuf, limits: HostLimits, runner: R,
+        clock: &dyn Clock, deadline: Duration, stop_scope: bool,
     ) -> Result<Self, HostError> {
         let directory = ScopedDirectory::reopen(target.directory.clone())?;
         let mut host = if target.shared_endpoint {
@@ -494,6 +513,7 @@ impl<R: CommandRunner> TmuxHost<R> {
             ));
         }
         host.target = Some(target.clone());
+        host.stop_scope = stop_scope;
         host.check_bound(&target, clock, deadline, false)?;
         Ok(host)
     }
@@ -667,7 +687,8 @@ impl<R: CommandRunner> TmuxHost<R> {
             target.process.identity.pid,
             pane.dead,
             require_alive,
-            || sample_process(&target.process),
+            || if self.stop_scope { super::process::sample_for_stop(&target.process) }
+               else { sample_process(&target.process) },
         )?;
         Ok(pane)
     }

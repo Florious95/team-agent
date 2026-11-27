@@ -142,11 +142,14 @@ impl<'a> PhysicalRuntime<'a> {
     pub fn surface(
         &self,
         seat: &SeatRecord,
-    ) -> Result<(crate::contract::probe::Probe<crate::contract::probe::PaneReadyEvidence>, Digest), Error>
-    {
+    ) -> Result<(crate::contract::probe::Probe<crate::contract::probe::PaneReadyEvidence>, Digest), Error> {
+        self.surface_scoped(seat, false)
+    }
+
+    fn surface_scoped(&self, seat: &SeatRecord, stop: bool) -> Result<(crate::contract::probe::Probe<crate::contract::probe::PaneReadyEvidence>, Digest), Error> {
         let target = self.target(seat)?;
         let deadline = self.deadline()?;
-        let mut host = self.reopen(target, deadline)?;
+        let mut host = self.reopen_scoped(target, deadline, stop)?;
         let capture = host
             .capture(target, self.clock, deadline, self.settings.freshness)
             .map_err(host_error)?;
@@ -271,13 +274,17 @@ impl<'a> PhysicalRuntime<'a> {
         target: &TargetReceipt,
         deadline: Duration,
     ) -> Result<TmuxHost<RealCommandRunner>, Error> {
-        TmuxHost::restore_owned(
+        self.reopen_scoped(target, deadline, false)
+    }
+    fn reopen_scoped(&self, target: &TargetReceipt, deadline: Duration, stop: bool) -> Result<TmuxHost<RealCommandRunner>, Error> {
+        TmuxHost::restore_scoped(
             target.clone(),
             self.settings.tmux.clone(),
             self.settings.limits,
             RealCommandRunner::default(),
             self.clock,
             deadline,
+            stop,
         )
         .map_err(host_error)
     }
@@ -445,7 +452,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
                 self.settings.limits.command_output).map_err(host_error)? {
                 Some("receipt_close_absent_shared_endpoint")
             } else {
-                match self.reopen(&target, deadline) {
+                match self.reopen_scoped(&target, deadline, true) {
                     // Directory/socket ownership fences passed before this
                     // exact query. Never close the shared server or its leader.
                     Err(Error::HostDiagnostic(error)) if error.kind == crate::host::HostErrorKind::PaneAbsent =>
@@ -468,8 +475,8 @@ impl LifecycleHost for PhysicalRuntime<'_> {
             // exit command into a busy/queued composer or add an interrupt key.
             while crate::host::process::sample_process(&target.process) != ProcessState::Exited {
                 if self.clock.now() >= deadline { return Err(Error::StopNoEffect("graceful exit composer not ready".into())); }
-                let ready = self.readiness(seat).map_err(|error| Error::StopNoEffect(format!("graceful exit read-only preflight: {error}")))?;
-                if matches!(ready.pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady) { break; }
+                let (pane, _) = self.surface_scoped(seat, true).map_err(|error| Error::StopNoEffect(format!("graceful exit read-only preflight: {error}")))?;
+                if matches!(pane.outcome, crate::contract::probe::ProbeOutcome::Observed(ref pane) if pane.surface == InputSurface::ComposerReady) { break; }
                 self.clock.sleep(self.settings.limits.poll_interval);
             }
             let result = if crate::host::process::sample_process(&target.process) == ProcessState::Exited {
@@ -491,7 +498,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
                 return Err(Error::Host("graceful native exit not observed"));
             }
         }
-        let mut host = self.reopen(&target, deadline)?;
+        let mut host = self.reopen_scoped(&target, deadline, true)?;
         let receipt = host.close_owned_pane(&target, self.clock, deadline);
         confirm_close(receipt, target.shared_endpoint)?;
         self.quiescent = Some(seat.clone());
@@ -528,7 +535,7 @@ impl LifecycleHost for PhysicalRuntime<'_> {
         // Distinct actions cannot alias; the same uncertain action cannot replay.
         let attempt = AttemptId::new(format!("control-{}-{kind:?}", self.operation.as_str()))?;
         let deadline = self.deadline()?;
-        let mut host = self.reopen(&target, deadline)?;
+        let mut host = self.reopen_scoped(&target, deadline, kind == ControlKind::Exit)?;
         let mut journal = FileJournal::new(
             ScopedDirectory::reopen(target.directory.clone()).map_err(host_error)?,
             self.settings.journal_bytes,
